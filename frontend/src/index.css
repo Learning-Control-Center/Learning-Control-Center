@@ -1,0 +1,109 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Manrope:wght@500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  color: #14211c;
+  background: #f4f1e9;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-width: 320px;
+  min-height: 100%;
+  background: #f4f1e9;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+  overflow-x: hidden;
+  background:
+    radial-gradient(circle at 80% -10%, rgba(116, 168, 140, 0.22), transparent 34rem),
+    linear-gradient(180deg, #f8f6f0 0%, #f1eee5 100%);
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button,
+a,
+input,
+select,
+textarea {
+  outline-offset: 3px;
+}
+
+:focus-visible {
+  outline: 2px solid #326653;
+}
+
+input[type='checkbox'],
+input[type='radio'] {
+  accent-color: #326653;
+}
+
+input[type='number'] {
+  appearance: textfield;
+}
+
+input[type='number']::-webkit-inner-spin-button,
+input[type='number']::-webkit-outer-spin-button {
+  margin: 0;
+  appearance: none;
+}
+
+::selection {
+  color: #fff;
+  background: #326653;
+}
+
+@layer components {
+  .surface {
+    @apply rounded-2xl border border-ink/10 bg-white/75 shadow-soft backdrop-blur-sm;
+  }
+
+  .button-primary {
+    @apply inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-ink px-4 py-2.5 font-semibold text-white transition hover:bg-moss disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .button-secondary {
+    @apply inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-ink/15 bg-white/60 px-4 py-2.5 font-semibold text-ink transition hover:border-moss/40 hover:bg-white disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .field {
+    @apply min-h-11 w-full rounded-xl border border-ink/15 bg-white/80 px-3 py-2.5 text-ink placeholder:text-ink/40 transition focus:border-moss;
+  }
+
+  .eyebrow {
+    @apply font-mono text-[0.72rem] font-semibold uppercase tracking-[0.17em] text-moss;
+  }
+
+  .page-title {
+    @apply font-display text-3xl font-semibold tracking-tight text-ink sm:text-4xl;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
