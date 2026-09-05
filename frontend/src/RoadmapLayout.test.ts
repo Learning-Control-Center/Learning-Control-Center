@@ -4,10 +4,13 @@ import {
   NODE_GAP_Y,
   NODE_HEIGHT,
   PHASE_GAP,
+  clampToContentBounds,
   computeRoadmapLayout,
+  containsPoint,
   mergeLayoutNodes,
   toCanvasPosition,
   toPhaseLocalPosition,
+  usableContentBounds,
   type CompetencyFlowNode,
 } from './components/roadmapLayout'
 import type { Competency, Phase, Roadmap, Track } from './types'
@@ -127,19 +130,76 @@ describe('computeRoadmapLayout', () => {
     expect(collapsed.nodes.some((node) => node.id === 'b')).toBe(false)
   })
 
-  it('honours stored positions verbatim as phase-local coordinates', () => {
+  it('honours a stored position that fits the usable content area', () => {
+    const roadmap = buildRoadmap()
+    roadmap.phases[0].tracks[1].competencies[0].position = { x: 300, y: 202 }
+    const layout = computeRoadmapLayout({ roadmap, expanded: new Set(), onToggleExpand: noop })
+    const position = nodePosition(layout, 'd')
+    expect(position).toEqual({ x: layout.phases[0].origin.x + 300, y: 202 })
+  })
+
+  it.each([
+    ['negative y above the container', { x: 168, y: -40 }],
+    ['overlapping the phase header', { x: 168, y: 20 }],
+    ['inside the track-label gutter', { x: 50, y: 120 }],
+    ['beyond the container right edge', { x: 900, y: 76 }],
+    ['below the container bottom', { x: 168, y: 900 }],
+    ['legacy out-of-bounds value from the live roadmap', { x: 500, y: 300 }],
+  ])('ignores an invalid stored position (%s) and falls back to its slot', (_label, position) => {
+    const roadmap = buildRoadmap()
+    roadmap.phases[0].tracks[0].competencies.find((item) => item.definitionId === 'c')!.position = position
+    const layout = computeRoadmapLayout({ roadmap, expanded: new Set(), onToggleExpand: noop })
+    expect(nodePosition(layout, 'c')).toEqual({ x: layout.phases[0].origin.x + 428, y: 76 })
+  })
+
+  it('keeps invalid stored positions out of the container geometry', () => {
+    const clean = buildRoadmap()
+    const garbage = buildRoadmap()
+    garbage.phases[0].tracks[0].competencies.find((item) => item.definitionId === 'c')!.position = {
+      x: 500,
+      y: 300,
+    }
+    garbage.phases[0].tracks[1].competencies.find((item) => item.definitionId === 'd')!.position = {
+      x: 168,
+      y: -250,
+    }
+    const cleanLayout = computeRoadmapLayout({ roadmap: clean, expanded: new Set(), onToggleExpand: noop })
+    const garbageLayout = computeRoadmapLayout({ roadmap: garbage, expanded: new Set(), onToggleExpand: noop })
+    expect(garbageLayout.phases[0].width).toBe(cleanLayout.phases[0].width)
+    expect(garbageLayout.phases[0].height).toBe(cleanLayout.phases[0].height)
+    expect(garbageLayout.phases[1].origin.x).toBe(cleanLayout.phases[1].origin.x)
+  })
+
+  it('never mutates stored positions while rendering and stays deterministic', () => {
+    const roadmap = buildRoadmap()
+    roadmap.phases[0].tracks[0].competencies.find((item) => item.definitionId === 'c')!.position = { x: 50, y: -120 }
+    const before = JSON.stringify(roadmap)
+    const first = computeRoadmapLayout({ roadmap, expanded: new Set(), onToggleExpand: noop })
+    const second = computeRoadmapLayout({ roadmap, expanded: new Set(), onToggleExpand: noop })
+    expect(JSON.stringify(roadmap)).toBe(before)
+    expect(second.nodes.map((node) => [node.id, node.position])).toEqual(
+      first.nodes.map((node) => [node.id, node.position]),
+    )
+  })
+
+  it('uses the deterministic slot position when the stored position is null', () => {
     const layout = computeRoadmapLayout({ roadmap: buildRoadmap(), expanded: new Set(), onToggleExpand: noop })
-    const position = nodePosition(layout, 'c')
-    expect(position).toEqual({ x: layout.phases[0].origin.x + 500, y: 300 })
+    expect(nodePosition(layout, 'd')).toEqual({ x: layout.phases[0].origin.x + 168, y: 202 })
   })
 
   it('de-collides render output without mutating stored positions', () => {
     const roadmap = buildRoadmap()
+    const d = roadmap.phases[0].tracks[1].competencies.find((item) => item.definitionId === 'd')!
+    const h = competency({ definitionId: 'h', orderIndex: 4 })
+    roadmap.phases[0].tracks[1].competencies.push(h)
+    d.position = { x: 168, y: 202 }
+    h.position = { x: 168, y: 202 }
     const before = JSON.stringify(roadmap)
     const layout = computeRoadmapLayout({ roadmap, expanded: new Set(), onToggleExpand: noop })
-    const c = nodePosition(layout, 'c')
-    const d = nodePosition(layout, 'd')
-    expect(d).not.toEqual(c)
+    const dPosition = nodePosition(layout, 'd')
+    const hPosition = nodePosition(layout, 'h')
+    expect(hPosition).not.toEqual(dPosition)
+    expect(dPosition).toEqual({ x: layout.phases[0].origin.x + 168, y: 202 })
     expect(JSON.stringify(roadmap)).toBe(before)
   })
 
@@ -191,6 +251,26 @@ describe('coordinate conversion', () => {
   })
 })
 
+describe('usable content bounds', () => {
+  it('keeps cards below the header, right of the gutter, inside the paddings', () => {
+    const bounds = usableContentBounds(680, 332)
+    expect(bounds).toEqual({ minX: 168, minY: 76, maxX: 428, maxY: 202 })
+    expect(containsPoint(bounds, { x: 168, y: 76 })).toBe(true)
+    expect(containsPoint(bounds, { x: 428, y: 202 })).toBe(true)
+    expect(containsPoint(bounds, { x: 50, y: 120 })).toBe(false)
+    expect(containsPoint(bounds, { x: 168, y: 20 })).toBe(false)
+    expect(containsPoint(bounds, { x: 168, y: -40 })).toBe(false)
+    expect(containsPoint(bounds, { x: 500, y: 300 })).toBe(false)
+  })
+
+  it('clamps dragged coordinates into the usable content area', () => {
+    const bounds = usableContentBounds(680, 332)
+    expect(clampToContentBounds(bounds, { x: -80, y: -500 })).toEqual({ x: 168, y: 76 })
+    expect(clampToContentBounds(bounds, { x: 9000, y: 9000 })).toEqual({ x: 428, y: 202 })
+    expect(clampToContentBounds(bounds, { x: 300, y: 150 })).toEqual({ x: 300, y: 150 })
+  })
+})
+
 describe('mergeLayoutNodes', () => {
   it('reuses unchanged node objects across selection-only changes', () => {
     const roadmap = buildRoadmap()
@@ -238,9 +318,38 @@ describe('mergeLayoutNodes', () => {
     expect(merged.some((node) => node.id === 'b')).toBe(true)
     expect(merged.find((node) => node.id === 'a')?.data.expanded).toBe(true)
     expect(merged.find((node) => node.id === 'a')).not.toBe(seeded.find((node) => node.id === 'a'))
-    for (const id of ['c', 'd', 'e', 'g', 'phase-p2']) {
+    // Nodes in the same phase as the expansion get new drag extents when the
+    // container grows; nodes in untouched phases keep their object identity.
+    expect(merged.find((node) => node.id === 'c')).not.toBe(seeded.find((node) => node.id === 'c'))
+    expect(merged.find((node) => node.id === 'd')).not.toBe(seeded.find((node) => node.id === 'd'))
+    for (const id of ['e', 'g', 'phase-p2']) {
       expect(merged.find((node) => node.id === id)).toBe(seeded.find((node) => node.id === id))
     }
+  })
+
+  it('constrains competency drag extents to the usable phase content area', () => {
+    const roadmap = buildRoadmap()
+    const layout = computeRoadmapLayout({ roadmap, expanded: new Set(), onToggleExpand: noop })
+    const seeded = mergeLayoutNodes([], layout, new Map(), null)
+    const p1 = layout.phases[0]
+    const d = seeded.find((node) => node.id === 'd')
+    expect(d?.type).toBe('competency')
+    expect(d?.extent).toEqual([
+      [p1.origin.x + 168, p1.origin.y + 76],
+      [p1.origin.x + p1.width - 20, p1.origin.y + p1.height - 18],
+    ])
+    const phaseNodes = seeded.filter((node) => node.type === 'phase')
+    expect(phaseNodes.every((node) => node.extent === undefined)).toBe(true)
+  })
+
+  it('replaces a node whose container grew so its drag extent stays current', () => {
+    const roadmap = buildRoadmap()
+    const layout = computeRoadmapLayout({ roadmap, expanded: new Set(), onToggleExpand: noop })
+    const seeded = mergeLayoutNodes([], layout, new Map(), null)
+    const grown = computeRoadmapLayout({ roadmap, expanded: new Set(['a']), onToggleExpand: noop })
+    const merged = mergeLayoutNodes(seeded, grown, new Map(), null)
+    expect(merged.find((node) => node.id === 'd')).not.toBe(seeded.find((node) => node.id === 'd'))
+    expect(merged.find((node) => node.id === 'd')?.extent).not.toEqual(seeded.find((node) => node.id === 'd')?.extent)
   })
 
   it('drops collapsed children from the merged node set', () => {

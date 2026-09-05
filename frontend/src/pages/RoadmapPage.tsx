@@ -8,9 +8,11 @@ import {
   type NodeTypes,
   type OnNodeDrag,
   type OnNodesChange,
+  type OnInit,
+  type ReactFlowInstance,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { ChevronRight, ListTree, Network, Search, ShieldCheck, Upload, X } from 'lucide-react'
+import { ChevronRight, ListTree, Maximize2, Network, RotateCcw, Search, ShieldCheck, Upload, X } from 'lucide-react'
 import { AnimatePresence, motion } from 'motion/react'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
@@ -19,10 +21,13 @@ import { ApiError, api } from '../api'
 import { EmptyState, ErrorState, LoadingState } from '../components/PageState'
 import { CompetencyNode, PhaseContainerNode } from '../components/RoadmapNodes'
 import {
+  clampToContentBounds,
   computeRoadmapLayout,
   mergeLayoutNodes,
   phaseOriginFor,
+  toCanvasPosition,
   toPhaseLocalPosition,
+  usableContentBounds,
   type RoadmapFlowNode,
   type RoadmapLayout,
 } from '../components/roadmapLayout'
@@ -30,6 +35,8 @@ import { StatusBadge } from '../components/StatusBadge'
 import type { Competency, ExitCriterion, Roadmap, Status } from '../types'
 
 type RoadmapResponse = { configured: boolean; guidance?: string; roadmap?: Roadmap }
+
+type Notice = { id: number; text: string; tone: 'success' | 'error' }
 
 const roadmapNodeTypes: NodeTypes = { competency: CompetencyNode, phase: PhaseContainerNode }
 const fitViewOptions = { padding: 0.14 }
@@ -42,6 +49,22 @@ export function RoadmapPage() {
   const [listMode, setListMode] = useState(false)
   const [query, setQuery] = useState('')
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const [resetOpen, setResetOpen] = useState(false)
+  const [resetBusy, setResetBusy] = useState(false)
+  const [fitNonce, setFitNonce] = useState(0)
+  const [notice, setNotice] = useState<Notice | null>(null)
+  const noticeTimer = useRef<number | undefined>(undefined)
+
+  const notify = useCallback((text: string, tone: Notice['tone'] = 'success') => {
+    setNotice({ id: Date.now(), text, tone })
+  }, [])
+
+  useEffect(() => {
+    if (!notice) return
+    window.clearTimeout(noticeTimer.current)
+    noticeTimer.current = window.setTimeout(() => setNotice(null), 2600)
+    return () => window.clearTimeout(noticeTimer.current)
+  }, [notice])
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -85,6 +108,25 @@ export function RoadmapPage() {
       return next
     })
   }, [])
+
+  const confirmResetLayout = useCallback(async () => {
+    setResetBusy(true)
+    try {
+      const result = await api<{ cleared: number }>('/roadmap/layout/reset', { method: 'POST' })
+      await load()
+      setFitNonce((value) => value + 1)
+      notify(
+        result.cleared > 0
+          ? `Layout reset · cleared ${result.cleared} saved ${result.cleared === 1 ? 'position' : 'positions'}`
+          : 'Layout reset · no saved positions to clear',
+      )
+    } catch (caught) {
+      notify(caught instanceof ApiError ? caught.message : 'The layout could not be reset.', 'error')
+    } finally {
+      setResetBusy(false)
+      setResetOpen(false)
+    }
+  }, [load, notify])
 
   const layout = useMemo(
     () =>
@@ -142,9 +184,23 @@ export function RoadmapPage() {
           selectedId={selected?.definitionId ?? null}
           select={setSelected}
           onToggleExpand={onToggleExpand}
+          onRequestReset={() => setResetOpen(true)}
+          resetBusy={resetBusy}
+          notice={notice}
+          onNotice={notify}
+          fitNonce={fitNonce}
         />
       )}
       <AnimatePresence>{selected ? <CompetencyPanel competency={selected} close={() => setSelected(null)} refresh={load} /> : null}</AnimatePresence>
+      <AnimatePresence>
+        {resetOpen ? (
+          <ResetLayoutDialog
+            busy={resetBusy}
+            onCancel={() => setResetOpen(false)}
+            onConfirm={() => void confirmResetLayout()}
+          />
+        ) : null}
+      </AnimatePresence>
     </div>
   )
 }
@@ -168,6 +224,7 @@ const RoadmapGraphCanvas = memo(function RoadmapGraphCanvas({
   onNodeClick,
   onNodeDoubleClick,
   onNodeDragStop,
+  onInit,
 }: {
   nodes: RoadmapFlowNode[]
   edges: RoadmapLayout['edges']
@@ -175,6 +232,7 @@ const RoadmapGraphCanvas = memo(function RoadmapGraphCanvas({
   onNodeClick: NodeMouseHandler
   onNodeDoubleClick: NodeMouseHandler
   onNodeDragStop: OnNodeDrag
+  onInit: OnInit<RoadmapFlowNode>
 }) {
   return (
     <ReactFlow
@@ -186,6 +244,7 @@ const RoadmapGraphCanvas = memo(function RoadmapGraphCanvas({
       onNodeClick={onNodeClick}
       onNodeDoubleClick={onNodeDoubleClick}
       onNodeDragStop={onNodeDragStop}
+      onInit={onInit}
       fitView
       fitViewOptions={fitViewOptions}
       minZoom={0.15}
@@ -204,20 +263,56 @@ const RoadmapGraphCanvas = memo(function RoadmapGraphCanvas({
   )
 })
 
-function RoadmapGraph({ layout, selectedId, select, onToggleExpand }: {
+function RoadmapGraph({
+  layout,
+  selectedId,
+  select,
+  onToggleExpand,
+  onRequestReset,
+  resetBusy,
+  notice,
+  onNotice,
+  fitNonce,
+}: {
   layout: RoadmapLayout
   selectedId: string | null
   select: (item: Competency) => void
   onToggleExpand: (definitionId: string) => void
+  onRequestReset: () => void
+  resetBusy: boolean
+  notice: Notice | null
+  onNotice: (text: string, tone?: Notice['tone']) => void
+  fitNonce: number
 }) {
   const [nodes, setNodes, onNodesChange] = useNodesState<RoadmapFlowNode>([])
   const draggedLocal = useRef(new Map<string, { x: number; y: number }>())
   const layoutRef = useRef(layout)
   layoutRef.current = layout
+  const flowRef = useRef<ReactFlowInstance<RoadmapFlowNode> | null>(null)
 
   useEffect(() => {
     setNodes((previous) => mergeLayoutNodes(previous, layout, draggedLocal.current, selectedId))
   }, [layout, selectedId, setNodes])
+
+  useEffect(() => {
+    if (fitNonce === 0) return
+    const frame = requestAnimationFrame(() => {
+      void flowRef.current?.fitView(fitViewOptions).catch(() => {
+        // jsdom test viewports have zero size; real browsers never fail here.
+      })
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [fitNonce])
+
+  const onInit = useCallback<OnInit<RoadmapFlowNode>>((instance) => {
+    flowRef.current = instance
+  }, [])
+
+  const fitGraph = useCallback(() => {
+    void flowRef.current?.fitView(fitViewOptions).catch(() => {
+      // jsdom test viewports have zero size; real browsers never fail here.
+    })
+  }, [])
 
   const onNodeClick = useCallback<NodeMouseHandler>(
     (_event, node) => {
@@ -239,15 +334,29 @@ function RoadmapGraph({ layout, selectedId, select, onToggleExpand }: {
     (_event, node) => {
       const currentLayout = layoutRef.current
       const origin = phaseOriginFor(currentLayout, node.id)
-      if (!origin) return
-      const local = toPhaseLocalPosition(origin, node.position)
+      const phaseId = currentLayout.phaseByDefinition.get(node.id)
+      const phase = phaseId
+        ? currentLayout.phases.find((entry) => entry.phase.id === phaseId)
+        : undefined
+      if (!origin || !phase) return
+      const bounds = usableContentBounds(phase.width, phase.height)
+      const raw = toPhaseLocalPosition(origin, node.position)
+      const local = clampToContentBounds(bounds, raw)
       draggedLocal.current.set(node.id, local)
+      const clampedCanvas = toCanvasPosition(origin, local)
+      if (Math.abs(clampedCanvas.x - node.position.x) > 0.01 || Math.abs(clampedCanvas.y - node.position.y) > 0.01) {
+        setNodes((current) =>
+          current.map((item) => (item.id === node.id ? { ...item, position: clampedCanvas } : item)),
+        )
+      }
       void api(`/roadmap/competencies/${node.id}/position`, {
         method: 'PUT',
         body: JSON.stringify(local),
       })
+        .then(() => onNotice('Position saved'))
+        .catch(() => onNotice('Position could not be saved', 'error'))
     },
-    [],
+    [onNotice, setNodes],
   )
 
   return (
@@ -259,7 +368,39 @@ function RoadmapGraph({ layout, selectedId, select, onToggleExpand }: {
         onNodeClick={onNodeClick}
         onNodeDoubleClick={onNodeDoubleClick}
         onNodeDragStop={onNodeDragStop}
+        onInit={onInit}
       />
+      <div className="absolute left-3 top-3 z-10 flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          className="inline-flex min-h-8 items-center gap-1.5 rounded-full border border-ink/15 bg-white/95 px-3.5 py-1.5 text-xs font-semibold text-ink/70 shadow transition hover:border-moss/40 hover:text-ink"
+          onClick={fitGraph}
+        >
+          <Maximize2 className="size-3.5" aria-hidden="true" />
+          Fit view
+        </button>
+        <button
+          type="button"
+          className="inline-flex min-h-8 items-center gap-1.5 rounded-full border border-ink/15 bg-white/95 px-3.5 py-1.5 text-xs font-semibold text-ink/70 shadow transition hover:border-rose-300 hover:text-rose-900 disabled:cursor-not-allowed disabled:opacity-50"
+          onClick={onRequestReset}
+          disabled={resetBusy}
+        >
+          <RotateCcw className="size-3.5" aria-hidden="true" />
+          Reset layout
+        </button>
+      </div>
+      {notice ? (
+        <div
+          key={notice.id}
+          role="status"
+          aria-live="polite"
+          className={`pointer-events-none absolute left-1/2 top-4 z-10 -translate-x-1/2 whitespace-nowrap rounded-full px-4 py-1.5 text-xs font-semibold shadow ${
+            notice.tone === 'error' ? 'bg-rose-100 text-rose-900' : 'bg-moss text-white'
+          }`}
+        >
+          {notice.text}
+        </div>
+      ) : null}
       <div className="pointer-events-none absolute right-3 top-3 flex max-w-[calc(100%-1.5rem)] flex-wrap items-center gap-x-4 gap-y-1 rounded-full bg-white/90 px-3.5 py-2 text-xs text-ink/60 shadow">
         <span className="flex items-center gap-1.5">
           <svg width="26" height="6" aria-hidden="true"><line x1="1" y1="3" x2="25" y2="3" stroke="#326653" strokeWidth="2" /></svg>
@@ -429,3 +570,61 @@ function CompetencyPanel({ competency, close, refresh }: { competency: Competenc
 
 function DetailSection({ title, children }: { title: string; children: React.ReactNode }) { return <section className="mt-8 border-t border-ink/10 pt-6"><h3 className="mb-3 font-display text-lg font-semibold">{title}</h3><div className="text-sm leading-6 text-ink/65">{children}</div></section> }
 function BulletList({ items }: { items: string[] }) { return items.length ? <ul className="space-y-2">{items.map((item) => <li className="flex gap-2" key={item}><ChevronRight className="mt-1 size-4 shrink-0 text-moss" />{item}</li>)}</ul> : <p className="text-ink/45">None specified.</p> }
+
+function ResetLayoutDialog({ busy, onCancel, onConfirm }: { busy: boolean; onCancel: () => void; onConfirm: () => void }) {
+  const cancelButton = useRef<HTMLButtonElement>(null)
+  useEffect(() => {
+    cancelButton.current?.focus()
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !busy) onCancel()
+    }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [busy, onCancel])
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center p-4">
+      <motion.button
+        type="button"
+        className="absolute inset-0 bg-ink/25"
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+        onClick={busy ? undefined : onCancel}
+        disabled={busy}
+        aria-label="Cancel reset layout"
+      />
+      <motion.div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="reset-layout-title"
+        aria-describedby="reset-layout-description"
+        className="relative w-full max-w-md rounded-2xl bg-[#fbfaf6] p-6 shadow-2xl"
+        initial={{ opacity: 0, scale: 0.96, y: 8 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.96, y: 8 }}
+        transition={{ duration: 0.16 }}
+      >
+        <h2 id="reset-layout-title" className="font-display text-xl font-semibold">Reset layout?</h2>
+        <div id="reset-layout-description" className="mt-3 space-y-2 text-sm leading-6 text-ink/65">
+          <p>
+            This clears only manually saved node positions and returns the roadmap to its automatic layout.
+          </p>
+          <p>Progress, sessions, and verification records are not affected.</p>
+        </div>
+        <div className="mt-6 flex justify-end gap-3">
+          <button ref={cancelButton} type="button" className="button-secondary" onClick={onCancel} disabled={busy}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="button-primary bg-rose-900 hover:bg-rose-950"
+            onClick={onConfirm}
+            disabled={busy}
+          >
+            {busy ? 'Resetting…' : 'Reset layout'}
+          </button>
+        </div>
+      </motion.div>
+    </div>
+  )
+}

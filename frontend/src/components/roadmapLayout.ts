@@ -1,4 +1,4 @@
-import { MarkerType, type Edge, type Node } from '@xyflow/react'
+import { MarkerType, type CoordinateExtent, type Edge, type Node } from '@xyflow/react'
 
 import type { Competency, Phase, Roadmap, Status } from '../types'
 
@@ -14,11 +14,18 @@ import type { Competency, Phase, Roadmap, Status } from '../types'
  *
  * Historical note: the pre-atlas UI persisted global canvas coordinates while
  * the import guide examples use phase-local-looking values, so stored values
- * are ambiguous. Stored values are used verbatim as phase-local offsets and
- * are never rewritten except when the user explicitly drags a node. Values
- * saved by the old UI remain valid integers; when they collide with the
- * deterministic layout, the render-only de-collision pass nudges colliding
- * nodes without touching stored data.
+ * are ambiguous. Stored values are used as phase-local offsets and are never
+ * rewritten by the renderer.
+ *
+ * Validation policy: a persisted position is honoured at render time only
+ * when the whole competency card fits inside the usable content area of its
+ * phase container — below the phase header, to the right of the track-label
+ * gutter, and inside the container's deterministic width and height. Invalid
+ * stored values (negative coordinates, header/gutter overlaps, values beyond
+ * the container) are ignored for rendering and the node falls back to its
+ * deterministic automatic slot position. Stored values are never migrated or
+ * reinterpreted; only an explicit drag (which stores within-bounds values) or
+ * the Reset Layout action (which clears them) changes storage.
  */
 
 export const NODE_WIDTH = 232
@@ -34,6 +41,29 @@ export const LANE_GAP = 14
 export const NODE_GAP_X = 28
 export const NODE_GAP_Y = 20
 export const EMPTY_LANE_HEIGHT = 44
+
+/** Phase-local content area where competency cards may render and be dragged. */
+export type ContentBounds = { minX: number; minY: number; maxX: number; maxY: number }
+
+export function usableContentBounds(containerWidth: number, containerHeight: number): ContentBounds {
+  return {
+    minX: PHASE_PADDING_X + LANE_LABEL_WIDTH,
+    minY: PHASE_HEADER_HEIGHT + PHASE_PADDING_TOP,
+    maxX: containerWidth - PHASE_PADDING_X - NODE_WIDTH,
+    maxY: containerHeight - PHASE_PADDING_BOTTOM - NODE_HEIGHT,
+  }
+}
+
+export function containsPoint(bounds: ContentBounds, point: Point): boolean {
+  return point.x >= bounds.minX && point.y >= bounds.minY && point.x <= bounds.maxX && point.y <= bounds.maxY
+}
+
+export function clampToContentBounds(bounds: ContentBounds, point: Point): Point {
+  return {
+    x: Math.min(Math.max(point.x, bounds.minX), Math.max(bounds.minX, bounds.maxX)),
+    y: Math.min(Math.max(point.y, bounds.minY), Math.max(bounds.minY, bounds.maxY)),
+  }
+}
 
 export const statusColor: Record<Status, string> = {
   not_started: '#9ca39e',
@@ -206,10 +236,21 @@ function persistedPosition(item: Competency): Point | null {
   return item.position.x === null || item.position.y === null ? null : { x: item.position.x, y: item.position.y }
 }
 
-function resolvePhasePositions(items: Competency[], slots: Map<string, Point>): Map<string, Point> {
+/**
+ * Resolves the final phase-local position for every item. Persisted positions
+ * pass through only when the caller validated them against the usable content
+ * area (`persisted` returns non-null); everything else uses the deterministic
+ * slot position. Valid persisted positions are de-collided against each other
+ * and against slot positions without ever touching stored values.
+ */
+function resolvePhasePositions(
+  items: Competency[],
+  slots: Map<string, Point>,
+  persisted: (item: Competency) => Point | null,
+): Map<string, Point> {
   const ordered = [...items].sort((a, b) => {
-    const persistedA = persistedPosition(a) ? 0 : 1
-    const persistedB = persistedPosition(b) ? 0 : 1
+    const persistedA = persisted(a) ? 0 : 1
+    const persistedB = persisted(b) ? 0 : 1
     if (persistedA !== persistedB) return persistedA - persistedB
     const slotA = slots.get(a.definitionId) ?? { x: 0, y: 0 }
     const slotB = slots.get(b.definitionId) ?? { x: 0, y: 0 }
@@ -219,7 +260,7 @@ function resolvePhasePositions(items: Competency[], slots: Map<string, Point>): 
   const resolved = new Map<string, Point>()
   ordered.forEach((item) => {
     const slot = slots.get(item.definitionId) ?? { x: 0, y: 0 }
-    const candidate = persistedPosition(item) ?? slot
+    const candidate = persisted(item) ?? slot
     let { x, y } = candidate
     let attempts = 0
     while (
@@ -269,7 +310,19 @@ function layoutPhase(
     laneY += lane.height + LANE_GAP
   })
 
-  const positions = resolvePhasePositions(items, slots)
+  // Deterministic container geometry first: lane content defines the size,
+  // independent of any persisted positions. Validation below then accepts a
+  // persisted position only when the whole card fits inside this box, so
+  // invalid stored values can neither escape the container nor inflate it.
+  const contentWidth = Math.max(PHASE_MIN_WIDTH, contentRight + PHASE_PADDING_X)
+  const contentHeight = (items.length ? contentBottom : laneY + 24) + PHASE_PADDING_BOTTOM
+  const usable = usableContentBounds(contentWidth, contentHeight)
+  const validatedPersisted = (item: Competency): Point | null => {
+    const persisted = persistedPosition(item)
+    return persisted && containsPoint(usable, persisted) ? persisted : null
+  }
+
+  const positions = resolvePhasePositions(items, slots, validatedPersisted)
   positions.forEach((position) => {
     contentRight = Math.max(contentRight, position.x + NODE_WIDTH)
     contentBottom = Math.max(contentBottom, position.y + NODE_HEIGHT)
@@ -278,7 +331,7 @@ function layoutPhase(
   return {
     positions,
     lanes,
-    width: Math.max(PHASE_MIN_WIDTH, contentRight + PHASE_PADDING_X),
+    width: Math.max(contentWidth, contentRight + PHASE_PADDING_X),
     height: (items.length ? contentBottom : laneY + 24) + PHASE_PADDING_BOTTOM,
     hasNodes: items.length > 0,
   }
@@ -469,11 +522,13 @@ export function mergeLayoutNodes(
   selectedId: string | null,
 ): RoadmapFlowNode[] {
   const previousById = new Map(previous.map((node) => [node.id, node]))
+  const phasesById = new Map(layout.phases.map((phase) => [phase.phase.id, phase]))
   return layout.nodes.map((layoutNode) => {
     const existing = previousById.get(layoutNode.id)
     if (layoutNode.type === 'competency') {
+      const extent = dragExtentFor(layout, layoutNode, phasesById)
       if (existing === undefined || existing.type !== 'competency') {
-        return selectNode(layoutNode, layoutNode.id === selectedId)
+        return { ...selectNode(layoutNode, layoutNode.id === selectedId), extent }
       }
       const dragged = draggedLocal.get(layoutNode.id)
       const origin = dragged ? phaseOriginFor(layout, layoutNode.id) : null
@@ -482,9 +537,10 @@ export function mergeLayoutNodes(
       const unchanged =
         samePoint(existing.position, position) &&
         existing.data.selected === selected &&
+        sameExtent(existing.extent, extent) &&
         sameCompetencyData(existing.data, layoutNode.data)
       if (unchanged) return existing
-      return { ...existing, position, data: { ...layoutNode.data, selected } }
+      return { ...existing, position, extent, data: { ...layoutNode.data, selected } }
     }
     if (existing === undefined || existing.type !== 'phase') {
       return layoutNode
@@ -503,6 +559,31 @@ export function mergeLayoutNodes(
       data: layoutNode.data,
     }
   })
+}
+
+function dragExtentFor(
+  layout: RoadmapLayout,
+  layoutNode: CompetencyFlowNode,
+  phasesById: Map<string, PhaseLayout>,
+): CoordinateExtent | undefined {
+  const phaseId = layout.phaseByDefinition.get(layoutNode.id)
+  const phase = phaseId ? phasesById.get(phaseId) : undefined
+  if (!phase) return undefined
+  const origin = phase.origin
+  return [
+    [origin.x + PHASE_PADDING_X + LANE_LABEL_WIDTH, origin.y + PHASE_HEADER_HEIGHT + PHASE_PADDING_TOP],
+    [origin.x + phase.width - PHASE_PADDING_X, origin.y + phase.height - PHASE_PADDING_BOTTOM],
+  ]
+}
+
+function sameExtent(a: CoordinateExtent | 'parent' | null | undefined, b: CoordinateExtent | undefined): boolean {
+  if (typeof a !== 'object' || a === null || b === undefined) return a === b
+  return (
+    Math.abs(a[0][0] - b[0][0]) <= 0.01 &&
+    Math.abs(a[0][1] - b[0][1]) <= 0.01 &&
+    Math.abs(a[1][0] - b[1][0]) <= 0.01 &&
+    Math.abs(a[1][1] - b[1][1]) <= 0.01
+  )
 }
 
 function selectNode(node: CompetencyFlowNode, selected: boolean): CompetencyFlowNode {

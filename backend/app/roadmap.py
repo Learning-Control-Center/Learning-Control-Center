@@ -587,6 +587,36 @@ async def set_position(
     return {"definitionId": definition.id, "position": payload}
 
 
+@router.post("/layout/reset")
+async def reset_layout_positions(
+    _auth: AuthContext = Depends(require_csrf),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Clears every persisted position override for the active roadmap version.
+
+    The operation is transactional and touches only the position columns of
+    competency definitions belonging to the active version: progress, status,
+    sessions, verification records, current phase, and definitions of any
+    other (inactive) roadmap version are never modified.
+    """
+    roadmap = db.scalar(select(Roadmap).where(Roadmap.is_current.is_(True)))
+    if roadmap is None or roadmap.active_version_id is None:
+        raise AppError(409, "ROADMAP_STATE_INVALID", "The current roadmap has no active version.")
+    definitions = db.scalars(
+        select(CompetencyDefinition).where(
+            CompetencyDefinition.roadmap_version_id == roadmap.active_version_id
+        )
+    ).all()
+    cleared = 0
+    for definition in definitions:
+        if definition.position_x is not None or definition.position_y is not None:
+            definition.position_x = None
+            definition.position_y = None
+            cleared += 1
+    db.commit()
+    return {"cleared": cleared}
+
+
 @router.get("/competencies/{competency_identity_id}/history")
 async def competency_history(
     competency_identity_id: str,
