@@ -30,6 +30,7 @@ from app.domain_integrity import (
     validate_portable_row_types,
 )
 from app.errors import AppError
+from app.import_diff import build_portable_replacement_diff, build_roadmap_diff
 from app.models import (
     ApplicationSetting,
     CompetencyAbilityItem,
@@ -589,11 +590,16 @@ def _inspect_package(
     if payload.package.packageType in {"portable_logical_backup", "restore"}:
         summary.update(_validate_portable_payload(payload.package.payload))
         existing_state = portable_state_presence(db, PORTABLE_MODELS)
+        existing_tables = _portable_payload(db)["tables"]
+        incoming_tables = payload.package.payload["tables"]
         summary["mode"] = "empty_state_or_full_replacement"
         summary["authenticationPreserved"] = True
         summary["existingStateEmpty"] = not bool(existing_state)
         summary["replacementRequired"] = bool(existing_state)
         summary["existingPortableStateCounts"] = existing_state
+        summary["replacementDiff"] = build_portable_replacement_diff(
+            existing_tables, incoming_tables, PORTABLE_BY_TABLE
+        )
     elif payload.package.packageType == "verification_update":
         try:
             verification_payload = VerificationUpdatePayload.model_validate(payload.package.payload)
@@ -678,49 +684,7 @@ def _inspect_package(
             "ROADMAP_PACKAGE_INVALID",
             "The roadmap package conflicts with the current roadmap state.",
         )
-        incoming = {
-            item.stable_key: item
-            for phase in validated_roadmap.phases
-            for track in phase.tracks
-            for item in track.competencies
-        }
-        current = db.scalar(select(Roadmap).where(Roadmap.is_current.is_(True)))
-        existing: dict[str, CompetencyDefinition] = {}
-        if current and current.active_version_id:
-            for definition in db.scalars(
-                select(CompetencyDefinition).where(
-                    CompetencyDefinition.roadmap_version_id == current.active_version_id
-                )
-            ).all():
-                identity = db.get(CompetencyIdentity, definition.competency_identity_id)
-                if identity:
-                    existing[identity.stable_key] = definition
-        added = sorted(set(incoming) - set(existing))
-        removed = sorted(set(existing) - set(incoming))
-        modified = []
-        for stable_key in sorted(set(incoming) & set(existing)):
-            before = existing[stable_key]
-            after = incoming[stable_key]
-            changes: dict[str, Any] = {}
-            for field, old, new in (
-                ("title", before.title, after.title),
-                ("priority", before.priority, after.priority),
-                ("weight", before.weight, after.weight),
-            ):
-                if old != new:
-                    changes[field] = {"from": old, "to": new}
-            if changes:
-                modified.append({"stableKey": stable_key, "changes": changes})
-        summary["roadmap"] = {
-            "stableKey": validated_roadmap.stable_key,
-            "version": validated_roadmap.version,
-            "operation": payload.package.packageType,
-            "added": added,
-            "modified": modified,
-            "archivedFromActiveVersion": removed,
-            "preservedStateCount": len(set(incoming) & set(existing)),
-            "learningLogsTouched": False,
-        }
+        summary["roadmap"] = build_roadmap_diff(db, validated_roadmap, payload.package.packageType)
     digest = _package_digest(package)
     token = new_secret()
     _previews[payload.package.packageId] = Preview(

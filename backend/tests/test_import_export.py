@@ -2,7 +2,16 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-from app.models import AuthSession, CompetencyIdentity, ImportRecord, LearningSession, Track, User
+from app.models import (
+    AuthSession,
+    CompetencyIdentity,
+    DailyReflection,
+    DisciplineProfile,
+    ImportRecord,
+    LearningSession,
+    Track,
+    User,
+)
 from app.time_utils import utc_now_ms
 from httpx import AsyncClient
 from sqlalchemy import func, select
@@ -182,6 +191,60 @@ async def test_invalid_portable_package_is_rejected_without_mutation(
     )
     assert response.status_code == 422
     assert db.scalar(select(func.count(CompetencyIdentity.id))) == before
+
+
+async def test_portable_restore_preview_compares_existing_replacement_scope(
+    configured_client: tuple[AsyncClient, str, dict[str, object]], db: Session
+) -> None:
+    client, csrf, _roadmap = configured_client
+    package = await _portable_export(client, csrf)
+    package["payload"]["tables"]["daily_reflections"].append(
+        {
+            "id": "incoming-reflection",
+            "local_date": "2026-09-02",
+            "text": "Incoming reflection",
+            "created_at": 1_788_307_200_000,
+            "updated_at": 1_788_307_200_000,
+        }
+    )
+    db.add(DailyReflection(local_date="2026-09-03", text="Existing reflection"))
+    profile = db.get(DisciplineProfile, 1)
+    assert profile is not None
+    profile.weekly_target_active_days = 4
+    db.commit()
+
+    preview = await client.post(
+        "/api/v1/import-export/import/inspect",
+        json={"filename": "backup.json", "package": package},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert preview.status_code == 200, preview.text
+    replacement = preview.json()["diff"]["replacementDiff"]
+    assert replacement["operation"] == "fullReplacement"
+    assert replacement["mergeSupported"] is False
+    assert replacement["authenticationPreserved"] is True
+    assert replacement["willAddRows"] is True
+    assert replacement["willDeleteRows"] is True
+    assert replacement["willModifyRows"] is True
+    assert replacement["tables"]["daily_reflections"] == {
+        "existing": 1,
+        "incoming": 1,
+        "added": 1,
+        "modified": 0,
+        "removed": 1,
+        "changed": True,
+    }
+    assert replacement["tables"]["discipline_profiles"]["modified"] == 1
+    assert replacement["categories"]["reflections"] == {
+        "existing": 1,
+        "incoming": 1,
+        "added": 1,
+        "modified": 0,
+        "removed": 1,
+        "changed": True,
+    }
+    assert replacement["categories"]["settings"]["modified"] == 1
+    assert {"reflections", "settings"} <= set(replacement["categoriesTouched"])
 
 
 async def test_analysis_snapshot_includes_filtered_roadmap_and_resolved_scope(

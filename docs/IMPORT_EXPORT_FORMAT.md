@@ -118,6 +118,8 @@ Restore accepts `portable_logical_backup` or `restore` with the same payload. It
 
 Import inspection validates exact table/column coverage, strict canonical scalar types, foreign keys, structured JSON, IANA timezones, complete competency state/history, current-roadmap pointers, phase/track/parent placement, exit-criterion ownership, verified-event evidence, and version-scoped hierarchy and required-dependency cycles in a disposable database before mutation. The same domain-integrity validation runs inside the restore transaction after insertion. Inspection and failed post-restore validation do not mutate the live portable state.
 
+The restore inspection response includes `replacementDiff`, which compares current and incoming portable state by table and by portable domain. It reports existing and incoming row counts plus rows that will be added, modified, or removed, identifies every affected domain, and states that authentication is preserved and merge restore is unsupported.
+
 ### Representative empty portable package
 
 This valid package represents an empty portable learning state. Non-empty exports use the same keys with exact database rows.
@@ -286,6 +288,8 @@ This synthetic package is for demonstrations and populated-state testing, not a 
 | `payload` | object | yes | Strict package-specific object | `{"roadmap": {...}}` |
 
 Unknown envelope fields are rejected. A successfully applied `packageId` is recorded and later inspection of that ID returns `IMPORT_PACKAGE_DUPLICATE`. The server rejects an unsupported schema version before mutation.
+
+Roadmap inspection compares the active definition with the incoming definition by stable key. Its diff includes roadmap metadata, version transition, current phase, phase and track additions/removals/changes, competency additions/archival, phase and track movement, parent hierarchy, required and recommended prerequisites, learning objectives, layout positions, and exit-criterion additions/removals/changes. Existing competency state and learning logs remain outside a roadmap-definition mutation and are reported as preserved.
 
 ## Roadmap package schema
 

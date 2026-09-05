@@ -199,6 +199,69 @@ async def test_roadmap_import_dry_run_has_meaningful_diff_and_rejects_cycles(
     assert rejected.json()["error"]["code"] == "REQUIRED_DEPENDENCY_CYCLE"
 
 
+async def test_roadmap_import_preview_exposes_all_material_definition_changes(
+    configured_client: tuple[AsyncClient, str, dict[str, object]],
+    roadmap_payload: dict[str, object],
+) -> None:
+    client, csrf, _roadmap = configured_client
+    updated = deepcopy(roadmap_payload)
+    updated["version"] = "2.0.0"
+    updated["current_phase_stable_key"] = "phase-2"
+    foundation_competencies = updated["phases"][0]["tracks"][0]["competencies"]
+    functions = next(
+        item for item in foundation_competencies if item["stable_key"] == "python.functions"
+    )
+    basics = next(item for item in foundation_competencies if item["stable_key"] == "python.basics")
+    basics["exit_criteria"] = []
+    foundation_competencies.remove(functions)
+    updated["phases"][1]["tracks"][0]["competencies"].append(functions)
+    functions["parent_stable_key"] = "python.basics"
+    functions["prerequisite_stable_keys"] = ["project.delivery"]
+    functions["recommended_prerequisite_stable_keys"] = ["python.basics"]
+    functions["exit_criteria"][0].update(
+        {"text": "Compose and test functions", "required": False, "weight": 2}
+    )
+    functions["exit_criteria"].append(
+        {
+            "stable_key": "python.functions.explain",
+            "text": "Explain function composition",
+            "required": True,
+        }
+    )
+
+    preview = await client.post(
+        "/api/v1/import-export/import/inspect",
+        json={"filename": "roadmap.json", "package": _roadmap_package(updated, "full-diff")},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert preview.status_code == 200, preview.text
+    diff = preview.json()["diff"]["roadmap"]
+    assert diff["currentPhase"] == {"from": "phase-1", "to": "phase-2"}
+    modified = next(item for item in diff["modified"] if item["stableKey"] == "python.functions")
+    changes = modified["changes"]
+    assert changes["phaseStableKey"] == {"from": "phase-1", "to": "phase-2"}
+    assert changes["trackStableKey"] == {"from": "python", "to": "projects"}
+    assert changes["parentStableKey"] == {"from": None, "to": "python.basics"}
+    assert changes["requiredPrerequisites"] == {
+        "added": ["project.delivery"],
+        "removed": ["python.basics"],
+    }
+    assert changes["recommendedPrerequisites"] == {
+        "added": ["python.basics"],
+        "removed": [],
+    }
+    assert changes["exitCriteria"]["added"] == ["python.functions.explain"]
+    assert changes["exitCriteria"]["modified"][0]["changes"] == {
+        "text": {"from": "Compose functions", "to": "Compose and test functions"},
+        "required": {"from": True, "to": False},
+        "weight": {"from": None, "to": 2},
+    }
+    basics_modified = next(
+        item for item in diff["modified"] if item["stableKey"] == "python.basics"
+    )
+    assert basics_modified["changes"]["exitCriteria"]["removed"] == ["python.basics.program"]
+
+
 async def test_operation_history_and_backup_are_separate_from_portable_export(
     configured_client: tuple[AsyncClient, str, dict[str, object]], db: Session
 ) -> None:
