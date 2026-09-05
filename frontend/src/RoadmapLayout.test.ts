@@ -5,6 +5,7 @@ import {
   NODE_HEIGHT,
   PHASE_GAP,
   computeRoadmapLayout,
+  mergeLayoutNodes,
   toCanvasPosition,
   toPhaseLocalPosition,
   type CompetencyFlowNode,
@@ -187,5 +188,81 @@ describe('coordinate conversion', () => {
     const origin = { x: 412, y: 0 }
     const local = { x: 168, y: 208 }
     expect(toPhaseLocalPosition(origin, toCanvasPosition(origin, local))).toEqual(local)
+  })
+})
+
+describe('mergeLayoutNodes', () => {
+  it('reuses unchanged node objects across selection-only changes', () => {
+    const roadmap = buildRoadmap()
+    const expanded = new Set(['a', 'e'])
+    const layout = computeRoadmapLayout({ roadmap, expanded, onToggleExpand: noop })
+    const seeded = mergeLayoutNodes([], layout, new Map(), null)
+
+    const afterSelectA = mergeLayoutNodes(seeded, layout, new Map(), 'a')
+    expect(afterSelectA.find((node) => node.id === 'a')?.data.selected).toBe(true)
+    expect(seeded.find((node) => node.id === 'a')?.data.selected).toBe(false)
+
+    const afterSelectC = mergeLayoutNodes(afterSelectA, layout, new Map(), 'c')
+    expect(afterSelectC.find((node) => node.id === 'a')?.data.selected).toBe(false)
+    expect(afterSelectC.find((node) => node.id === 'c')?.data.selected).toBe(true)
+
+    for (const id of ['b', 'd', 'e', 'f', 'g', 'phase-p1', 'phase-p2']) {
+      expect(afterSelectC.find((node) => node.id === id)).toBe(seeded.find((node) => node.id === id))
+    }
+  })
+
+  it('does not recompute the geometry layout for a selection-only merge', () => {
+    const roadmap = buildRoadmap()
+    const expanded = new Set(['a', 'e'])
+    const layout = computeRoadmapLayout({ roadmap, expanded, onToggleExpand: noop })
+    const seeded = mergeLayoutNodes([], layout, new Map(), null)
+    const merged = mergeLayoutNodes(seeded, layout, new Map(), 'g')
+    for (const node of merged) {
+      const original = seeded.find((entry) => entry.id === node.id)
+      if (node.type === 'competency' && node.id !== 'g') {
+        expect(original?.data.expanded).toBe(node.data.expanded)
+        expect(original?.position).toEqual(node.position)
+      }
+    }
+    expect(merged.find((node) => node.id === 'g')?.data.selected).toBe(true)
+  })
+
+  it('keeps unchanged identities when expanding changes the geometry', () => {
+    const roadmap = buildRoadmap()
+    const collapsedLayout = computeRoadmapLayout({ roadmap, expanded: new Set(), onToggleExpand: noop })
+    const seeded = mergeLayoutNodes([], collapsedLayout, new Map(), null)
+
+    const expandedLayout = computeRoadmapLayout({ roadmap, expanded: new Set(['a']), onToggleExpand: noop })
+    const merged = mergeLayoutNodes(seeded, expandedLayout, new Map(), null)
+
+    expect(merged.some((node) => node.id === 'b')).toBe(true)
+    expect(merged.find((node) => node.id === 'a')?.data.expanded).toBe(true)
+    expect(merged.find((node) => node.id === 'a')).not.toBe(seeded.find((node) => node.id === 'a'))
+    for (const id of ['c', 'd', 'e', 'g', 'phase-p2']) {
+      expect(merged.find((node) => node.id === id)).toBe(seeded.find((node) => node.id === id))
+    }
+  })
+
+  it('drops collapsed children from the merged node set', () => {
+    const roadmap = buildRoadmap()
+    const expandedLayout = computeRoadmapLayout({ roadmap, expanded: new Set(['a', 'e']), onToggleExpand: noop })
+    const seeded = mergeLayoutNodes([], expandedLayout, new Map(), null)
+    const collapsedLayout = computeRoadmapLayout({ roadmap, expanded: new Set(['e']), onToggleExpand: noop })
+    const merged = mergeLayoutNodes(seeded, collapsedLayout, new Map(), null)
+    expect(merged.some((node) => node.id === 'b')).toBe(false)
+    expect(merged.find((node) => node.id === 'a')?.data.expanded).toBe(false)
+  })
+
+  it('re-applies in-flight drag overrides when merging', () => {
+    const roadmap = buildRoadmap()
+    const layout = computeRoadmapLayout({ roadmap, expanded: new Set(), onToggleExpand: noop })
+    const seeded = mergeLayoutNodes([], layout, new Map(), null)
+    const dragged = new Map([['c', { x: 999, y: 42 }]])
+    const merged = mergeLayoutNodes(seeded, layout, dragged, null)
+    expect(merged.find((node) => node.id === 'c')?.position).toEqual({
+      x: layout.phases[0].origin.x + 999,
+      y: 42,
+    })
+    expect(merged.find((node) => node.id === 'd')).toBe(seeded.find((node) => node.id === 'd'))
   })
 })

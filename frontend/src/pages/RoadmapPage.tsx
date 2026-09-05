@@ -1,8 +1,18 @@
-import { Background, Controls, MiniMap, ReactFlow, useNodesState, type NodeTypes } from '@xyflow/react'
+import {
+  Background,
+  Controls,
+  MiniMap,
+  ReactFlow,
+  useNodesState,
+  type NodeMouseHandler,
+  type NodeTypes,
+  type OnNodeDrag,
+  type OnNodesChange,
+} from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { ChevronRight, ListTree, Network, Search, ShieldCheck, Upload, X } from 'lucide-react'
 import { AnimatePresence, motion } from 'motion/react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import { ApiError, api } from '../api'
@@ -10,6 +20,7 @@ import { EmptyState, ErrorState, LoadingState } from '../components/PageState'
 import { CompetencyNode, PhaseContainerNode } from '../components/RoadmapNodes'
 import {
   computeRoadmapLayout,
+  mergeLayoutNodes,
   phaseOriginFor,
   toPhaseLocalPosition,
   type RoadmapFlowNode,
@@ -21,6 +32,7 @@ import type { Competency, ExitCriterion, Roadmap, Status } from '../types'
 type RoadmapResponse = { configured: boolean; guidance?: string; roadmap?: Roadmap }
 
 const roadmapNodeTypes: NodeTypes = { competency: CompetencyNode, phase: PhaseContainerNode }
+const fitViewOptions = { padding: 0.14 }
 
 export function RoadmapPage() {
   const [roadmap, setRoadmap] = useState<Roadmap | null>(null)
@@ -80,11 +92,10 @@ export function RoadmapPage() {
         ? computeRoadmapLayout({
             roadmap,
             expanded,
-            selectedId: selected?.definitionId ?? null,
             onToggleExpand,
           })
         : null,
-    [roadmap, expanded, selected?.definitionId, onToggleExpand],
+    [roadmap, expanded, onToggleExpand],
   )
 
   if (loading) return <LoadingState label="Mapping competencies" />
@@ -126,7 +137,12 @@ export function RoadmapPage() {
       {listMode || !layout ? (
         <RoadmapList roadmap={roadmap} query={query} setQuery={setQuery} select={setSelected} />
       ) : (
-        <RoadmapGraph layout={layout} select={setSelected} onToggleExpand={onToggleExpand} />
+        <RoadmapGraph
+          layout={layout}
+          selectedId={selected?.definitionId ?? null}
+          select={setSelected}
+          onToggleExpand={onToggleExpand}
+        />
       )}
       <AnimatePresence>{selected ? <CompetencyPanel competency={selected} close={() => setSelected(null)} refresh={load} /> : null}</AnimatePresence>
     </div>
@@ -145,66 +161,105 @@ function RoadmapHeader() {
   )
 }
 
-function RoadmapGraph({ layout, select, onToggleExpand }: {
+const RoadmapGraphCanvas = memo(function RoadmapGraphCanvas({
+  nodes,
+  edges,
+  onNodesChange,
+  onNodeClick,
+  onNodeDoubleClick,
+  onNodeDragStop,
+}: {
+  nodes: RoadmapFlowNode[]
+  edges: RoadmapLayout['edges']
+  onNodesChange: OnNodesChange<RoadmapFlowNode>
+  onNodeClick: NodeMouseHandler
+  onNodeDoubleClick: NodeMouseHandler
+  onNodeDragStop: OnNodeDrag
+}) {
+  return (
+    <ReactFlow
+      nodes={nodes}
+      edges={edges}
+      nodeTypes={roadmapNodeTypes}
+      elementsSelectable={false}
+      onNodesChange={onNodesChange}
+      onNodeClick={onNodeClick}
+      onNodeDoubleClick={onNodeDoubleClick}
+      onNodeDragStop={onNodeDragStop}
+      fitView
+      fitViewOptions={fitViewOptions}
+      minZoom={0.15}
+      maxZoom={1.8}
+    >
+      <Background color="#aab5ad" gap={28} size={1} />
+      <Controls showInteractive={false} />
+      <MiniMap
+        pannable
+        zoomable
+        nodeColor={(node) =>
+          node.type === 'competency' ? String(node.data?.statusColor ?? '#326653') : 'rgba(20,33,28,0.08)'
+        }
+      />
+    </ReactFlow>
+  )
+})
+
+function RoadmapGraph({ layout, selectedId, select, onToggleExpand }: {
   layout: RoadmapLayout
+  selectedId: string | null
   select: (item: Competency) => void
   onToggleExpand: (definitionId: string) => void
 }) {
-  const [nodes, setNodes, onNodesChange] = useNodesState<RoadmapFlowNode>(layout.nodes)
+  const [nodes, setNodes, onNodesChange] = useNodesState<RoadmapFlowNode>([])
   const draggedLocal = useRef(new Map<string, { x: number; y: number }>())
+  const layoutRef = useRef(layout)
+  layoutRef.current = layout
 
   useEffect(() => {
-    setNodes(
-      layout.nodes.map((node) => {
-        if (node.type !== 'competency') return node
-        const local = draggedLocal.current.get(node.id)
-        const origin = local ? phaseOriginFor(layout, node.id) : null
-        return local && origin
-          ? { ...node, position: { x: origin.x + local.x, y: origin.y + local.y } }
-          : node
-      }),
-    )
-  }, [layout, setNodes])
+    setNodes((previous) => mergeLayoutNodes(previous, layout, draggedLocal.current, selectedId))
+  }, [layout, selectedId, setNodes])
+
+  const onNodeClick = useCallback<NodeMouseHandler>(
+    (_event, node) => {
+      const currentLayout = layoutRef.current
+      const competency = currentLayout.visible.find((item) => item.definitionId === node.id)
+      if (competency) select(competency)
+    },
+    [select],
+  )
+
+  const onNodeDoubleClick = useCallback<NodeMouseHandler>(
+    (_event, node) => {
+      if (layoutRef.current.childrenByParent.has(node.id)) onToggleExpand(node.id)
+    },
+    [onToggleExpand],
+  )
+
+  const onNodeDragStop = useCallback<OnNodeDrag>(
+    (_event, node) => {
+      const currentLayout = layoutRef.current
+      const origin = phaseOriginFor(currentLayout, node.id)
+      if (!origin) return
+      const local = toPhaseLocalPosition(origin, node.position)
+      draggedLocal.current.set(node.id, local)
+      void api(`/roadmap/competencies/${node.id}/position`, {
+        method: 'PUT',
+        body: JSON.stringify(local),
+      })
+    },
+    [],
+  )
 
   return (
     <section className="surface relative h-[min(72vh,48rem)] min-h-[32rem] overflow-hidden 2xl:h-[min(76vh,56rem)]" aria-label="Interactive competency roadmap">
-      <ReactFlow
+      <RoadmapGraphCanvas
         nodes={nodes}
         edges={layout.edges}
-        nodeTypes={roadmapNodeTypes}
         onNodesChange={onNodesChange}
-        onNodeClick={(_event, node) => {
-          const competency = layout.visible.find((item) => item.definitionId === node.id)
-          if (competency) select(competency)
-        }}
-        onNodeDoubleClick={(_event, node) => {
-          if (layout.childrenByParent.has(node.id)) onToggleExpand(node.id)
-        }}
-        onNodeDragStop={(_event, node) => {
-          const origin = phaseOriginFor(layout, node.id)
-          if (!origin) return
-          const local = toPhaseLocalPosition(origin, node.position)
-          draggedLocal.current.set(node.id, local)
-          void api(`/roadmap/competencies/${node.id}/position`, {
-            method: 'PUT',
-            body: JSON.stringify(local),
-          })
-        }}
-        fitView
-        fitViewOptions={{ padding: 0.14 }}
-        minZoom={0.15}
-        maxZoom={1.8}
-      >
-        <Background color="#aab5ad" gap={28} size={1} />
-        <Controls showInteractive={false} />
-        <MiniMap
-          pannable
-          zoomable
-          nodeColor={(node) =>
-            node.type === 'competency' ? String(node.data?.statusColor ?? '#326653') : 'rgba(20,33,28,0.08)'
-          }
-        />
-      </ReactFlow>
+        onNodeClick={onNodeClick}
+        onNodeDoubleClick={onNodeDoubleClick}
+        onNodeDragStop={onNodeDragStop}
+      />
       <div className="pointer-events-none absolute right-3 top-3 flex max-w-[calc(100%-1.5rem)] flex-wrap items-center gap-x-4 gap-y-1 rounded-full bg-white/90 px-3.5 py-2 text-xs text-ink/60 shadow">
         <span className="flex items-center gap-1.5">
           <svg width="26" height="6" aria-hidden="true"><line x1="1" y1="3" x2="25" y2="3" stroke="#326653" strokeWidth="2" /></svg>

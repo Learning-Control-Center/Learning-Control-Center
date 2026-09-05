@@ -70,7 +70,12 @@ export type CompetencyNodeData = {
   competency: Competency
   childCount: number
   expanded: boolean
-  selected: boolean
+  /**
+   * Selection is a transient interaction layer, not part of the geometry.
+   * `computeRoadmapLayout` never sets it; the graph page applies it to the
+   * affected nodes only, so selection does not rebuild the layout.
+   */
+  selected?: boolean
   statusColor: string
   onToggleExpand: (definitionId: string) => void
   [key: string]: unknown
@@ -282,11 +287,9 @@ function layoutPhase(
 export function computeRoadmapLayout(options: {
   roadmap: Roadmap
   expanded: ReadonlySet<string>
-  selectedId?: string | null
   onToggleExpand: (definitionId: string) => void
 }): RoadmapLayout {
   const { roadmap, expanded, onToggleExpand } = options
-  const selectedId = options.selectedId ?? null
   const { all, visible, childrenByParent } = computeVisibleRoadmap(roadmap, expanded)
   const visibleIds = new Set(visible.map((item) => item.definitionId))
   const identityToDefinition = new Map(all.map((item) => [item.identityId, item.definitionId]))
@@ -346,7 +349,6 @@ export function computeRoadmapLayout(options: {
       competency: item,
       childCount: (childrenByParent.get(item.definitionId) ?? []).length,
       expanded: expanded.has(item.definitionId),
-      selected: item.definitionId === selectedId,
       statusColor: statusColor[item.status],
       onToggleExpand,
     },
@@ -405,4 +407,104 @@ export function computeRoadmapLayout(options: {
     childrenByParent,
     phaseByDefinition,
   }
+}
+
+type RenderPoint = { x: number; y: number }
+
+function samePoint(a: RenderPoint, b: RenderPoint): boolean {
+  return Math.abs(a.x - b.x) <= 0.01 && Math.abs(a.y - b.y) <= 0.01
+}
+
+function sameLane(a: LaneLayout, b: LaneLayout): boolean {
+  return (
+    a.trackId === b.trackId &&
+    a.title === b.title &&
+    a.y === b.y &&
+    a.height === b.height
+  )
+}
+
+function sameCompetencyData(a: CompetencyNodeData, b: CompetencyNodeData): boolean {
+  return (
+    a.childCount === b.childCount &&
+    a.expanded === b.expanded &&
+    a.statusColor === b.statusColor &&
+    a.onToggleExpand === b.onToggleExpand &&
+    a.competency.status === b.competency.status &&
+    a.competency.priority === b.competency.priority &&
+    a.competency.title === b.competency.title
+  )
+}
+
+function samePhaseData(a: PhaseNodeData, b: PhaseNodeData): boolean {
+  return (
+    a.title === b.title &&
+    a.orderIndex === b.orderIndex &&
+    a.isCurrent === b.isCurrent &&
+    a.width === b.width &&
+    a.height === b.height &&
+    a.empty === b.empty &&
+    a.lanes.length === b.lanes.length &&
+    a.lanes.every((lane, index) => sameLane(lane, b.lanes[index]))
+  )
+}
+
+/**
+ * Merges freshly computed layout nodes into the React Flow node state while
+ * preserving the object identity of every node whose geometry and rendered
+ * data are unchanged. React Flow skips re-renders for reused node objects, so
+ * interactions that touch only a couple of nodes (selection, panel open and
+ * close) no longer re-render the whole graph. Nodes whose geometry or data
+ * actually changed (drag positions, expand/collapse, moved phases) are
+ * replaced individually.
+ *
+ * Selection is applied here rather than inside `computeRoadmapLayout`: the
+ * layout function stays geometry-only, so detail-panel state cannot
+ * invalidate it.
+ */
+export function mergeLayoutNodes(
+  previous: RoadmapFlowNode[],
+  layout: RoadmapLayout,
+  draggedLocal: ReadonlyMap<string, RenderPoint>,
+  selectedId: string | null,
+): RoadmapFlowNode[] {
+  const previousById = new Map(previous.map((node) => [node.id, node]))
+  return layout.nodes.map((layoutNode) => {
+    const existing = previousById.get(layoutNode.id)
+    if (layoutNode.type === 'competency') {
+      if (existing === undefined || existing.type !== 'competency') {
+        return selectNode(layoutNode, layoutNode.id === selectedId)
+      }
+      const dragged = draggedLocal.get(layoutNode.id)
+      const origin = dragged ? phaseOriginFor(layout, layoutNode.id) : null
+      const position = dragged && origin ? { x: origin.x + dragged.x, y: origin.y + dragged.y } : layoutNode.position
+      const selected = layoutNode.id === selectedId
+      const unchanged =
+        samePoint(existing.position, position) &&
+        existing.data.selected === selected &&
+        sameCompetencyData(existing.data, layoutNode.data)
+      if (unchanged) return existing
+      return { ...existing, position, data: { ...layoutNode.data, selected } }
+    }
+    if (existing === undefined || existing.type !== 'phase') {
+      return layoutNode
+    }
+    const unchanged =
+      samePoint(existing.position, layoutNode.position) &&
+      existing.width === layoutNode.width &&
+      existing.height === layoutNode.height &&
+      samePhaseData(existing.data, layoutNode.data)
+    if (unchanged) return existing
+    return {
+      ...existing,
+      position: layoutNode.position,
+      width: layoutNode.width,
+      height: layoutNode.height,
+      data: layoutNode.data,
+    }
+  })
+}
+
+function selectNode(node: CompetencyFlowNode, selected: boolean): CompetencyFlowNode {
+  return { ...node, data: { ...node.data, selected } }
 }
