@@ -373,3 +373,37 @@ async def test_roadmap_update_and_replace_are_complete_version_aliases(
         current = await client.get("/api/v1/roadmap/current")
         assert current.json()["roadmap"]["activeVersion"]["version"] == version
         assert current.json()["roadmap"]["title"] == title
+
+
+async def test_dependency_cycles_are_validated_within_each_retained_version(
+    configured_client: tuple[AsyncClient, str, dict[str, object]],
+    roadmap_payload: dict[str, object],
+) -> None:
+    client, csrf, _roadmap = configured_client
+    incoming = deepcopy(roadmap_payload)
+    incoming["version"] = "2.0.0"
+    competencies = incoming["phases"][0]["tracks"][0]["competencies"]
+    basics = next(item for item in competencies if item["stable_key"] == "python.basics")
+    functions = next(item for item in competencies if item["stable_key"] == "python.functions")
+    basics["prerequisite_stable_keys"] = ["python.functions"]
+    functions["prerequisite_stable_keys"] = []
+    package = _package("roadmap_update", "opposite-valid-edges", {"roadmap": incoming})
+
+    preview = await client.post(
+        "/api/v1/import-export/import/inspect",
+        json={"filename": "roadmap-v2.json", "package": package},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert preview.status_code == 200, preview.text
+    applied = await client.post(
+        "/api/v1/import-export/import/apply",
+        json={
+            "filename": "roadmap-v2.json",
+            "package": package,
+            "confirmation_token": preview.json()["confirmationToken"],
+        },
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert applied.status_code == 200, applied.text
+    current = await client.get("/api/v1/roadmap/current")
+    assert current.json()["roadmap"]["activeVersion"]["version"] == "2.0.0"

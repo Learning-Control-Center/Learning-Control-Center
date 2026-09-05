@@ -14,7 +14,7 @@ from typing import Any, cast
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import ValidationError
-from sqlalchemy import Engine, Table, func, insert, select, text
+from sqlalchemy import Engine, Table, insert, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -23,7 +23,12 @@ from app.api_serialization import serialize_api_instants
 from app.auth import AuthContext, get_auth_context, require_csrf
 from app.config import Settings, get_settings_dependency
 from app.database import Base, create_database_engine, get_db
-from app.domain import has_required_dependency_cycle, transition_status
+from app.domain import transition_status
+from app.domain_integrity import (
+    portable_state_presence,
+    validate_domain_integrity,
+    validate_portable_row_types,
+)
 from app.errors import AppError
 from app.models import (
     ApplicationSetting,
@@ -510,6 +515,7 @@ def _validate_portable_payload(payload: dict[str, Any]) -> dict[str, Any]:
                 "PORTABLE_SCHEMA_INVALID",
                 f"Table {table_name} has missing or unknown fields.",
             )
+    validate_portable_row_types(tables, PORTABLE_BY_TABLE)
     with tempfile.NamedTemporaryFile(prefix="lcc-validate-", suffix=".sqlite3") as temporary:
         validation_engine = create_database_engine(f"sqlite:///{temporary.name}")
         try:
@@ -523,107 +529,7 @@ def _validate_portable_payload(payload: dict[str, Any]) -> dict[str, Any]:
                         "PORTABLE_DATA_INVALID",
                         "Portable backup values violate the canonical data model.",
                     ) from exc
-                violations = connection.execute(text("PRAGMA foreign_key_check")).all()
-                if violations:
-                    raise AppError(
-                        422,
-                        "PORTABLE_REFERENCES_INVALID",
-                        "Portable backup references are invalid.",
-                        {"violationCount": len(violations)},
-                    )
-                current_count = connection.scalar(
-                    select(func.count(Roadmap.id)).where(Roadmap.is_current.is_(True))
-                )
-                roadmap_count = connection.scalar(select(func.count(Roadmap.id)))
-                if roadmap_count and current_count != 1:
-                    raise AppError(
-                        422,
-                        "PORTABLE_ROADMAP_STATE_INVALID",
-                        "Configured roadmap data requires exactly one current roadmap.",
-                    )
-                roadmap_rows = connection.execute(
-                    select(
-                        Roadmap.id,
-                        Roadmap.is_current,
-                        Roadmap.active_version_id,
-                        Roadmap.current_phase_id,
-                    )
-                ).all()
-                for roadmap_row in roadmap_rows:
-                    if roadmap_row.is_current:
-                        if not roadmap_row.active_version_id or not roadmap_row.current_phase_id:
-                            raise AppError(
-                                422,
-                                "PORTABLE_ROADMAP_STATE_INVALID",
-                                "The current roadmap requires active version and phase pointers.",
-                            )
-                        version = connection.execute(
-                            select(RoadmapVersion.id, RoadmapVersion.roadmap_id).where(
-                                RoadmapVersion.id == roadmap_row.active_version_id
-                            )
-                        ).one()
-                        phase = connection.execute(
-                            select(Phase.roadmap_version_id, Phase.archived).where(
-                                Phase.id == roadmap_row.current_phase_id
-                            )
-                        ).one()
-                        if (
-                            version.roadmap_id != roadmap_row.id
-                            or phase.roadmap_version_id != version.id
-                            or phase.archived
-                        ):
-                            raise AppError(
-                                422,
-                                "PORTABLE_ROADMAP_STATE_INVALID",
-                                "The current roadmap pointers are inconsistent.",
-                            )
-                    elif roadmap_row.active_version_id or roadmap_row.current_phase_id:
-                        raise AppError(
-                            422,
-                            "PORTABLE_ROADMAP_STATE_INVALID",
-                            "A non-current roadmap cannot retain current pointers.",
-                        )
-                verified_ids = set(
-                    connection.execute(
-                        select(CompetencyState.competency_identity_id).where(
-                            CompetencyState.current_status == "verified"
-                        )
-                    ).scalars()
-                )
-                passed_ids = set(
-                    connection.execute(
-                        select(VerificationRecord.competency_identity_id).where(
-                            VerificationRecord.result == "passed"
-                        )
-                    ).scalars()
-                )
-                if verified_ids - passed_ids:
-                    raise AppError(
-                        422,
-                        "PORTABLE_VERIFICATION_INVALID",
-                        "Verified competency state requires passed verification history.",
-                    )
-                edges: dict[str, set[str]] = {}
-                definitions = connection.execute(
-                    select(CompetencyDefinition.id, CompetencyDefinition.competency_identity_id)
-                ).all()
-                definition_identity = {row.id: row.competency_identity_id for row in definitions}
-                for row in connection.execute(
-                    select(
-                        CompetencyPrerequisite.competency_definition_id,
-                        CompetencyPrerequisite.prerequisite_competency_identity_id,
-                    ).where(CompetencyPrerequisite.kind == "required")
-                ).all():
-                    identity_id = definition_identity[row.competency_definition_id]
-                    edges.setdefault(identity_id, set()).add(
-                        row.prerequisite_competency_identity_id
-                    )
-                if has_required_dependency_cycle(edges):
-                    raise AppError(
-                        422,
-                        "REQUIRED_DEPENDENCY_CYCLE",
-                        "Required prerequisites contain a cycle.",
-                    )
+                validate_domain_integrity(connection)
         finally:
             validation_engine.dispose()
     return {"tableCounts": {name: len(rows) for name, rows in sorted(tables.items())}}
@@ -651,15 +557,7 @@ def _preflight_application(
                 validation_db.flush()
                 operation(validation_db)
                 validation_db.flush()
-                violations = validation_db.execute(text("PRAGMA foreign_key_check")).all()
-                if violations:
-                    raise AppError(
-                        422,
-                        error_code,
-                        error_message,
-                        {"foreignKeyViolationCount": len(violations)},
-                    )
-                _validate_portable_payload(_portable_payload(validation_db))
+                validate_domain_integrity(validation_db)
         except AppError:
             raise
         except SQLAlchemyError as exc:
@@ -690,8 +588,12 @@ def _inspect_package(
     }
     if payload.package.packageType in {"portable_logical_backup", "restore"}:
         summary.update(_validate_portable_payload(payload.package.payload))
+        existing_state = portable_state_presence(db, PORTABLE_MODELS)
         summary["mode"] = "empty_state_or_full_replacement"
         summary["authenticationPreserved"] = True
+        summary["existingStateEmpty"] = not bool(existing_state)
+        summary["replacementRequired"] = bool(existing_state)
+        summary["existingPortableStateCounts"] = existing_state
     elif payload.package.packageType == "verification_update":
         try:
             verification_payload = VerificationUpdatePayload.model_validate(payload.package.payload)
@@ -849,21 +751,17 @@ def _delete_portable_state(db: Session) -> None:
 
 
 def _apply_portable_restore(db: Session, payload: dict[str, Any], replace_existing: bool) -> None:
-    existing_learning = sum(
-        db.scalar(select(func.count(model.id))) or 0
-        for model in (Roadmap, LearningSession, VerificationRecord)
-    )
-    if existing_learning and not replace_existing:
+    existing_state = portable_state_presence(db, PORTABLE_MODELS)
+    if existing_state and not replace_existing:
         raise AppError(
             409,
             "RESTORE_REPLACEMENT_CONFIRMATION_REQUIRED",
             "Existing learning state requires explicit full replacement.",
+            {"existingPortableStateCounts": existing_state},
         )
     _delete_portable_state(db)
     _insert_portable_tables(db.connection(), payload["tables"])
-    violations = db.execute(text("PRAGMA foreign_key_check")).all()
-    if violations:
-        raise AppError(422, "RESTORE_INTEGRITY_FAILED", "Post-restore integrity validation failed.")
+    validate_domain_integrity(db)
 
 
 def _apply_verification_update(db: Session, payload: VerificationUpdatePayload) -> None:
@@ -1036,11 +934,7 @@ async def apply_import(
                     pre_import_backup_reference=backup.path,
                 )
             )
-            violations = db.execute(text("PRAGMA foreign_key_check")).all()
-            if violations:
-                raise AppError(
-                    422, "IMPORT_INTEGRITY_FAILED", "Post-import integrity validation failed."
-                )
+            validate_domain_integrity(db)
     except AppError:
         db.rollback()
         logger.warning("Import apply rejected: type=%s", payload.package.packageType)

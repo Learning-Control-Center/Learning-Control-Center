@@ -114,7 +114,9 @@ Portable export uses purpose `portable_logical_backup`, format `json`, ignores s
 
 Every row must contain exactly every database column for that table. Use an application-produced export as the template; portable rows use internal database IDs and are not intended for hand authoring. `users`, `auth_sessions`, and `operational_backups` are excluded, as are password hashes, session/CSRF tokens, and backup filesystem paths.
 
-Restore accepts `portable_logical_backup` or `restore` with the same payload. It is never a merge: an empty learning state may restore directly; non-empty learning state requires explicit full-replacement confirmation. Authentication users and active sessions remain intact. Import inspection validates exact table/column coverage, values, foreign keys, one-current-roadmap pointers, verified-state evidence, and required-dependency cycles in a disposable database before mutation.
+Restore accepts `portable_logical_backup` or `restore` with the same payload. It is never a merge: an empty learning state may restore directly; non-empty portable state requires explicit full-replacement confirmation. Authentication users and active sessions remain intact. A pristine automatically created discipline profile counts as empty; changed discipline settings and every other populated portable table count as existing portable state.
+
+Import inspection validates exact table/column coverage, strict canonical scalar types, foreign keys, structured JSON, IANA timezones, complete competency state/history, current-roadmap pointers, phase/track/parent placement, exit-criterion ownership, verified-event evidence, and version-scoped hierarchy and required-dependency cycles in a disposable database before mutation. The same domain-integrity validation runs inside the restore transaction after insertion. Inspection and failed post-restore validation do not mutate the live portable state.
 
 ### Representative empty portable package
 
