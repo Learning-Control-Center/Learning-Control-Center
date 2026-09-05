@@ -21,13 +21,10 @@ import { ApiError, api } from '../api'
 import { EmptyState, ErrorState, LoadingState } from '../components/PageState'
 import { CompetencyNode, PhaseContainerNode } from '../components/RoadmapNodes'
 import {
-  clampToContentBounds,
   computeRoadmapLayout,
   mergeLayoutNodes,
   phaseOriginFor,
-  toCanvasPosition,
   toPhaseLocalPosition,
-  usableContentBounds,
   type RoadmapFlowNode,
   type RoadmapLayout,
 } from '../components/roadmapLayout'
@@ -334,21 +331,9 @@ function RoadmapGraph({
     (_event, node) => {
       const currentLayout = layoutRef.current
       const origin = phaseOriginFor(currentLayout, node.id)
-      const phaseId = currentLayout.phaseByDefinition.get(node.id)
-      const phase = phaseId
-        ? currentLayout.phases.find((entry) => entry.phase.id === phaseId)
-        : undefined
-      if (!origin || !phase) return
-      const bounds = usableContentBounds(phase.width, phase.height)
-      const raw = toPhaseLocalPosition(origin, node.position)
-      const local = clampToContentBounds(bounds, raw)
+      if (!origin) return
+      const local = toPhaseLocalPosition(origin, node.position)
       draggedLocal.current.set(node.id, local)
-      const clampedCanvas = toCanvasPosition(origin, local)
-      if (Math.abs(clampedCanvas.x - node.position.x) > 0.01 || Math.abs(clampedCanvas.y - node.position.y) > 0.01) {
-        setNodes((current) =>
-          current.map((item) => (item.id === node.id ? { ...item, position: clampedCanvas } : item)),
-        )
-      }
       void api(`/roadmap/competencies/${node.id}/position`, {
         method: 'PUT',
         body: JSON.stringify(local),
@@ -356,7 +341,7 @@ function RoadmapGraph({
         .then(() => onNotice('Position saved'))
         .catch(() => onNotice('Position could not be saved', 'error'))
     },
-    [onNotice, setNodes],
+    [onNotice],
   )
 
   return (
@@ -416,7 +401,7 @@ function RoadmapGraph({
         </span>
       </div>
       <p className="pointer-events-none absolute bottom-3 left-1/2 max-w-[calc(100%-1.5rem)] -translate-x-1/2 rounded-full bg-white/90 px-3 py-1.5 text-center text-xs text-ink/60 shadow">
-        Select a node for details · double-click a parent or use its chevron to expand or collapse · dragging saves the node's place in its phase
+        Select a node for details · double-click a parent or use its chevron to expand or collapse · dragging saves its free-form canvas position
       </p>
     </section>
   )

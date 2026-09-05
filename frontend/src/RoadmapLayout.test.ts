@@ -1,18 +1,13 @@
 import { describe, expect, it } from 'vitest'
 
 import {
-  NODE_GAP_X,
   NODE_GAP_Y,
   NODE_HEIGHT,
-  NODE_WIDTH,
   PHASE_GAP,
-  clampToContentBounds,
   computeRoadmapLayout,
-  containsPoint,
   mergeLayoutNodes,
   toCanvasPosition,
   toPhaseLocalPosition,
-  usableContentBounds,
   type CompetencyFlowNode,
 } from './components/roadmapLayout'
 import type { Competency, Phase, Roadmap, Track } from './types'
@@ -53,8 +48,8 @@ function phase(partial: Partial<Phase> & { id: string }): Phase {
 function buildRoadmap(): Roadmap {
   const a = competency({ definitionId: 'a', orderIndex: 0 })
   const b = competency({ definitionId: 'b', orderIndex: 1, parentDefinitionId: 'a' })
-  const c = competency({ definitionId: 'c', orderIndex: 2, position: { x: 500, y: 300 } })
-  const d = competency({ definitionId: 'd', orderIndex: 3, position: { x: 500, y: 300 } })
+  const c = competency({ definitionId: 'c', orderIndex: 2 })
+  const d = competency({ definitionId: 'd', orderIndex: 3 })
   const e = competency({ definitionId: 'e', orderIndex: 0 })
   const f = competency({
     definitionId: 'f',
@@ -132,7 +127,7 @@ describe('computeRoadmapLayout', () => {
     expect(collapsed.nodes.some((node) => node.id === 'b')).toBe(false)
   })
 
-  it('honours a stored position that fits the usable content area', () => {
+  it('honours a stored free-form position', () => {
     const roadmap = buildRoadmap()
     roadmap.phases[0].tracks[1].competencies[0].position = { x: 300, y: 202 }
     const layout = computeRoadmapLayout({ roadmap, expanded: new Set(), onToggleExpand: noop })
@@ -141,20 +136,17 @@ describe('computeRoadmapLayout', () => {
   })
 
   it.each([
-    ['negative y above the container', { x: 168, y: -40 }],
-    ['overlapping the phase header', { x: 168, y: 20 }],
-    ['inside the track-label gutter', { x: 50, y: 120 }],
-    ['beyond the container right edge', { x: 900, y: 76 }],
-    ['below the container bottom', { x: 168, y: 900 }],
-    ['legacy out-of-bounds value from the live roadmap', { x: 500, y: 300 }],
-  ])('ignores an invalid stored position (%s) and falls back to its slot', (_label, position) => {
+    ['negative Y above the phase', { x: 168, y: -140 }],
+    ['X beyond the phase right edge', { x: 900, y: 76 }],
+    ['Y below the phase bottom edge', { x: 168, y: 900 }],
+  ])('honours a manual position with %s', (_label, position) => {
     const roadmap = buildRoadmap()
     roadmap.phases[0].tracks[0].competencies.find((item) => item.definitionId === 'c')!.position = position
     const layout = computeRoadmapLayout({ roadmap, expanded: new Set(), onToggleExpand: noop })
-    expect(nodePosition(layout, 'c')).toEqual({ x: layout.phases[0].origin.x + 428, y: 76 })
+    expect(nodePosition(layout, 'c')).toEqual(toCanvasPosition(layout.phases[0].origin, position))
   })
 
-  it('keeps invalid stored positions out of the container geometry', () => {
+  it('does not let free-form positions inflate phase geometry or shift later phases', () => {
     const clean = buildRoadmap()
     const garbage = buildRoadmap()
     garbage.phases[0].tracks[0].competencies.find((item) => item.definitionId === 'c')!.position = {
@@ -189,7 +181,7 @@ describe('computeRoadmapLayout', () => {
     expect(nodePosition(layout, 'd')).toEqual({ x: layout.phases[0].origin.x + 168, y: 202 })
   })
 
-  it('de-collides render output without mutating stored positions', () => {
+  it('honours overlapping manual positions without mutating them', () => {
     const roadmap = buildRoadmap()
     const d = roadmap.phases[0].tracks[1].competencies.find((item) => item.definitionId === 'd')!
     const h = competency({ definitionId: 'h', orderIndex: 4 })
@@ -200,7 +192,7 @@ describe('computeRoadmapLayout', () => {
     const layout = computeRoadmapLayout({ roadmap, expanded: new Set(), onToggleExpand: noop })
     const dPosition = nodePosition(layout, 'd')
     const hPosition = nodePosition(layout, 'h')
-    expect(hPosition).not.toEqual(dPosition)
+    expect(hPosition).toEqual(dPosition)
     expect(dPosition).toEqual({ x: layout.phases[0].origin.x + 168, y: 202 })
     expect(JSON.stringify(roadmap)).toBe(before)
   })
@@ -243,6 +235,18 @@ describe('computeRoadmapLayout', () => {
     expect(parent?.draggable).not.toBe(false)
     expect(layout.nodes.find((node) => node.id === 'phase-p1')?.draggable).toBe(false)
   })
+
+  it('restores deterministic placement after manual positions are cleared', () => {
+    const roadmap = buildRoadmap()
+    const item = roadmap.phases[0].tracks[1].competencies[0]
+    item.position = { x: 900, y: -140 }
+    const manual = computeRoadmapLayout({ roadmap, expanded: new Set(), onToggleExpand: noop })
+    expect(nodePosition(manual, 'd')).toEqual({ x: 900, y: -140 })
+
+    item.position = { x: null, y: null }
+    const reset = computeRoadmapLayout({ roadmap, expanded: new Set(), onToggleExpand: noop })
+    expect(nodePosition(reset, 'd')).toEqual({ x: 168, y: 202 })
+  })
 })
 
 describe('coordinate conversion', () => {
@@ -250,51 +254,6 @@ describe('coordinate conversion', () => {
     const origin = { x: 412, y: 0 }
     const local = { x: 168, y: 208 }
     expect(toPhaseLocalPosition(origin, toCanvasPosition(origin, local))).toEqual(local)
-  })
-})
-
-describe('usable content bounds', () => {
-  it('gives a normal single-column phase a non-zero horizontal draggable range', () => {
-    const roadmap = buildRoadmap()
-    roadmap.phases[0].tracks = [
-      track({
-        id: 'foundations',
-        competencies: [competency({ definitionId: 'foundation-root' })],
-      }),
-    ]
-    const layout = computeRoadmapLayout({ roadmap, expanded: new Set(), onToggleExpand: noop })
-    const bounds = usableContentBounds(layout.phases[0].width, layout.phases[0].height)
-
-    expect(bounds.maxX - bounds.minX).toBe(NODE_WIDTH + NODE_GAP_X)
-  })
-
-  it('keeps cards below the header, right of the gutter, inside the paddings', () => {
-    const bounds = usableContentBounds(680, 332)
-    expect(bounds).toEqual({ minX: 168, minY: 76, maxX: 428, maxY: 202 })
-    expect(containsPoint(bounds, { x: 168, y: 76 })).toBe(true)
-    expect(containsPoint(bounds, { x: 428, y: 202 })).toBe(true)
-    expect(containsPoint(bounds, { x: 50, y: 120 })).toBe(false)
-    expect(containsPoint(bounds, { x: 168, y: 20 })).toBe(false)
-    expect(containsPoint(bounds, { x: 168, y: -40 })).toBe(false)
-    expect(containsPoint(bounds, { x: 500, y: 300 })).toBe(false)
-  })
-
-  it('clamps dragged coordinates into the usable content area', () => {
-    const bounds = usableContentBounds(680, 332)
-    expect(clampToContentBounds(bounds, { x: -80, y: -500 })).toEqual({ x: 168, y: 76 })
-    expect(clampToContentBounds(bounds, { x: 9000, y: 9000 })).toEqual({ x: 428, y: 202 })
-    expect(clampToContentBounds(bounds, { x: 300, y: 150 })).toEqual({ x: 300, y: 150 })
-  })
-
-  it('allows multiple X positions while clamping both axes at the usable boundaries', () => {
-    const bounds = usableContentBounds(680, 332)
-
-    expect(clampToContentBounds(bounds, { x: 220, y: 100 })).toEqual({ x: 220, y: 100 })
-    expect(clampToContentBounds(bounds, { x: 360, y: 160 })).toEqual({ x: 360, y: 160 })
-    expect(clampToContentBounds(bounds, { x: bounds.minX - 1, y: 100 }).x).toBe(bounds.minX)
-    expect(clampToContentBounds(bounds, { x: bounds.maxX + 1, y: 100 }).x).toBe(bounds.maxX)
-    expect(clampToContentBounds(bounds, { x: 220, y: bounds.minY - 1 }).y).toBe(bounds.minY)
-    expect(clampToContentBounds(bounds, { x: 220, y: bounds.maxY + 1 }).y).toBe(bounds.maxY)
   })
 })
 
@@ -345,53 +304,20 @@ describe('mergeLayoutNodes', () => {
     expect(merged.some((node) => node.id === 'b')).toBe(true)
     expect(merged.find((node) => node.id === 'a')?.data.expanded).toBe(true)
     expect(merged.find((node) => node.id === 'a')).not.toBe(seeded.find((node) => node.id === 'a'))
-    // Nodes in the same phase as the expansion get new drag extents when the
-    // container grows; nodes in untouched phases keep their object identity.
-    expect(merged.find((node) => node.id === 'c')).not.toBe(seeded.find((node) => node.id === 'c'))
-    expect(merged.find((node) => node.id === 'd')).not.toBe(seeded.find((node) => node.id === 'd'))
-    for (const id of ['e', 'g', 'phase-p2']) {
+    // Nodes whose geometry is untouched retain identity. Only the later lane
+    // in the same phase shifts when the expanded hierarchy makes lane one taller.
+    for (const id of ['c', 'e', 'g', 'phase-p2']) {
       expect(merged.find((node) => node.id === id)).toBe(seeded.find((node) => node.id === id))
     }
+    expect(merged.find((node) => node.id === 'd')).not.toBe(seeded.find((node) => node.id === 'd'))
   })
 
-  it('constrains competency drag extents to the usable phase content area', () => {
-    const roadmap = buildRoadmap()
-    const layout = computeRoadmapLayout({ roadmap, expanded: new Set(), onToggleExpand: noop })
-    const seeded = mergeLayoutNodes([], layout, new Map(), null)
-    const p1 = layout.phases[0]
-    const d = seeded.find((node) => node.id === 'd')
-    expect(d?.type).toBe('competency')
-    expect(d?.extent).toEqual([
-      [p1.origin.x + 168, p1.origin.y + 76],
-      [p1.origin.x + p1.width - 20, p1.origin.y + p1.height - 18],
-    ])
-    const phaseNodes = seeded.filter((node) => node.type === 'phase')
-    expect(phaseNodes.every((node) => node.extent === undefined)).toBe(true)
-  })
-
-  it('passes outer content edges to React Flow so it subtracts node dimensions exactly once', () => {
+  it('leaves competency nodes ungrouped and without a drag extent for free canvas movement', () => {
     const layout = computeRoadmapLayout({ roadmap: buildRoadmap(), expanded: new Set(), onToggleExpand: noop })
     const seeded = mergeLayoutNodes([], layout, new Map(), null)
-    const phase = layout.phases[0]
-    const node = seeded.find((entry) => entry.id === 'd')
-    if (!node?.extent || node.extent === 'parent') throw new Error('Missing coordinate extent')
-    const bounds = usableContentBounds(phase.width, phase.height)
-
-    expect(node.extent[0]).toEqual([phase.origin.x + bounds.minX, phase.origin.y + bounds.minY])
-    expect(node.extent[1]).toEqual([
-      phase.origin.x + bounds.maxX + NODE_WIDTH,
-      phase.origin.y + bounds.maxY + NODE_HEIGHT,
-    ])
-  })
-
-  it('replaces a node whose container grew so its drag extent stays current', () => {
-    const roadmap = buildRoadmap()
-    const layout = computeRoadmapLayout({ roadmap, expanded: new Set(), onToggleExpand: noop })
-    const seeded = mergeLayoutNodes([], layout, new Map(), null)
-    const grown = computeRoadmapLayout({ roadmap, expanded: new Set(['a']), onToggleExpand: noop })
-    const merged = mergeLayoutNodes(seeded, grown, new Map(), null)
-    expect(merged.find((node) => node.id === 'd')).not.toBe(seeded.find((node) => node.id === 'd'))
-    expect(merged.find((node) => node.id === 'd')?.extent).not.toEqual(seeded.find((node) => node.id === 'd')?.extent)
+    const competencies = seeded.filter((node) => node.type === 'competency')
+    expect(competencies.every((node) => node.parentId === undefined)).toBe(true)
+    expect(competencies.every((node) => node.extent === undefined)).toBe(true)
   })
 
   it('drops collapsed children from the merged node set', () => {
@@ -417,11 +343,11 @@ describe('mergeLayoutNodes', () => {
     expect(merged.find((node) => node.id === 'd')).toBe(seeded.find((node) => node.id === 'd'))
   })
 
-  it('keeps a valid changed X through drag merge and persisted-layout reload', () => {
+  it('keeps an outside-phase position through drag merge and persisted-layout reload', () => {
     const roadmap = buildRoadmap()
     const initial = computeRoadmapLayout({ roadmap, expanded: new Set(), onToggleExpand: noop })
     const seeded = mergeLayoutNodes([], initial, new Map(), null)
-    const local = { x: 300, y: 150 }
+    const local = { x: initial.phases[1].origin.x + 120, y: -180 }
     const dragged = mergeLayoutNodes(seeded, initial, new Map([['d', local]]), null)
     expect(dragged.find((node) => node.id === 'd')?.position).toEqual({
       x: initial.phases[0].origin.x + local.x,
@@ -435,5 +361,7 @@ describe('mergeLayoutNodes', () => {
       x: reloaded.phases[0].origin.x + local.x,
       y: reloaded.phases[0].origin.y + local.y,
     })
+    expect(reloaded.phaseByDefinition.get('d')).toBe('p1')
+    expect(roadmap.phases[0].tracks[1].competencies[0].definitionId).toBe('d')
   })
 })
