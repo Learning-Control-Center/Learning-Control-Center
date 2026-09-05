@@ -1,34 +1,26 @@
-import {
-  Background,
-  Controls,
-  Edge,
-  MiniMap,
-  Node,
-  ReactFlow,
-  useEdgesState,
-  useNodesState,
-} from '@xyflow/react'
+import { Background, Controls, MiniMap, ReactFlow, useNodesState, type NodeTypes } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { ChevronRight, ListTree, Network, Search, ShieldCheck, Upload, X } from 'lucide-react'
 import { AnimatePresence, motion } from 'motion/react'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import { ApiError, api } from '../api'
 import { EmptyState, ErrorState, LoadingState } from '../components/PageState'
+import { CompetencyNode, PhaseContainerNode } from '../components/RoadmapNodes'
+import {
+  computeRoadmapLayout,
+  phaseOriginFor,
+  toPhaseLocalPosition,
+  type RoadmapFlowNode,
+  type RoadmapLayout,
+} from '../components/roadmapLayout'
 import { StatusBadge } from '../components/StatusBadge'
 import type { Competency, ExitCriterion, Roadmap, Status } from '../types'
 
 type RoadmapResponse = { configured: boolean; guidance?: string; roadmap?: Roadmap }
 
-const statusBorder: Record<Status, string> = {
-  not_started: '#9ca39e',
-  learning: '#3c82a0',
-  practicing: '#bd7b2d',
-  ready_for_verification: '#7357a5',
-  verified: '#326653',
-  needs_review: '#b24f5c',
-}
+const roadmapNodeTypes: NodeTypes = { competency: CompetencyNode, phase: PhaseContainerNode }
 
 export function RoadmapPage() {
   const [roadmap, setRoadmap] = useState<Roadmap | null>(null)
@@ -73,6 +65,28 @@ export function RoadmapPage() {
     void load()
   }, [load])
 
+  const onToggleExpand = useCallback((definitionId: string) => {
+    setExpanded((current) => {
+      const next = new Set(current)
+      if (next.has(definitionId)) next.delete(definitionId)
+      else next.add(definitionId)
+      return next
+    })
+  }, [])
+
+  const layout = useMemo(
+    () =>
+      roadmap
+        ? computeRoadmapLayout({
+            roadmap,
+            expanded,
+            selectedId: selected?.definitionId ?? null,
+            onToggleExpand,
+          })
+        : null,
+    [roadmap, expanded, selected?.definitionId, onToggleExpand],
+  )
+
   if (loading) return <LoadingState label="Mapping competencies" />
   if (error) return <ErrorState message={error} retry={() => void load()} />
   if (!roadmap) {
@@ -96,63 +110,6 @@ export function RoadmapPage() {
     )
   }
 
-  const all = roadmap.phases.flatMap((phase) => phase.tracks.flatMap((track) => track.competencies))
-  const childrenByParent = new Map<string, Competency[]>()
-  all.forEach((item) => {
-    if (item.parentDefinitionId) {
-      childrenByParent.set(item.parentDefinitionId, [...(childrenByParent.get(item.parentDefinitionId) ?? []), item])
-    }
-  })
-  const visible = all.filter((item) => {
-    if (!item.parentDefinitionId) return true
-    let parentId: string | null = item.parentDefinitionId
-    while (parentId) {
-      if (!expanded.has(parentId)) return false
-      parentId = all.find((candidate) => candidate.definitionId === parentId)?.parentDefinitionId ?? null
-    }
-    return true
-  })
-  const graphNodes: Node[] = visible.map((item, index) => ({
-    id: item.definitionId,
-    position: {
-      x: item.position.x ?? (index % 4) * 280,
-      y: item.position.y ?? Math.floor(index / 4) * 150,
-    },
-    data: {
-      label: (
-        <div className="min-w-[12rem] text-left">
-          <p className="text-[0.65rem] font-semibold uppercase tracking-wider text-ink/45">{item.priority}</p>
-          <p className="mt-1 font-display font-semibold">{item.title}</p>
-          <p className="mt-1 text-xs text-ink/50">{item.status.replaceAll('_', ' ')}</p>
-        </div>
-      ),
-    },
-    style: {
-      border: `2px solid ${statusBorder[item.status]}`,
-      borderRadius: 16,
-      padding: 14,
-      background: '#fffdf8',
-      boxShadow: '0 12px 30px rgba(20,33,28,.09)',
-    },
-  }))
-  const visibleIds = new Set(visible.map((item) => item.definitionId))
-  const identityDefinition = new Map(all.map((item) => [item.identityId, item.definitionId]))
-  const graphEdges: Edge[] = visible.flatMap((item) => [
-    ...(item.parentDefinitionId && visibleIds.has(item.parentDefinitionId)
-      ? [{ id: `parent-${item.definitionId}`, source: item.parentDefinitionId, target: item.definitionId, animated: false }]
-      : []),
-    ...item.prerequisites
-      .map((prerequisite) => identityDefinition.get(prerequisite.identityId))
-      .filter((id): id is string => Boolean(id && visibleIds.has(id)))
-      .map((source) => ({
-        id: `prereq-${source}-${item.definitionId}`,
-        source,
-        target: item.definitionId,
-        animated: item.status !== 'verified',
-        style: { strokeDasharray: item.prerequisites.find((entry) => identityDefinition.get(entry.identityId) === source)?.kind === 'recommended' ? '5 5' : undefined },
-      })),
-  ])
-
   return (
     <div className="w-full">
       <header className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
@@ -166,17 +123,10 @@ export function RoadmapPage() {
           {listMode ? 'Graph view' : 'Accessible list'}
         </button>
       </header>
-      {listMode ? (
+      {listMode || !layout ? (
         <RoadmapList roadmap={roadmap} query={query} setQuery={setQuery} select={setSelected} />
       ) : (
-        <RoadmapGraph
-          nodes={graphNodes}
-          edges={graphEdges}
-          visible={visible}
-          childrenByParent={childrenByParent}
-          setExpanded={setExpanded}
-          select={setSelected}
-        />
+        <RoadmapGraph layout={layout} select={setSelected} onToggleExpand={onToggleExpand} />
       )}
       <AnimatePresence>{selected ? <CompetencyPanel competency={selected} close={() => setSelected(null)} refresh={load} /> : null}</AnimatePresence>
     </div>
@@ -195,55 +145,82 @@ function RoadmapHeader() {
   )
 }
 
-function RoadmapGraph({ nodes: initialNodes, edges: initialEdges, visible, childrenByParent, setExpanded, select }: {
-  nodes: Node[]
-  edges: Edge[]
-  visible: Competency[]
-  childrenByParent: Map<string, Competency[]>
-  setExpanded: React.Dispatch<React.SetStateAction<Set<string>>>
+function RoadmapGraph({ layout, select, onToggleExpand }: {
+  layout: RoadmapLayout
   select: (item: Competency) => void
+  onToggleExpand: (definitionId: string) => void
 }) {
-  const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes)
-  const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges)
-  useEffect(() => setNodes(initialNodes), [initialNodes, setNodes])
-  useEffect(() => setEdges(initialEdges), [initialEdges, setEdges])
+  const [nodes, setNodes, onNodesChange] = useNodesState<RoadmapFlowNode>(layout.nodes)
+  const draggedLocal = useRef(new Map<string, { x: number; y: number }>())
+
+  useEffect(() => {
+    setNodes(
+      layout.nodes.map((node) => {
+        if (node.type !== 'competency') return node
+        const local = draggedLocal.current.get(node.id)
+        const origin = local ? phaseOriginFor(layout, node.id) : null
+        return local && origin
+          ? { ...node, position: { x: origin.x + local.x, y: origin.y + local.y } }
+          : node
+      }),
+    )
+  }, [layout, setNodes])
 
   return (
     <section className="surface relative h-[min(72vh,48rem)] min-h-[32rem] overflow-hidden 2xl:h-[min(76vh,56rem)]" aria-label="Interactive competency roadmap">
       <ReactFlow
         nodes={nodes}
-        edges={edges}
+        edges={layout.edges}
+        nodeTypes={roadmapNodeTypes}
         onNodesChange={onNodesChange}
-        onEdgesChange={onEdgesChange}
         onNodeClick={(_event, node) => {
-          const competency = visible.find((item) => item.definitionId === node.id)
+          const competency = layout.visible.find((item) => item.definitionId === node.id)
           if (competency) select(competency)
         }}
         onNodeDoubleClick={(_event, node) => {
-          if (!childrenByParent.has(node.id)) return
-          setExpanded((current) => {
-            const next = new Set(current)
-            if (next.has(node.id)) next.delete(node.id)
-            else next.add(node.id)
-            return next
-          })
+          if (layout.childrenByParent.has(node.id)) onToggleExpand(node.id)
         }}
         onNodeDragStop={(_event, node) => {
+          const origin = phaseOriginFor(layout, node.id)
+          if (!origin) return
+          const local = toPhaseLocalPosition(origin, node.position)
+          draggedLocal.current.set(node.id, local)
           void api(`/roadmap/competencies/${node.id}/position`, {
             method: 'PUT',
-            body: JSON.stringify({ x: Math.round(node.position.x), y: Math.round(node.position.y) }),
+            body: JSON.stringify(local),
           })
         }}
         fitView
-        minZoom={0.25}
+        fitViewOptions={{ padding: 0.14 }}
+        minZoom={0.15}
         maxZoom={1.8}
       >
         <Background color="#aab5ad" gap={28} size={1} />
         <Controls showInteractive={false} />
-        <MiniMap pannable zoomable nodeColor={(node) => String(node.style?.borderColor ?? '#326653')} />
+        <MiniMap
+          pannable
+          zoomable
+          nodeColor={(node) =>
+            node.type === 'competency' ? String(node.data?.statusColor ?? '#326653') : 'rgba(20,33,28,0.08)'
+          }
+        />
       </ReactFlow>
+      <div className="pointer-events-none absolute right-3 top-3 flex max-w-[calc(100%-1.5rem)] flex-wrap items-center gap-x-4 gap-y-1 rounded-full bg-white/90 px-3.5 py-2 text-xs text-ink/60 shadow">
+        <span className="flex items-center gap-1.5">
+          <svg width="26" height="6" aria-hidden="true"><line x1="1" y1="3" x2="25" y2="3" stroke="#326653" strokeWidth="2" /></svg>
+          Required prerequisite
+        </span>
+        <span className="flex items-center gap-1.5">
+          <svg width="26" height="6" aria-hidden="true"><line x1="1" y1="3" x2="25" y2="3" stroke="#93a69b" strokeWidth="1.5" strokeDasharray="5 4" /></svg>
+          Recommended
+        </span>
+        <span className="flex items-center gap-1.5">
+          <svg width="26" height="6" aria-hidden="true"><line x1="1" y1="3" x2="25" y2="3" stroke="#b7c2ba" strokeWidth="1.5" /></svg>
+          Contains
+        </span>
+      </div>
       <p className="pointer-events-none absolute bottom-3 left-1/2 max-w-[calc(100%-1.5rem)] -translate-x-1/2 rounded-full bg-white/90 px-3 py-1.5 text-center text-xs text-ink/60 shadow">
-        Double-click a parent to expand or collapse · drag to save position
+        Select a node for details · double-click a parent or use its chevron to expand or collapse · dragging saves the node's place in its phase
       </p>
     </section>
   )
