@@ -27,6 +27,7 @@ PORTABLE_DOMAIN_TABLES = {
         "roadmap_versions",
         "phases",
         "tracks",
+        "roadmap_scope_events",
         "competency_identities",
         "competency_definitions",
         "competency_prerequisites",

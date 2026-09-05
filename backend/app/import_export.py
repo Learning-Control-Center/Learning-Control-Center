@@ -52,6 +52,7 @@ from app.models import (
     Phase,
     RecommendationSnapshot,
     Roadmap,
+    RoadmapScopeEvent,
     RoadmapVersion,
     Track,
     VerificationEvidence,
@@ -84,6 +85,7 @@ PORTABLE_MODELS = [
     RoadmapVersion,
     Phase,
     Track,
+    RoadmapScopeEvent,
     CompetencyIdentity,
     CompetencyDefinition,
     CompetencyPrerequisite,
@@ -490,22 +492,70 @@ def _insert_portable_tables(connection: Any, tables: dict[str, list[dict[str, An
         )
 
 
-def _validate_portable_payload(payload: dict[str, Any]) -> dict[str, Any]:
+def _legacy_scope_baseline(
+    tables: dict[str, list[dict[str, Any]]], package_id: str
+) -> list[dict[str, Any]]:
+    current_roadmaps = [row for row in tables["roadmaps"] if row.get("is_current") is True]
+    if len(current_roadmaps) != 1:
+        return []
+    roadmap = current_roadmaps[0]
+    roadmap_id = roadmap.get("id")
+    version_id = roadmap.get("active_version_id")
+    phase_id = roadmap.get("current_phase_id")
+    occurred_at = roadmap.get("updated_at")
+    if not all(isinstance(value, str) for value in (roadmap_id, version_id, phase_id)):
+        return []
+    if type(occurred_at) is not int:
+        return []
+    event_id = str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"lcc:scope-baseline:{package_id}:{roadmap_id}:{version_id}:{phase_id}",
+        )
+    )
+    return [
+        {
+            "id": event_id,
+            "roadmap_id": roadmap_id,
+            "roadmap_version_id": version_id,
+            "phase_id": phase_id,
+            "source": "restore_baseline",
+            "reason": "Current scope baseline from legacy portable backup",
+            "occurred_at": occurred_at,
+            "event_sequence": 1,
+        }
+    ]
+
+
+def _normalize_portable_tables(
+    payload: dict[str, Any], package_id: str
+) -> tuple[dict[str, list[dict[str, Any]]], bool]:
     try:
-        tables = PortablePackagePayload.model_validate(payload).tables
+        parsed_tables = PortablePackagePayload.model_validate(payload).tables
     except ValidationError as exc:
         raise AppError(
             422, "PORTABLE_SCHEMA_INVALID", "The portable backup payload is invalid."
         ) from exc
+    tables = {table_name: [dict(row) for row in rows] for table_name, rows in parsed_tables.items()}
     unknown = set(tables) - set(PORTABLE_BY_TABLE)
     missing = set(PORTABLE_BY_TABLE) - set(tables)
-    if unknown or missing:
+    legacy_without_scope_history = missing == {"roadmap_scope_events"}
+    if unknown or (missing and not legacy_without_scope_history):
         raise AppError(
             422,
             "PORTABLE_SCHEMA_INVALID",
             "Portable backup table coverage is invalid.",
             {"unknownTables": sorted(unknown), "missingTables": sorted(missing)},
         )
+    if legacy_without_scope_history:
+        tables["roadmap_scope_events"] = _legacy_scope_baseline(tables, package_id)
+    return tables, legacy_without_scope_history
+
+
+def _validate_portable_payload(
+    payload: dict[str, Any], package_id: str
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any]]:
+    tables, legacy_without_scope_history = _normalize_portable_tables(payload, package_id)
     for table_name, rows in tables.items():
         if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
             raise AppError(422, "PORTABLE_SCHEMA_INVALID", f"Table {table_name} has invalid rows.")
@@ -533,13 +583,21 @@ def _validate_portable_payload(payload: dict[str, Any]) -> dict[str, Any]:
                 validate_domain_integrity(connection)
         finally:
             validation_engine.dispose()
-    return {"tableCounts": {name: len(rows) for name, rows in sorted(tables.items())}}
+    return tables, {
+        "tableCounts": {name: len(rows) for name, rows in sorted(tables.items())},
+        "portableCompatibility": (
+            "legacy_scope_baseline" if legacy_without_scope_history else "current"
+        ),
+        "scopeHistoryBaselineAdded": bool(
+            legacy_without_scope_history and tables["roadmap_scope_events"]
+        ),
+    }
 
 
 def _apply_roadmap_update(db: Session, payload: RoadmapCreate) -> None:
     from app.roadmap import apply_roadmap_payload
 
-    apply_roadmap_payload(db, payload)
+    apply_roadmap_payload(db, payload, scope_event_source="roadmap_import")
 
 
 def _preflight_application(
@@ -588,10 +646,12 @@ def _inspect_package(
         "sizeBytes": size,
     }
     if payload.package.packageType in {"portable_logical_backup", "restore"}:
-        summary.update(_validate_portable_payload(payload.package.payload))
+        incoming_tables, validation_summary = _validate_portable_payload(
+            payload.package.payload, payload.package.packageId
+        )
+        summary.update(validation_summary)
         existing_state = portable_state_presence(db, PORTABLE_MODELS)
         existing_tables = _portable_payload(db)["tables"]
-        incoming_tables = payload.package.payload["tables"]
         summary["mode"] = "empty_state_or_full_replacement"
         summary["authenticationPreserved"] = True
         summary["existingStateEmpty"] = not bool(existing_state)
@@ -714,7 +774,26 @@ def _delete_portable_state(db: Session) -> None:
     db.flush()
 
 
-def _apply_portable_restore(db: Session, payload: dict[str, Any], replace_existing: bool) -> None:
+def _current_scope(db: Session) -> tuple[str, str, str] | None:
+    roadmap = db.execute(
+        select(Roadmap.id, Roadmap.active_version_id, Roadmap.current_phase_id).where(
+            Roadmap.is_current.is_(True)
+        )
+    ).first()
+    if roadmap is None or roadmap.active_version_id is None or roadmap.current_phase_id is None:
+        return None
+    return roadmap.id, roadmap.active_version_id, roadmap.current_phase_id
+
+
+def _apply_portable_restore(
+    db: Session,
+    payload: dict[str, Any],
+    replace_existing: bool,
+    *,
+    package_id: str = "direct-restore",
+) -> None:
+    tables, legacy_without_scope_history = _normalize_portable_tables(payload, package_id)
+    previous_scope = _current_scope(db)
     existing_state = portable_state_presence(db, PORTABLE_MODELS)
     if existing_state and not replace_existing:
         raise AppError(
@@ -724,7 +803,23 @@ def _apply_portable_restore(db: Session, payload: dict[str, Any], replace_existi
             {"existingPortableStateCounts": existing_state},
         )
     _delete_portable_state(db)
-    _insert_portable_tables(db.connection(), payload["tables"])
+    _insert_portable_tables(db.connection(), tables)
+    restored_scope = _current_scope(db)
+    if (
+        not legacy_without_scope_history
+        and restored_scope is not None
+        and restored_scope != previous_scope
+    ):
+        from app.roadmap import record_roadmap_scope_event
+
+        record_roadmap_scope_event(
+            db,
+            roadmap_id=restored_scope[0],
+            roadmap_version_id=restored_scope[1],
+            phase_id=restored_scope[2],
+            source="portable_restore",
+            reason="Current scope activated by portable restore",
+        )
     validate_domain_integrity(db)
 
 
@@ -874,7 +969,12 @@ async def apply_import(
         with db.begin():
             backup = create_operational_backup(db, settings, "pre-import")
             if payload.package.packageType in {"portable_logical_backup", "restore"}:
-                _apply_portable_restore(db, payload.package.payload, payload.replace_existing)
+                _apply_portable_restore(
+                    db,
+                    payload.package.payload,
+                    payload.replace_existing,
+                    package_id=payload.package.packageId,
+                )
             elif payload.package.packageType == "verification_update":
                 _apply_verification_update(
                     db, VerificationUpdatePayload.model_validate(payload.package.payload)

@@ -23,13 +23,14 @@ from app.models import (
     ExitCriterionIdentity,
     Phase,
     Roadmap,
+    RoadmapScopeEvent,
     RoadmapVersion,
     Track,
     VerificationEvidence,
     VerificationRecord,
 )
 from app.schemas import ExitCriterionStateUpdate, RoadmapCreate, StatusUpdate
-from app.time_utils import epoch_ms_to_rfc3339
+from app.time_utils import epoch_ms_to_rfc3339, utc_now_ms
 
 router = APIRouter(prefix="/roadmap", tags=["roadmap"])
 
@@ -253,7 +254,43 @@ def validate_roadmap_payload(payload: RoadmapCreate) -> None:
         )
 
 
-def apply_roadmap_payload(db: Session, payload: RoadmapCreate) -> Roadmap:
+def record_roadmap_scope_event(
+    db: Session,
+    *,
+    roadmap_id: str,
+    roadmap_version_id: str,
+    phase_id: str,
+    source: str,
+    reason: str,
+    occurred_at: int | None = None,
+) -> RoadmapScopeEvent:
+    latest = db.scalar(
+        select(RoadmapScopeEvent).order_by(RoadmapScopeEvent.event_sequence.desc()).limit(1)
+    )
+    sequence = (latest.event_sequence if latest else 0) + 1
+    event_time = occurred_at if occurred_at is not None else utc_now_ms()
+    if latest is not None:
+        event_time = max(event_time, latest.occurred_at)
+    event = RoadmapScopeEvent(
+        roadmap_id=roadmap_id,
+        roadmap_version_id=roadmap_version_id,
+        phase_id=phase_id,
+        source=source,
+        reason=reason,
+        occurred_at=event_time,
+        event_sequence=sequence,
+    )
+    db.add(event)
+    db.flush()
+    return event
+
+
+def apply_roadmap_payload(
+    db: Session,
+    payload: RoadmapCreate,
+    *,
+    scope_event_source: str = "roadmap_apply",
+) -> Roadmap:
     validate_roadmap_payload(payload)
 
     existing_current = db.scalar(select(Roadmap).where(Roadmap.is_current.is_(True)))
@@ -435,6 +472,14 @@ def apply_roadmap_payload(db: Session, payload: RoadmapCreate) -> Roadmap:
     roadmap.active_version_id = version.id
     roadmap.current_phase_id = phases[payload.current_phase_stable_key].id
     db.flush()
+    record_roadmap_scope_event(
+        db,
+        roadmap_id=roadmap.id,
+        roadmap_version_id=version.id,
+        phase_id=phases[payload.current_phase_stable_key].id,
+        source=scope_event_source,
+        reason="Roadmap version activated",
+    )
     return roadmap
 
 
@@ -464,7 +509,23 @@ async def set_current_phase(
         or phase.archived
     ):
         raise AppError(422, "CURRENT_PHASE_INVALID", "The selected phase cannot be current.")
+    if roadmap.current_phase_id == phase.id:
+        return {"currentPhaseId": phase.id}
+    previous_phase = db.get(Phase, roadmap.current_phase_id)
     roadmap.current_phase_id = phase.id
+    db.flush()
+    record_roadmap_scope_event(
+        db,
+        roadmap_id=roadmap.id,
+        roadmap_version_id=phase.roadmap_version_id,
+        phase_id=phase.id,
+        source="current_phase_change",
+        reason=(
+            f"Current phase changed from "
+            f"{previous_phase.stable_key if previous_phase else 'unknown'} "
+            f"to {phase.stable_key}"
+        ),
+    )
     db.commit()
     return {"currentPhaseId": phase.id}
 

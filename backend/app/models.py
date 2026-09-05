@@ -122,6 +122,34 @@ class Track(Base):
     order_index: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
+class RoadmapScopeEvent(Base):
+    __tablename__ = "roadmap_scope_events"
+    __table_args__ = (
+        UniqueConstraint("event_sequence", name="uq_roadmap_scope_event_sequence"),
+        CheckConstraint("event_sequence > 0", name="ck_roadmap_scope_event_sequence_positive"),
+        Index(
+            "ix_roadmap_scope_event_time_sequence",
+            "occurred_at",
+            "event_sequence",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    roadmap_id: Mapped[str] = mapped_column(
+        ForeignKey("roadmaps.id", ondelete="RESTRICT"), nullable=False
+    )
+    roadmap_version_id: Mapped[str] = mapped_column(
+        ForeignKey("roadmap_versions.id", ondelete="RESTRICT"), nullable=False
+    )
+    phase_id: Mapped[str] = mapped_column(
+        ForeignKey("phases.id", ondelete="RESTRICT"), nullable=False
+    )
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    occurred_at: Mapped[int] = mapped_column(Integer, default=utc_now_ms, nullable=False)
+    event_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
 class CompetencyIdentity(Base):
     __tablename__ = "competency_identities"
 

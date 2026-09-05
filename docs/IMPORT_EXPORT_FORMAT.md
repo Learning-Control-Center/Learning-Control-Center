@@ -110,7 +110,7 @@ Competencies: Functions (programming.functions)
 
 Portable export uses purpose `portable_logical_backup`, format `json`, ignores selective scope, and emits the normal envelope with `packageType: "portable_logical_backup"` and payload `{"tables": {...}}`. Every table below is required, even when its value is an empty array:
 
-`roadmaps`, `roadmap_versions`, `phases`, `tracks`, `competency_identities`, `competency_definitions`, `competency_prerequisites`, `competency_understanding_items`, `competency_ability_items`, `exit_criterion_identities`, `exit_criterion_definitions`, `competency_states`, `verification_records`, `verification_evidence`, `competency_status_events`, `learning_sessions`, `daily_reflections`, `generated_reports`, `recommendation_snapshots`, `discipline_profiles`, `import_records`, `export_records`, `application_settings`.
+`roadmaps`, `roadmap_versions`, `phases`, `tracks`, `roadmap_scope_events`, `competency_identities`, `competency_definitions`, `competency_prerequisites`, `competency_understanding_items`, `competency_ability_items`, `exit_criterion_identities`, `exit_criterion_definitions`, `competency_states`, `verification_records`, `verification_evidence`, `competency_status_events`, `learning_sessions`, `daily_reflections`, `generated_reports`, `recommendation_snapshots`, `discipline_profiles`, `import_records`, `export_records`, `application_settings`.
 
 Every row must contain exactly every database column for that table. Use an application-produced export as the template; portable rows use internal database IDs and are not intended for hand authoring. `users`, `auth_sessions`, and `operational_backups` are excluded, as are password hashes, session/CSRF tokens, and backup filesystem paths.
 
@@ -119,6 +119,8 @@ Restore accepts `portable_logical_backup` or `restore` with the same payload. It
 Import inspection validates exact table/column coverage, strict canonical scalar types, foreign keys, structured JSON, IANA timezones, complete competency state/history, current-roadmap pointers, phase/track/parent placement, exit-criterion ownership, verified-event evidence, and version-scoped hierarchy and required-dependency cycles in a disposable database before mutation. The same domain-integrity validation runs inside the restore transaction after insertion. Inspection and failed post-restore validation do not mutate the live portable state.
 
 The restore inspection response includes `replacementDiff`, which compares current and incoming portable state by table and by portable domain. It reports existing and incoming row counts plus rows that will be added, modified, or removed, identifies every affected domain, and states that authentication is preserved and merge restore is unsupported.
+
+Current application-produced backups include `roadmap_scope_events` while keeping the global envelope at `schemaVersion: 1`. Older valid V1 portable backups that lack only this table remain accepted. Inspection identifies them with `portableCompatibility: "legacy_scope_baseline"`; restore creates at most one deterministic current-scope baseline from the current roadmap pointers and that roadmap row's `updated_at`. It never invents earlier phase changes. A current-format restore preserves imported history and records a `portable_restore` event only when it changes the local current scope.
 
 ### Representative empty portable package
 
@@ -137,6 +139,7 @@ This valid package represents an empty portable learning state. Non-empty export
       "roadmap_versions": [],
       "phases": [],
       "tracks": [],
+      "roadmap_scope_events": [],
       "competency_identities": [],
       "competency_definitions": [],
       "competency_prerequisites": [],

@@ -25,6 +25,7 @@ from app.models import (
     Phase,
     RecommendationSnapshot,
     Roadmap,
+    RoadmapScopeEvent,
     RoadmapVersion,
     Track,
     VerificationRecord,
@@ -127,6 +128,73 @@ def _validate_roadmap_scope(connection: Any) -> None:
                 "PORTABLE_ROADMAP_STATE_INVALID",
                 "A non-current roadmap cannot retain current pointers.",
             )
+
+
+def _validate_roadmap_scope_history(connection: Any) -> None:
+    events = connection.execute(
+        select(
+            RoadmapScopeEvent.roadmap_id,
+            RoadmapScopeEvent.roadmap_version_id,
+            RoadmapScopeEvent.phase_id,
+            RoadmapScopeEvent.occurred_at,
+            RoadmapScopeEvent.event_sequence,
+        )
+    ).all()
+    versions = {
+        row.id: row.roadmap_id
+        for row in connection.execute(select(RoadmapVersion.id, RoadmapVersion.roadmap_id)).all()
+    }
+    phases = {
+        row.id: row.roadmap_version_id
+        for row in connection.execute(select(Phase.id, Phase.roadmap_version_id)).all()
+    }
+    for event in events:
+        if (
+            versions.get(event.roadmap_version_id) != event.roadmap_id
+            or phases.get(event.phase_id) != event.roadmap_version_id
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_SCOPE_HISTORY_INVALID",
+                "A roadmap scope event contains inconsistent references.",
+            )
+    ordered_events = sorted(events, key=lambda event: event.event_sequence)
+    if [event.event_sequence for event in ordered_events] != list(
+        range(1, len(ordered_events) + 1)
+    ) or any(
+        previous.occurred_at > current.occurred_at
+        for previous, current in zip(ordered_events, ordered_events[1:], strict=False)
+    ):
+        raise AppError(
+            422,
+            "PORTABLE_SCOPE_HISTORY_INVALID",
+            "Roadmap scope event ordering is invalid.",
+        )
+
+    current = connection.execute(
+        select(Roadmap.id, Roadmap.active_version_id, Roadmap.current_phase_id).where(
+            Roadmap.is_current.is_(True)
+        )
+    ).first()
+    if current is None:
+        return
+    if not events:
+        raise AppError(
+            422,
+            "PORTABLE_SCOPE_HISTORY_INVALID",
+            "The current roadmap has no historical scope baseline.",
+        )
+    latest = ordered_events[-1]
+    if (
+        latest.roadmap_id != current.id
+        or latest.roadmap_version_id != current.active_version_id
+        or latest.phase_id != current.current_phase_id
+    ):
+        raise AppError(
+            422,
+            "PORTABLE_SCOPE_HISTORY_INVALID",
+            "The latest roadmap scope event does not match the current scope.",
+        )
 
 
 def _validate_versioned_roadmap(connection: Any) -> None:
@@ -341,6 +409,7 @@ def validate_domain_integrity(connection: Any) -> None:
         )
     _validate_json_columns(connection)
     _validate_roadmap_scope(connection)
+    _validate_roadmap_scope_history(connection)
     _validate_versioned_roadmap(connection)
     _validate_competency_history(connection)
     for timezone_name in connection.execute(select(DisciplineProfile.timezone)).scalars():
