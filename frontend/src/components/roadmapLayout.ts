@@ -30,16 +30,18 @@ import type { Competency, Phase, Roadmap, Status } from '../types'
 
 export const NODE_WIDTH = 232
 export const NODE_HEIGHT = 112
-export const PHASE_MIN_WIDTH = 360
 export const PHASE_HEADER_HEIGHT = 64
 export const PHASE_PADDING_X = 20
 export const PHASE_PADDING_TOP = 12
 export const PHASE_PADDING_BOTTOM = 18
-export const PHASE_GAP = 56
 export const LANE_LABEL_WIDTH = 148
-export const LANE_GAP = 14
 export const NODE_GAP_X = 28
 export const NODE_GAP_Y = 20
+// Keep one spare node column in even the narrowest populated phase so a
+// competency has a meaningful horizontal drag range inside the content area.
+export const PHASE_MIN_WIDTH = PHASE_PADDING_X * 2 + LANE_LABEL_WIDTH + NODE_WIDTH * 2 + NODE_GAP_X
+export const PHASE_GAP = 56
+export const LANE_GAP = 14
 export const EMPTY_LANE_HEIGHT = 44
 
 /** Phase-local content area where competency cards may render and be dragged. */
