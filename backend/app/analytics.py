@@ -15,10 +15,12 @@ from app.api_serialization import serialize_api_instants
 from app.auth import AuthContext, get_auth_context
 from app.database import get_db
 from app.domain import CONCEPTUAL_ACTIVITIES, PRACTICAL_ACTIVITIES, SUCCESSFUL_OUTCOMES
+from app.historical import HistoricalEvaluationContext
 from app.models import (
     CompetencyDefinition,
     CompetencyIdentity,
     CompetencyState,
+    CompetencyStatusEvent,
     LearningSession,
     Roadmap,
     Track,
@@ -29,7 +31,7 @@ from app.time_utils import local_date_for_ms, utc_now_ms
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
-ANALYTICS_VERSION = 1
+ANALYTICS_VERSION = 2
 FRESHNESS_THRESHOLDS = {
     "learning": 7,
     "practicing": 10,
@@ -67,8 +69,16 @@ class SessionFact:
         return self.practical and self.assistance_mode in {"none", "docs_only"}
 
 
-def session_facts(db: Session, timezone_name: str) -> list[SessionFact]:
-    sessions = db.scalars(select(LearningSession).order_by(LearningSession.started_at)).all()
+def session_facts(
+    db: Session, timezone_name: str, *, exclusive_cutoff_ms: int | None = None
+) -> list[SessionFact]:
+    query = select(LearningSession).order_by(LearningSession.started_at)
+    if exclusive_cutoff_ms is not None:
+        query = query.where(
+            LearningSession.started_at < exclusive_cutoff_ms,
+            LearningSession.ended_at < exclusive_cutoff_ms,
+        )
+    sessions = db.scalars(query).all()
     facts: list[SessionFact] = []
     for item in sessions:
         if item.duration_ms is None or item.duration_ms <= 0 or item.outcome == "cancelled":
@@ -113,11 +123,15 @@ def _distribution(facts: Iterable[SessionFact], attribute: str) -> list[dict[str
 
 
 def _completed_week_adherence(
-    active_dates: set[date], target_days: int, start_date: date, end_date: date, today: date
+    active_dates: set[date],
+    target_days: int,
+    start_date: date,
+    end_date: date,
+    completed_through: date,
 ) -> list[dict[str, Any]]:
-    week_start = start_date - timedelta(days=start_date.weekday())
+    week_start = start_date + timedelta(days=(-start_date.weekday()) % 7)
     results: list[dict[str, Any]] = []
-    while week_start + timedelta(days=6) < min(end_date, today):
+    while week_start + timedelta(days=6) <= min(end_date, completed_through):
         week_end = week_start + timedelta(days=6)
         active = sum(1 for day in active_dates if week_start <= day <= week_end)
         results.append(
@@ -208,8 +222,10 @@ def competency_facts(
     timezone_name: str,
     now_ms: int,
     identity_scope: set[str] | None = None,
+    exclusive_cutoff_ms: int | None = None,
+    evaluation_date: date | None = None,
 ) -> dict[str, dict[str, Any]]:
-    today = local_date_for_ms(now_ms, timezone_name)
+    today = evaluation_date or local_date_for_ms(now_ms, timezone_name)
     successful_by_competency: dict[str, list[SessionFact]] = defaultdict(list)
     blocked_by_competency: dict[str, list[SessionFact]] = defaultdict(list)
     for fact in facts:
@@ -225,20 +241,42 @@ def competency_facts(
             CompetencyState.competency_identity_id.in_(identity_scope)
         )
     states = db.scalars(states_query).all()
+    historical_statuses: dict[str, str] | None = None
+    if exclusive_cutoff_ms is not None:
+        status_query = (
+            select(CompetencyStatusEvent)
+            .where(CompetencyStatusEvent.created_at < exclusive_cutoff_ms)
+            .order_by(CompetencyStatusEvent.created_at, CompetencyStatusEvent.id)
+        )
+        if identity_scope is not None:
+            status_query = status_query.where(
+                CompetencyStatusEvent.competency_identity_id.in_(identity_scope)
+            )
+        historical_statuses = {}
+        for event in db.scalars(status_query).all():
+            historical_statuses[event.competency_identity_id] = event.to_status
     passed_verifications: dict[str, list[VerificationRecord]] = defaultdict(list)
-    for record in db.scalars(
-        select(VerificationRecord).where(VerificationRecord.result == "passed")
-    ).all():
+    verification_query = select(VerificationRecord).where(VerificationRecord.result == "passed")
+    if exclusive_cutoff_ms is not None:
+        verification_query = verification_query.where(
+            VerificationRecord.created_at < exclusive_cutoff_ms
+        )
+    for record in db.scalars(verification_query).all():
         passed_verifications[record.competency_identity_id].append(record)
     results: dict[str, dict[str, Any]] = {}
     for state in states:
+        status = (
+            historical_statuses.get(state.competency_identity_id)
+            if historical_statuses is not None
+            else state.current_status
+        )
         successful = successful_by_competency[state.competency_identity_id]
         conceptual = [fact for fact in successful if fact.conceptual]
         practical = [fact for fact in successful if fact.practical]
         independent = [fact for fact in practical if fact.independent_practical]
         verification_dates = passed_verifications[state.competency_identity_id]
         evidence_timestamps = [fact.started_at for fact in successful]
-        if state.current_status == "verified":
+        if status == "verified":
             evidence_timestamps.extend(record.created_at for record in verification_dates)
         last_evidence = max(evidence_timestamps, default=None)
         elapsed_days = (
@@ -246,8 +284,8 @@ def competency_facts(
             if last_evidence is not None
             else None
         )
-        threshold = FRESHNESS_THRESHOLDS.get(state.current_status)
-        review_due = state.current_status == "needs_review" or (
+        threshold = FRESHNESS_THRESHOLDS.get(status) if status is not None else None
+        review_due = status == "needs_review" or (
             threshold is not None and elapsed_days is not None and elapsed_days > threshold
         )
         days_overdue = (
@@ -271,13 +309,16 @@ def competency_facts(
             if latest_blocker
             else None
         )
+        blocker_date = (
+            local_date_for_ms(latest_blocker, timezone_name) if latest_blocker is not None else None
+        )
         blocker_recent = (
-            latest_blocker is not None
-            and local_date_for_ms(latest_blocker, timezone_name) >= today - timedelta(days=7)
-            and local_date_for_ms(latest_blocker, timezone_name) < today
+            blocker_date is not None
+            and blocker_date >= today - timedelta(days=6 if exclusive_cutoff_ms is not None else 7)
+            and (blocker_date <= today if exclusive_cutoff_ms is not None else blocker_date < today)
         )
         results[state.competency_identity_id] = {
-            "status": state.current_status,
+            "status": status,
             "totalSuccessfulDurationMs": sum(fact.duration_ms for fact in successful),
             "conceptualEvidenceDurationMs": sum(fact.duration_ms for fact in conceptual),
             "practicalEvidenceDurationMs": sum(fact.duration_ms for fact in practical),
@@ -308,12 +349,30 @@ def build_analytics(
     end_date: date | None = None,
     competency_identity_ids: set[str] | None = None,
     track_ids: set[str] | None = None,
+    historical_context: HistoricalEvaluationContext | None = None,
 ) -> dict[str, Any]:
-    now = now_ms if now_ms is not None else utc_now_ms()
+    now = (
+        historical_context.exclusive_cutoff_ms
+        if historical_context is not None
+        else now_ms
+        if now_ms is not None
+        else utc_now_ms()
+    )
     profile = get_or_create_profile(db)
-    timezone_name = profile.timezone
+    timezone_name = historical_context.timezone if historical_context else profile.timezone
     today = local_date_for_ms(now, timezone_name)
-    all_facts = session_facts(db, timezone_name)
+    completed_through = (
+        historical_context.completed_through
+        if historical_context is not None
+        else today - timedelta(days=1)
+    )
+    all_facts = session_facts(
+        db,
+        timezone_name,
+        exclusive_cutoff_ms=(
+            historical_context.exclusive_cutoff_ms if historical_context is not None else None
+        ),
+    )
     if competency_identity_ids is not None:
         all_facts = [
             fact for fact in all_facts if fact.competency_identity_id in competency_identity_ids
@@ -347,11 +406,44 @@ def build_analytics(
     ]
     practical = [fact for fact in facts if fact.practical]
     independent = [fact for fact in practical if fact.independent_practical]
+    roadmap = db.scalar(select(Roadmap).where(Roadmap.is_current.is_(True)))
+    roadmap_version_id = (
+        historical_context.scope.roadmap_version_id
+        if historical_context is not None and historical_context.scope is not None
+        else roadmap.active_version_id
+        if historical_context is None and roadmap
+        else None
+    )
+    effective_identity_scope = competency_identity_ids
+    if historical_context is not None:
+        if roadmap_version_id is None:
+            effective_identity_scope = set()
+        else:
+            scope_query = select(CompetencyDefinition.competency_identity_id).where(
+                CompetencyDefinition.roadmap_version_id == roadmap_version_id,
+                CompetencyDefinition.archived.is_(False),
+            )
+            if competency_identity_ids is not None:
+                scope_query = scope_query.where(
+                    CompetencyDefinition.competency_identity_id.in_(competency_identity_ids)
+                )
+            if track_ids is not None:
+                scope_query = scope_query.where(CompetencyDefinition.track_id.in_(track_ids))
+            effective_identity_scope = set(db.scalars(scope_query).all())
     competency = competency_facts(
-        db, all_facts, timezone_name, now, identity_scope=competency_identity_ids
+        db,
+        all_facts,
+        timezone_name,
+        now,
+        identity_scope=effective_identity_scope,
+        exclusive_cutoff_ms=(
+            historical_context.exclusive_cutoff_ms if historical_context is not None else None
+        ),
+        evaluation_date=(
+            historical_context.completed_through if historical_context is not None else None
+        ),
     )
 
-    roadmap = db.scalar(select(Roadmap).where(Roadmap.is_current.is_(True)))
     coverage: dict[str, Any] = {
         "verifiedCore": 0,
         "applicableCore": 0,
@@ -360,15 +452,17 @@ def build_analytics(
         "weightedVerifiedNumerator": 0,
         "weightedApplicableDenominator": 0,
         "weightedVerificationCoverage": None,
+        "unavailableStatusCount": 0,
+        "unavailableStatusWeight": 0,
     }
     status_distribution: Counter[str] = Counter()
     weighted_status: Counter[str] = Counter()
     review_debt: list[dict[str, Any]] = []
     applicable_identity_ids: set[str] = set()
     track_titles: dict[str, str] = {}
-    if roadmap and roadmap.active_version_id:
+    if roadmap_version_id:
         definitions_query = select(CompetencyDefinition).where(
-            CompetencyDefinition.roadmap_version_id == roadmap.active_version_id,
+            CompetencyDefinition.roadmap_version_id == roadmap_version_id,
             CompetencyDefinition.archived.is_(False),
         )
         if competency_identity_ids is not None:
@@ -391,15 +485,19 @@ def build_analytics(
         track_titles = {
             item.id: item.title
             for item in db.scalars(
-                select(Track).where(Track.roadmap_version_id == roadmap.active_version_id)
+                select(Track).where(Track.roadmap_version_id == roadmap_version_id)
             ).all()
         }
         for definition in definitions:
             applicable_identity_ids.add(definition.competency_identity_id)
             item = competency[definition.competency_identity_id]
             status = item["status"]
-            status_distribution[status] += 1
-            weighted_status[status] += definition.weight
+            if status is not None:
+                status_distribution[status] += 1
+                weighted_status[status] += definition.weight
+            else:
+                coverage["unavailableStatusCount"] += 1
+                coverage["unavailableStatusWeight"] += definition.weight
             coverage["weightedApplicableDenominator"] += definition.weight
             if status == "verified":
                 coverage["weightedVerifiedNumerator"] += definition.weight
@@ -419,20 +517,33 @@ def build_analytics(
                         "daysOverdue": item["daysOverdue"],
                     }
                 )
-    coverage["weightedVerificationCoverage"] = _ratio(
-        coverage["weightedVerifiedNumerator"], coverage["weightedApplicableDenominator"]
-    )
+    if coverage["unavailableStatusCount"] == 0:
+        coverage["weightedVerificationCoverage"] = _ratio(
+            coverage["weightedVerifiedNumerator"], coverage["weightedApplicableDenominator"]
+        )
+    verification_source_query = select(VerificationRecord)
+    if historical_context is not None:
+        verification_source_query = verification_source_query.where(
+            VerificationRecord.created_at < historical_context.exclusive_cutoff_ms
+        )
     verification_sources: Counter[str] = Counter(
         record.verification_source
-        for record in db.scalars(select(VerificationRecord)).all()
+        for record in db.scalars(verification_source_query).all()
         if record.competency_identity_id in applicable_identity_ids
     )
     track_distribution = _distribution(facts, "track_id")
     for entry in track_distribution:
         entry["label"] = track_titles.get(entry["key"], "Unassigned")
 
-    completed_days = [today - timedelta(days=offset) for offset in range(1, 31)]
-    completed_days.reverse()
+    completed_end = min(end_date, completed_through)
+    completed_days = (
+        [
+            start_date + timedelta(days=offset)
+            for offset in range((completed_end - start_date).days + 1)
+        ]
+        if completed_end >= start_date
+        else []
+    )
     signals: list[dict[str, Any]] = []
     for identity_id, item in competency.items():
         if item["reviewDue"]:
@@ -462,6 +573,32 @@ def build_analytics(
         "analyticsVersion": ANALYTICS_VERSION,
         "generatedAt": now,
         "timezone": timezone_name,
+        "historicalContext": (
+            {
+                "exclusiveCutoffMs": historical_context.exclusive_cutoff_ms,
+                "completedThrough": historical_context.completed_through.isoformat(),
+                "scope": (
+                    {
+                        "roadmapId": historical_context.scope.roadmap_id,
+                        "roadmapStableKey": historical_context.scope.roadmap_stable_key,
+                        "roadmapVersionId": historical_context.scope.roadmap_version_id,
+                        "roadmapVersion": historical_context.scope.roadmap_version,
+                        "phaseId": historical_context.scope.phase_id,
+                        "phaseStableKey": historical_context.scope.phase_stable_key,
+                        "phaseTitle": historical_context.scope.phase_title,
+                        "scopeEventSequence": historical_context.scope.event_sequence,
+                        "scopeSource": historical_context.scope.source,
+                        "scopeOccurredAt": historical_context.scope.occurred_at,
+                        "scopeIsBaseline": historical_context.scope.source
+                        in {"migration_baseline", "restore_baseline"},
+                    }
+                    if historical_context.scope is not None
+                    else None
+                ),
+            }
+            if historical_context is not None
+            else None
+        ),
         "range": {
             "name": range_name,
             "startDate": start_date.isoformat(),
@@ -473,7 +610,11 @@ def build_analytics(
             "currentWeekActiveDays": current_week_active,
             "targetActiveDays": profile.weekly_target_active_days,
             "completedWeeks": _completed_week_adherence(
-                active_dates, profile.weekly_target_active_days, start_date, end_date, today
+                active_dates,
+                profile.weekly_target_active_days,
+                start_date,
+                end_date,
+                completed_through,
             ),
         },
         "durationAdherence": duration_adherence,
@@ -490,12 +631,12 @@ def build_analytics(
                 sum(fact.duration_ms for fact in practical),
             ),
         },
-        "regularity": _regularity(all_facts, completed_days),
+        "regularity": _regularity(facts, completed_days),
         "workloadTrend": {
             "short": _trend(all_facts, today, 7),
             "long": _trend(all_facts, today, 14),
         },
-        "gaps": _gaps(active_dates, start_date, min(end_date, today)),
+        "gaps": _gaps(active_dates, start_date, min(end_date, completed_through)),
         "coverage": coverage,
         "statusDistribution": dict(status_distribution),
         "weightedStatusDistribution": dict(weighted_status),
