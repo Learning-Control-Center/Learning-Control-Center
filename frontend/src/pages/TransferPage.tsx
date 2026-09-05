@@ -36,6 +36,7 @@ export function TransferPage() {
   const [purpose, setPurpose] = useState<Purpose>('analysis_snapshot')
   const [range, setRange] = useState('30d')
   const [categories, setCategories] = useState<string[]>([
+    'roadmap',
     'analytics',
     'sessions',
     'verification',
@@ -172,12 +173,22 @@ export function TransferPage() {
 
   return (
     <div className="mx-auto w-full max-w-[88rem]">
-      <header className="mb-7">
-        <p className="eyebrow mb-2">Portable by design</p>
-        <h1 className="page-title">Import / Export</h1>
-        <p className="mt-2 text-sm text-ink/60">
-          Purpose determines format. Mutating packages never apply before validation and diff review.
-        </p>
+      <header className="mb-7 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <p className="eyebrow mb-2">Portable by design</p>
+          <h1 className="page-title">Import / Export</h1>
+          <p className="mt-2 text-sm text-ink/60">
+            Purpose determines format. Mutating packages never apply before validation and diff review.
+          </p>
+        </div>
+        <a
+          className="inline-flex min-h-10 w-fit items-center gap-2 rounded-xl border border-ink/15 px-3 text-sm font-medium text-ink/70 transition-colors hover:border-moss/40 hover:bg-moss/5 hover:text-moss focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss focus-visible:ring-offset-2"
+          href="/IMPORT_EXPORT_FORMAT.md"
+          download="IMPORT_EXPORT_FORMAT.md"
+        >
+          <FileText className="size-4" aria-hidden="true" />
+          Format guide
+        </a>
       </header>
       {error ? (
         <p className="mb-5 rounded-xl bg-rose-50 p-3 text-sm text-rose-800" role="alert">
@@ -291,7 +302,14 @@ export function TransferPage() {
               <fieldset className="mt-4">
                 <legend className="text-sm font-medium">Included categories</legend>
                 <div className="mt-2 flex flex-wrap gap-2">
-                  {['analytics', 'sessions', 'verification', 'reports', 'settings'].map((item) => (
+                  {[
+                    'roadmap',
+                    'analytics',
+                    'sessions',
+                    'verification',
+                    'reports',
+                    'settings',
+                  ].map((item) => (
                     <label
                       key={item}
                       className="flex min-h-11 items-center gap-2 rounded-lg border border-ink/10 px-3 text-xs capitalize"

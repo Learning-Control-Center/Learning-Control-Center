@@ -21,6 +21,7 @@ ActivityType = Literal[
 ]
 AssistanceMode = Literal["none", "docs_only", "ai_hint", "ai_assisted", "agent_led"]
 SessionOutcome = Literal["completed", "partial", "blocked"]
+ExportCategory = Literal["roadmap", "analytics", "sessions", "verification", "reports", "settings"]
 
 
 class StrictModel(BaseModel):
@@ -198,7 +199,7 @@ class ExportRequest(StrictModel):
     current_phase_only: bool = False
     track_ids: list[str] = Field(default_factory=list)
     competency_identity_ids: list[str] = Field(default_factory=list)
-    categories: list[str] = Field(default_factory=list)
+    categories: list[ExportCategory] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_combination(self) -> ExportRequest:
@@ -228,6 +229,42 @@ class ImportEnvelope(StrictModel):
     appVersion: str
     createdAt: str
     payload: dict[str, Any]
+
+
+class RoadmapPackagePayload(StrictModel):
+    roadmap: RoadmapCreate
+
+
+class VerificationUpdatePayload(StrictModel):
+    verifications: list[VerificationCreate] = Field(default_factory=list)
+
+
+class StateUpdateItem(StrictModel):
+    competency_identity_id: str
+    status: Status
+    reason: str = Field(default="Imported status update", min_length=1, max_length=1000)
+    verification: VerificationCreate | None = None
+
+    @model_validator(mode="after")
+    def validate_verification(self) -> StateUpdateItem:
+        if self.status == "verified":
+            if (
+                self.verification is None
+                or self.verification.result != "passed"
+                or self.verification.competency_identity_id != self.competency_identity_id
+            ):
+                raise ValueError("verified status requires a matching passed verification record")
+        elif self.verification is not None:
+            raise ValueError("verification is only supported for verified state updates")
+        return self
+
+
+class StateUpdatePayload(StrictModel):
+    states: list[StateUpdateItem] = Field(default_factory=list)
+
+
+class PortablePackagePayload(StrictModel):
+    tables: dict[str, list[dict[str, Any]]]
 
 
 class ImportInspectRequest(StrictModel):

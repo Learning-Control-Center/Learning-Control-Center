@@ -34,7 +34,7 @@ from app.time_utils import epoch_ms_to_rfc3339
 router = APIRouter(prefix="/roadmap", tags=["roadmap"])
 
 
-def _serialize_current_roadmap(db: Session, roadmap: Roadmap) -> dict[str, Any]:
+def serialize_current_roadmap(db: Session, roadmap: Roadmap) -> dict[str, Any]:
     if roadmap.active_version_id is None:
         raise AppError(409, "ROADMAP_STATE_INVALID", "The current roadmap has no active version.")
     version = db.get(RoadmapVersion, roadmap.active_version_id)
@@ -210,7 +210,7 @@ async def current_roadmap(
     roadmap = db.scalar(select(Roadmap).where(Roadmap.is_current.is_(True)))
     if roadmap is None:
         return {"configured": False, "guidance": "Import a roadmap package to begin."}
-    return {"configured": True, "roadmap": _serialize_current_roadmap(db, roadmap)}
+    return {"configured": True, "roadmap": serialize_current_roadmap(db, roadmap)}
 
 
 def validate_roadmap_payload(payload: RoadmapCreate) -> None:
@@ -446,7 +446,7 @@ async def create_roadmap(
 ) -> dict[str, Any]:
     roadmap = apply_roadmap_payload(db, payload)
     db.commit()
-    return _serialize_current_roadmap(db, roadmap)
+    return serialize_current_roadmap(db, roadmap)
 
 
 @router.put("/current-phase/{phase_id}")

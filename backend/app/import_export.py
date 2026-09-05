@@ -7,6 +7,7 @@ import os
 import sqlite3
 import tempfile
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, cast
@@ -54,8 +55,11 @@ from app.schemas import (
     ExportRequest,
     ImportApplyRequest,
     ImportInspectRequest,
+    PortablePackagePayload,
     RoadmapCreate,
-    VerificationCreate,
+    RoadmapPackagePayload,
+    StateUpdatePayload,
+    VerificationUpdatePayload,
 )
 from app.security import RateLimitRule, new_secret, rate_limiter
 from app.settings_api import get_or_create_profile
@@ -111,6 +115,15 @@ class Preview:
     summary: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class ResolvedExportScope:
+    start_date: date
+    end_date: date
+    timezone: str
+    selected_identity_ids: set[str] | None
+    scope_payload: dict[str, Any]
+
+
 _previews: dict[str, Preview] = {}
 
 
@@ -132,7 +145,7 @@ def _portable_payload(db: Session) -> dict[str, Any]:
     }
 
 
-def _analysis_payload(db: Session, request: ExportRequest) -> dict[str, Any]:
+def _resolve_export_scope(db: Session, request: ExportRequest) -> ResolvedExportScope:
     profile = get_or_create_profile(db)
     today = local_date_for_ms(utc_now_ms(), profile.timezone)
     if request.range == "custom":
@@ -147,63 +160,169 @@ def _analysis_payload(db: Session, request: ExportRequest) -> dict[str, Any]:
         end_date = today
     if start_date > end_date:
         raise AppError(422, "EXPORT_RANGE_INVALID", "The export date range is invalid.")
+
+    current = db.scalar(select(Roadmap).where(Roadmap.is_current.is_(True)))
+    active_version_id = current.active_version_id if current else None
+    current_tracks = (
+        db.scalars(select(Track).where(Track.roadmap_version_id == active_version_id)).all()
+        if active_version_id
+        else []
+    )
+    current_definitions = (
+        db.scalars(
+            select(CompetencyDefinition).where(
+                CompetencyDefinition.roadmap_version_id == active_version_id
+            )
+        ).all()
+        if active_version_id
+        else []
+    )
+    known_track_ids = {item.id for item in current_tracks}
+    known_identity_ids = {item.competency_identity_id for item in current_definitions}
+    if set(request.track_ids) - known_track_ids:
+        raise AppError(
+            422,
+            "EXPORT_SCOPE_INVALID",
+            "A selected track does not belong to the active roadmap version.",
+        )
+    if set(request.competency_identity_ids) - known_identity_ids:
+        raise AppError(
+            422,
+            "EXPORT_SCOPE_INVALID",
+            "A selected competency does not belong to the active roadmap version.",
+        )
+
     selected_identity_ids: set[str] | None = (
         set(request.competency_identity_ids) if request.competency_identity_ids else None
     )
     if request.track_ids:
-        track_identity_ids = set(
-            db.scalars(
-                select(CompetencyDefinition.competency_identity_id).where(
-                    CompetencyDefinition.track_id.in_(request.track_ids)
-                )
-            ).all()
-        )
+        track_identity_ids = {
+            item.competency_identity_id
+            for item in current_definitions
+            if item.track_id in request.track_ids
+        }
         selected_identity_ids = (
             track_identity_ids
             if selected_identity_ids is None
             else selected_identity_ids & track_identity_ids
         )
     if request.current_phase_only:
-        current = db.scalar(select(Roadmap).where(Roadmap.is_current.is_(True)))
         current_phase_identity_ids: set[str] = set()
         if current and current.current_phase_id:
-            current_phase_identity_ids = set(
-                db.scalars(
-                    select(CompetencyDefinition.competency_identity_id).where(
-                        CompetencyDefinition.phase_id == current.current_phase_id
-                    )
-                ).all()
-            )
+            current_phase_identity_ids = {
+                item.competency_identity_id
+                for item in current_definitions
+                if item.phase_id == current.current_phase_id
+            }
         selected_identity_ids = (
             current_phase_identity_ids
             if selected_identity_ids is None
             else selected_identity_ids & current_phase_identity_ids
         )
+    identities = {
+        item.id: item
+        for item in db.scalars(
+            select(CompetencyIdentity).where(
+                CompetencyIdentity.id.in_(request.competency_identity_ids)
+            )
+        ).all()
+    }
+    definitions_by_identity = {item.competency_identity_id: item for item in current_definitions}
+    resolved_categories = list(request.categories) or [
+        "roadmap",
+        "analytics",
+        "sessions",
+        "verification",
+        "reports",
+        "settings",
+    ]
+    scope_payload = request.model_dump(mode="json")
+    scope_payload.update(
+        {
+            "resolved_start_date": start_date.isoformat(),
+            "resolved_end_date": end_date.isoformat(),
+            "timezone": profile.timezone,
+            "resolved_categories": resolved_categories,
+            "selected_tracks": [
+                {"id": item.id, "stable_key": item.stable_key, "title": item.title}
+                for item in current_tracks
+                if item.id in request.track_ids
+            ],
+            "selected_competencies": [
+                {
+                    "identity_id": identity_id,
+                    "stable_key": identities[identity_id].stable_key,
+                    "title": definitions_by_identity[identity_id].title,
+                }
+                for identity_id in request.competency_identity_ids
+            ],
+        }
+    )
+    return ResolvedExportScope(
+        start_date=start_date,
+        end_date=end_date,
+        timezone=profile.timezone,
+        selected_identity_ids=selected_identity_ids,
+        scope_payload=scope_payload,
+    )
+
+
+def _roadmap_analysis_payload(
+    db: Session, request: ExportRequest, selected_identity_ids: set[str] | None
+) -> dict[str, Any] | None:
+    from app.roadmap import serialize_current_roadmap
+
+    current = db.scalar(select(Roadmap).where(Roadmap.is_current.is_(True)))
+    if current is None:
+        return None
+    serialized = serialize_current_roadmap(db, current)
+    filtered_phases: list[dict[str, Any]] = []
+    for phase in serialized["phases"]:
+        if request.current_phase_only and phase["id"] != serialized["currentPhaseId"]:
+            continue
+        filtered_tracks: list[dict[str, Any]] = []
+        for track in phase["tracks"]:
+            if request.track_ids and track["id"] not in request.track_ids:
+                continue
+            competencies = [
+                item
+                for item in track["competencies"]
+                if selected_identity_ids is None or item["identityId"] in selected_identity_ids
+            ]
+            if competencies or not request.competency_identity_ids:
+                filtered_tracks.append({**track, "competencies": competencies})
+        if filtered_tracks:
+            filtered_phases.append({**phase, "tracks": filtered_tracks})
+    return {**serialized, "phases": filtered_phases}
+
+
+def _analysis_payload(db: Session, request: ExportRequest) -> dict[str, Any]:
+    resolved = _resolve_export_scope(db, request)
     analytics = build_analytics(
         db,
         range_name=request.range,
-        start_date=start_date,
-        end_date=end_date,
-        competency_identity_ids=selected_identity_ids,
+        start_date=resolved.start_date,
+        end_date=resolved.end_date,
+        competency_identity_ids=resolved.selected_identity_ids,
         track_ids=set(request.track_ids) if request.track_ids else None,
     )
-    start_ms, _ = local_day_bounds_ms(start_date, profile.timezone)
-    _, end_ms = local_day_bounds_ms(end_date, profile.timezone)
+    start_ms, _ = local_day_bounds_ms(resolved.start_date, resolved.timezone)
+    _, end_ms = local_day_bounds_ms(resolved.end_date, resolved.timezone)
     sessions_query = select(LearningSession).order_by(LearningSession.started_at)
     sessions_query = sessions_query.where(
         LearningSession.started_at >= start_ms,
         LearningSession.started_at < end_ms,
     )
-    if selected_identity_ids is not None:
+    if resolved.selected_identity_ids is not None:
         sessions_query = sessions_query.where(
-            LearningSession.competency_identity_id.in_(selected_identity_ids)
+            LearningSession.competency_identity_id.in_(resolved.selected_identity_ids)
         )
     if request.track_ids:
         sessions_query = sessions_query.where(LearningSession.track_id.in_(request.track_ids))
     verifications_query = select(VerificationRecord).order_by(VerificationRecord.created_at)
-    if selected_identity_ids is not None:
+    if resolved.selected_identity_ids is not None:
         verifications_query = verifications_query.where(
-            VerificationRecord.competency_identity_id.in_(selected_identity_ids)
+            VerificationRecord.competency_identity_id.in_(resolved.selected_identity_ids)
         )
     verifications_query = verifications_query.where(
         VerificationRecord.created_at >= start_ms,
@@ -211,7 +330,9 @@ def _analysis_payload(db: Session, request: ExportRequest) -> dict[str, Any]:
     )
     categories = set(request.categories)
     include_all = not categories
-    payload: dict[str, Any] = {"scope": request.model_dump(mode="json")}
+    payload: dict[str, Any] = {"scope": resolved.scope_payload}
+    if include_all or "roadmap" in categories:
+        payload["roadmap"] = _roadmap_analysis_payload(db, request, resolved.selected_identity_ids)
     if include_all or "analytics" in categories:
         payload["analytics"] = analytics
     if include_all or "sessions" in categories:
@@ -225,8 +346,8 @@ def _analysis_payload(db: Session, request: ExportRequest) -> dict[str, Any]:
             _row_dict(item)
             for item in db.scalars(
                 select(GeneratedReport).where(
-                    GeneratedReport.period_end >= start_date.isoformat(),
-                    GeneratedReport.period_start <= end_date.isoformat(),
+                    GeneratedReport.period_end >= resolved.start_date.isoformat(),
+                    GeneratedReport.period_start <= resolved.end_date.isoformat(),
                 )
             ).all()
         ]
@@ -239,16 +360,31 @@ def _analysis_payload(db: Session, request: ExportRequest) -> dict[str, Any]:
 def _human_report(payload: dict[str, Any], created_at: str) -> str:
     scope = payload["scope"]
     analytics = payload.get("analytics", {})
-    included_categories = (
-        ", ".join(scope["categories"]) if scope["categories"] else "default analysis set"
+    included_categories = ", ".join(scope["resolved_categories"])
+    selected_tracks = (
+        ", ".join(f"{item['title']} ({item['stable_key']})" for item in scope["selected_tracks"])
+        or "All tracks"
+    )
+    selected_competencies = (
+        ", ".join(
+            f"{item['title']} ({item['stable_key']})" for item in scope["selected_competencies"]
+        )
+        or "All competencies"
     )
     return "\n".join(
         [
             "# Learning-Control-Center export",
             "",
             f"Exported: {created_at}",
-            f"Range: {scope['range']}",
+            f"Range preset: {scope['range']}",
+            (
+                f"Resolved period: {scope['resolved_start_date']} to "
+                f"{scope['resolved_end_date']} ({scope['timezone']})"
+            ),
             f"Included categories: {included_categories}",
+            f"Current phase only: {'yes' if scope['current_phase_only'] else 'no'}",
+            f"Tracks: {selected_tracks}",
+            f"Competencies: {selected_competencies}",
             "",
             "## Summary",
             "",
@@ -349,9 +485,12 @@ def _insert_portable_tables(connection: Any, tables: dict[str, list[dict[str, An
 
 
 def _validate_portable_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    tables = payload.get("tables")
-    if not isinstance(tables, dict):
-        raise AppError(422, "PORTABLE_SCHEMA_INVALID", "Portable backup tables are missing.")
+    try:
+        tables = PortablePackagePayload.model_validate(payload).tables
+    except ValidationError as exc:
+        raise AppError(
+            422, "PORTABLE_SCHEMA_INVALID", "The portable backup payload is invalid."
+        ) from exc
     unknown = set(tables) - set(PORTABLE_BY_TABLE)
     missing = set(PORTABLE_BY_TABLE) - set(tables)
     if unknown or missing:
@@ -490,6 +629,45 @@ def _validate_portable_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return {"tableCounts": {name: len(rows) for name, rows in sorted(tables.items())}}
 
 
+def _apply_roadmap_update(db: Session, payload: RoadmapCreate) -> None:
+    from app.roadmap import apply_roadmap_payload
+
+    apply_roadmap_payload(db, payload)
+
+
+def _preflight_application(
+    db: Session,
+    operation: Callable[[Session], None],
+    error_code: str,
+    error_message: str,
+) -> None:
+    current_payload = _portable_payload(db)
+    with tempfile.NamedTemporaryFile(prefix="lcc-preflight-", suffix=".sqlite3") as temporary:
+        validation_engine = create_database_engine(f"sqlite:///{temporary.name}")
+        try:
+            Base.metadata.create_all(validation_engine)
+            with Session(validation_engine) as validation_db:
+                _insert_portable_tables(validation_db.connection(), current_payload["tables"])
+                validation_db.flush()
+                operation(validation_db)
+                validation_db.flush()
+                violations = validation_db.execute(text("PRAGMA foreign_key_check")).all()
+                if violations:
+                    raise AppError(
+                        422,
+                        error_code,
+                        error_message,
+                        {"foreignKeyViolationCount": len(violations)},
+                    )
+                _validate_portable_payload(_portable_payload(validation_db))
+        except AppError:
+            raise
+        except SQLAlchemyError as exc:
+            raise AppError(422, error_code, error_message) from exc
+        finally:
+            validation_engine.dispose()
+
+
 def _inspect_package(
     payload: ImportInspectRequest, settings: Settings, db: Session
 ) -> dict[str, Any]:
@@ -515,19 +693,15 @@ def _inspect_package(
         summary["mode"] = "empty_state_or_full_replacement"
         summary["authenticationPreserved"] = True
     elif payload.package.packageType == "verification_update":
-        records = payload.package.payload.get("verifications", [])
-        if not isinstance(records, list):
-            raise AppError(
-                422, "VERIFICATION_UPDATE_INVALID", "Verification records must be a list."
-            )
         try:
-            validated_records = [VerificationCreate.model_validate(item) for item in records]
+            verification_payload = VerificationUpdatePayload.model_validate(payload.package.payload)
         except ValidationError as exc:
             raise AppError(
                 422,
                 "VERIFICATION_UPDATE_INVALID",
-                "A verification update record is invalid.",
+                "The verification update payload is invalid.",
             ) from exc
+        validated_records = verification_payload.verifications
         known_identities = set(
             db.scalars(
                 select(CompetencyIdentity.id).where(
@@ -541,6 +715,12 @@ def _inspect_package(
             raise AppError(
                 422, "VERIFICATION_REFERENCE_INVALID", "A referenced competency does not exist."
             )
+        _preflight_application(
+            db,
+            lambda validation_db: _apply_verification_update(validation_db, verification_payload),
+            "VERIFICATION_UPDATE_INVALID",
+            "The verification update cannot be applied to the current state.",
+        )
         summary["verificationRecordsAdded"] = len(validated_records)
         summary["statusImplications"] = [
             {
@@ -553,53 +733,34 @@ def _inspect_package(
             for item in validated_records
         ]
     elif payload.package.packageType == "state_update":
-        states = payload.package.payload.get("states", [])
-        if not isinstance(states, list) or not all(isinstance(item, dict) for item in states):
-            raise AppError(422, "STATE_UPDATE_INVALID", "Competency states must be a list.")
-        allowed = {
-            "not_started",
-            "learning",
-            "practicing",
-            "ready_for_verification",
-            "verified",
-            "needs_review",
-        }
+        try:
+            state_payload = StateUpdatePayload.model_validate(payload.package.payload)
+        except ValidationError as exc:
+            raise AppError(
+                422, "STATE_UPDATE_INVALID", "The competency state update payload is invalid."
+            ) from exc
         known_identities = set(db.scalars(select(CompetencyIdentity.id)).all())
-        for item in states:
-            identity_id = item.get("competency_identity_id")
-            status = item.get("status")
-            if identity_id not in known_identities or status not in allowed:
+        for item in state_payload.states:
+            if item.competency_identity_id not in known_identities:
                 raise AppError(422, "STATE_UPDATE_INVALID", "A competency state is invalid.")
-            if status == "verified":
-                verification = item.get("verification")
-                try:
-                    validated = VerificationCreate.model_validate(verification)
-                except ValidationError as exc:
-                    raise AppError(
-                        422,
-                        "VERIFICATION_RECORD_REQUIRED",
-                        "Imported verified status requires its passed verification record.",
-                    ) from exc
-                if validated.result != "passed" or validated.competency_identity_id != identity_id:
-                    raise AppError(
-                        422,
-                        "VERIFICATION_RECORD_REQUIRED",
-                        "Imported verified status requires a matching passed verification record.",
-                    )
-        summary["statesUpdated"] = len(states)
+        _preflight_application(
+            db,
+            lambda validation_db: _apply_state_update(validation_db, state_payload),
+            "STATE_UPDATE_INVALID",
+            "The competency state update cannot be applied to the current state.",
+        )
+        summary["statesUpdated"] = len(state_payload.states)
         summary["stateChanges"] = [
             {
-                "competencyIdentityId": item["competency_identity_id"],
-                "toStatus": item["status"],
+                "competencyIdentityId": item.competency_identity_id,
+                "toStatus": item.status,
             }
-            for item in states
+            for item in state_payload.states
         ]
     else:
-        roadmap = payload.package.payload.get("roadmap")
-        if not isinstance(roadmap, dict):
-            raise AppError(422, "ROADMAP_PACKAGE_INVALID", "The roadmap package is invalid.")
         try:
-            validated_roadmap = RoadmapCreate.model_validate(roadmap)
+            roadmap_payload = RoadmapPackagePayload.model_validate(payload.package.payload)
+            validated_roadmap = roadmap_payload.roadmap
             from app.roadmap import validate_roadmap_payload
 
             validate_roadmap_payload(validated_roadmap)
@@ -609,6 +770,12 @@ def _inspect_package(
                 "ROADMAP_PACKAGE_INVALID",
                 "The roadmap package is invalid.",
             ) from exc
+        _preflight_application(
+            db,
+            lambda validation_db: _apply_roadmap_update(validation_db, validated_roadmap),
+            "ROADMAP_PACKAGE_INVALID",
+            "The roadmap package conflicts with the current roadmap state.",
+        )
         incoming = {
             item.stable_key: item
             for phase in validated_roadmap.phases
@@ -699,9 +866,8 @@ def _apply_portable_restore(db: Session, payload: dict[str, Any], replace_existi
         raise AppError(422, "RESTORE_INTEGRITY_FAILED", "Post-restore integrity validation failed.")
 
 
-def _apply_verification_update(db: Session, payload: dict[str, Any]) -> None:
-    for raw in payload.get("verifications", []):
-        item = VerificationCreate.model_validate(raw)
+def _apply_verification_update(db: Session, payload: VerificationUpdatePayload) -> None:
+    for item in payload.verifications:
         record = VerificationRecord(
             competency_identity_id=item.competency_identity_id,
             verification_source=item.verification_source,
@@ -733,6 +899,28 @@ def _apply_verification_update(db: Session, payload: dict[str, Any]) -> None:
             reason=f"Imported verification result: {item.result}",
             source="import",
             verification_record_id=record.id if item.result == "passed" else None,
+        )
+
+
+def _apply_state_update(db: Session, payload: StateUpdatePayload) -> None:
+    for item in payload.states:
+        if item.status == "verified":
+            if item.verification is None:
+                raise AppError(
+                    422,
+                    "VERIFICATION_RECORD_REQUIRED",
+                    "Imported verified status requires a matching passed verification record.",
+                )
+            _apply_verification_update(
+                db, VerificationUpdatePayload(verifications=[item.verification])
+            )
+            continue
+        transition_status(
+            db,
+            item.competency_identity_id,
+            item.status,
+            reason=item.reason,
+            source="import",
         )
 
 
@@ -826,32 +1014,16 @@ async def apply_import(
             if payload.package.packageType in {"portable_logical_backup", "restore"}:
                 _apply_portable_restore(db, payload.package.payload, payload.replace_existing)
             elif payload.package.packageType == "verification_update":
-                _apply_verification_update(db, payload.package.payload)
+                _apply_verification_update(
+                    db, VerificationUpdatePayload.model_validate(payload.package.payload)
+                )
             elif payload.package.packageType == "state_update":
-                for item in payload.package.payload.get("states", []):
-                    status = item["status"]
-                    verification_id = None
-                    if status == "verified":
-                        verification_payload = VerificationCreate.model_validate(
-                            item["verification"]
-                        )
-                        _apply_verification_update(
-                            db, {"verifications": [verification_payload.model_dump()]}
-                        )
-                        continue
-                    transition_status(
-                        db,
-                        item["competency_identity_id"],
-                        status,
-                        reason=item.get("reason", "Imported status update"),
-                        source="import",
-                        verification_record_id=verification_id,
-                    )
+                _apply_state_update(db, StateUpdatePayload.model_validate(payload.package.payload))
             else:
-                from app.roadmap import apply_roadmap_payload
-
-                roadmap_payload = RoadmapCreate.model_validate(payload.package.payload["roadmap"])
-                apply_roadmap_payload(db, roadmap_payload)
+                roadmap_payload = RoadmapPackagePayload.model_validate(
+                    payload.package.payload
+                ).roadmap
+                _apply_roadmap_update(db, roadmap_payload)
             db.add(
                 ImportRecord(
                     package_id=payload.package.packageId,

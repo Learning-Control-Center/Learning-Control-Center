@@ -15,7 +15,10 @@ function json(value: unknown, status = 200) {
   })
 }
 
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => {
+  vi.restoreAllMocks()
+  vi.unstubAllGlobals()
+})
 
 describe('frontend polish regressions', () => {
   it('gives an unconfigured roadmap a page header and direct import action', async () => {
@@ -111,9 +114,31 @@ describe('frontend polish regressions', () => {
 
     expect(await screen.findByLabelText('Date range')).toBeInTheDocument()
     expect(screen.getByRole('group', { name: 'Included categories' })).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: 'roadmap' })).toBeChecked()
     await userEvent.click(screen.getByRole('button', { name: /Portable Logical Backup/ }))
     await waitFor(() => expect(screen.queryByLabelText('Date range')).not.toBeInTheDocument())
     expect(screen.queryByRole('group', { name: 'Included categories' })).not.toBeInTheDocument()
     expect(screen.getByText(/always include all supported learning state/i)).toBeInTheDocument()
+  })
+
+  it('links to the canonical format guide with its stable filename', () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input)
+        if (url.includes('/history')) return json({ items: [] })
+        if (url.includes('/roadmap/current')) return json({ configured: false })
+        return json({})
+      }),
+    )
+    const view = render(
+      <MemoryRouter>
+        <TransferPage />
+      </MemoryRouter>,
+    )
+    const guideLink = view.container.querySelector('a[download]')
+    expect(guideLink).toHaveTextContent('Format guide')
+    expect(guideLink).toHaveAttribute('href', '/IMPORT_EXPORT_FORMAT.md')
+    expect(guideLink).toHaveAttribute('download', 'IMPORT_EXPORT_FORMAT.md')
   })
 })
