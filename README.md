@@ -32,6 +32,15 @@ Prerequisites: Python 3.12 or newer and Node.js 20 or newer.
 
 Open `http://127.0.0.1:5173`. The first-user screen requires the bootstrap token configured on the server. Vite proxies `/api` requests to the local API.
 
+After installing the backend and frontend dependencies, the root helper scripts can run both development servers in the background:
+
+```bash
+./start.sh
+./stop.sh
+```
+
+Runtime PID files and logs are stored in the ignored `tmp/learning-control-center/` directory.
+
 ## Validation
 
 Run the backend checks from the repository root:
