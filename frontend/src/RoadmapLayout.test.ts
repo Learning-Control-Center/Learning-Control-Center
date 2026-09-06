@@ -1,367 +1,355 @@
 import { describe, expect, it } from 'vitest'
 
 import {
-  NODE_GAP_Y,
-  NODE_HEIGHT,
-  PHASE_GAP,
+  buildVisiblePrereqEdges,
   computeRoadmapLayout,
+  computeVisibleRoadmap,
   mergeLayoutNodes,
-  toCanvasPosition,
+  NODE_HEIGHT,
   toPhaseLocalPosition,
   type CompetencyFlowNode,
+  type RoadmapLayout,
 } from './components/roadmapLayout'
 import type { Competency, Phase, Roadmap, Track } from './types'
 
 let sequence = 0
-
-function competency(partial: Partial<Competency> & { definitionId: string }): Competency {
+function makeCompetency(overrides: Partial<Competency> = {}): Competency {
   sequence += 1
   return {
-    identityId: `identity-${partial.definitionId}`,
-    stableKey: `key.${partial.definitionId}`,
+    identityId: `id-${sequence}`,
+    definitionId: `def-${sequence}`,
+    stableKey: `CORE.${sequence}`,
+    title: `Competency ${sequence}`,
     parentDefinitionId: null,
-    title: `Competency ${partial.definitionId}`,
     description: '',
     goal: '',
+    status: 'not_started',
     priority: 'core',
-    weight: 3,
+    weight: 1,
     orderIndex: sequence,
     archived: false,
-    position: { x: null, y: null },
-    status: 'not_started',
-    prerequisites: [],
     mustUnderstand: [],
     mustBeAbleTo: [],
+    prerequisites: [],
     exitCriteria: [],
-    ...partial,
+    position: { x: null, y: null },
+    ...overrides,
   }
 }
 
-function track(partial: Partial<Track> & { id: string }): Track {
-  return { stableKey: `track-${partial.id}`, title: `Track ${partial.id}`, description: '', orderIndex: 0, competencies: [], ...partial }
+function makeTrack(track: Track, competencies: Competency[]): Track {
+  return { ...track, competencies }
 }
 
-function phase(partial: Partial<Phase> & { id: string }): Phase {
-  return { stableKey: `phase-${partial.id}`, title: `Phase ${partial.id}`, description: '', orderIndex: 0, archived: false, isCurrent: false, tracks: [], ...partial }
+function trackWith(id: string, title: string, orderIndex: number): Track {
+  return { id, stableKey: `TRACK.${id}`, title, description: '', orderIndex, competencies: [] }
 }
 
-function buildRoadmap(): Roadmap {
-  const a = competency({ definitionId: 'a', orderIndex: 0 })
-  const b = competency({ definitionId: 'b', orderIndex: 1, parentDefinitionId: 'a' })
-  const c = competency({ definitionId: 'c', orderIndex: 2 })
-  const d = competency({ definitionId: 'd', orderIndex: 3 })
-  const e = competency({ definitionId: 'e', orderIndex: 0 })
-  const f = competency({
-    definitionId: 'f',
-    orderIndex: 1,
-    parentDefinitionId: 'e',
-    prerequisites: [{ identityId: 'identity-a', stableKey: 'key.a', kind: 'required' }],
-  })
-  const g = competency({
-    definitionId: 'g',
-    orderIndex: 2,
-    prerequisites: [{ identityId: 'identity-b', stableKey: 'key.b', kind: 'recommended' }],
-  })
+function phaseWith(id: string, title: string, orderIndex: number, tracks: Track[]): Phase {
   return {
-    id: 'roadmap',
-    stableKey: 'roadmap',
-    title: 'Test roadmap',
+    id,
+    stableKey: `PHASE.${id}`,
+    title,
     description: '',
-    activeVersion: { id: 'version', version: '1', schemaVersion: 1 },
-    currentPhaseId: 'p2',
-    phases: [
-      phase({
-        id: 'p1',
-        orderIndex: 0,
-        tracks: [
-          track({ id: 't1', orderIndex: 0, competencies: [a, b, c] }),
-          track({ id: 't2', orderIndex: 1, competencies: [d] }),
-        ],
-      }),
-      phase({
-        id: 'p2',
-        orderIndex: 1,
-        isCurrent: true,
-        tracks: [track({ id: 't3', orderIndex: 0, competencies: [e, f, g] })],
-      }),
-    ],
+    orderIndex,
+    archived: false,
+    isCurrent: false,
+    tracks,
   }
 }
 
-const noop = () => undefined
-
-function nodePosition(layout: ReturnType<typeof computeRoadmapLayout>, id: string) {
-  const node = layout.nodes.find((entry) => entry.id === id)
-  if (!node) throw new Error(`Missing node ${id}`)
-  return node.position
+function makeRoadmap(phases: Phase[]): Roadmap {
+  return {
+    id: 'roadmap-1',
+    stableKey: 'ROADMAP',
+    title: 'Roadmap',
+    description: '',
+    activeVersion: { id: 'version-1', version: '2', schemaVersion: 1 },
+    currentPhaseId: phases[0]?.id ?? '',
+    phases,
+  }
 }
+
+const focusRef = { current: () => {} }
+
+function layoutOptions(roadmap: Roadmap, expanded: ReadonlySet<string>, extras: Record<string, unknown> = {}) {
+  return {
+    roadmap,
+    expanded,
+    onToggleExpand: () => undefined,
+    onTogglePhaseCollapse: () => undefined,
+    focusPhaseRef: focusRef,
+    onMakeCurrent: () => undefined,
+    ...extras,
+  }
+}
+
+function competencyNodes(layout: RoadmapLayout): CompetencyFlowNode[] {
+  return layout.nodes.filter((node): node is CompetencyFlowNode => node.type === 'competency')
+}
+
+describe('computeVisibleRoadmap', () => {
+  it('hides descendants of collapsed parents at every depth', () => {
+    const parent = makeCompetency({ definitionId: 'p', stableKey: 'CORE.P' })
+    const child = makeCompetency({ definitionId: 'c', stableKey: 'CORE.C', parentDefinitionId: 'p' })
+    const grandchild = makeCompetency({ definitionId: 'g', stableKey: 'CORE.G', parentDefinitionId: 'c' })
+    const roadmap = makeRoadmap([phaseWith('ph1', 'Foundations', 0, [makeTrack(trackWith('t1', 'Track', 0), [parent, child, grandchild])])])
+
+    const expanded = computeVisibleRoadmap(roadmap, new Set(['p', 'c']))
+    expect(expanded.visible.map((item) => item.definitionId)).toEqual(['p', 'c', 'g'])
+
+    const collapsed = computeVisibleRoadmap(roadmap, new Set(['p']))
+    expect(collapsed.visible.map((item) => item.definitionId)).toEqual(['p', 'c'])
+  })
+
+  it('lays out a child whose parent lives in another phase inside its own phase', () => {
+    const parent = makeCompetency({ definitionId: 'p', stableKey: 'CORE.P' })
+    const child = makeCompetency({ definitionId: 'c', stableKey: 'CORE.C', parentDefinitionId: 'p' })
+    const roadmap = makeRoadmap([
+      phaseWith('ph1', 'One', 0, [makeTrack(trackWith('t1', 'T1', 0), [parent])]),
+      phaseWith('ph2', 'Two', 1, [makeTrack(trackWith('t2', 'T2', 0), [child])]),
+    ])
+
+    // Cross-phase children follow the same expansion rule as any child: the
+    // subtree stays hidden until the parent is expanded.
+    expect(computeVisibleRoadmap(roadmap, new Set()).visible.map((item) => item.definitionId)).toEqual(['p'])
+
+    const layout = computeRoadmapLayout(layoutOptions(roadmap, new Set(['p'])))
+    expect(competencyNodes(layout).map((node) => node.id)).toEqual(['p', 'c'])
+    // The child is anchored to its own phase, not nested under the parent.
+    expect(layout.phaseByDefinition.get('c')).toBe('ph2')
+    const phaseTwo = layout.phases.find((entry) => entry.phase.id === 'ph2')
+    const childNode = competencyNodes(layout).find((node) => node.id === 'c')
+    expect(childNode?.position.x ?? 0).toBeGreaterThanOrEqual(phaseTwo?.origin.x ?? Number.MAX_SAFE_INTEGER)
+    // Cross-phase hierarchy still renders an edge when both sides are visible.
+    expect(layout.edges.some((edge) => edge.id === 'parent-p-c')).toBe(true)
+  })
+})
 
 describe('computeRoadmapLayout', () => {
-  it('lays phase containers out left-to-right and flags the current phase', () => {
-    const layout = computeRoadmapLayout({ roadmap: buildRoadmap(), expanded: new Set(), onToggleExpand: noop })
-    expect(layout.phases).toHaveLength(2)
-    expect(layout.phases[0].origin).toEqual({ x: 0, y: 0 })
-    expect(layout.phases[1].origin.y).toBe(0)
-    expect(layout.phases[1].origin.x).toBe(layout.phases[0].width + PHASE_GAP)
-    expect(layout.phases[1].phase.isCurrent).toBe(true)
-    const phaseNodes = layout.nodes.filter((node) => node.type === 'phase')
-    expect(phaseNodes.map((node) => node.id)).toEqual(['phase-p1', 'phase-p2'])
+  it('parents expand to reveal children and collapse to hide subtrees', () => {
+    const parent = makeCompetency({ definitionId: 'p', stableKey: 'CORE.P' })
+    const child = makeCompetency({ definitionId: 'c', stableKey: 'CORE.C', parentDefinitionId: 'p' })
+    const grandchild = makeCompetency({ definitionId: 'g', stableKey: 'CORE.G', parentDefinitionId: 'c' })
+    const roadmap = makeRoadmap([phaseWith('ph1', 'Foundations', 0, [makeTrack(trackWith('t1', 'Track', 0), [parent, child, grandchild])])])
+
+    const expandedLayout = computeRoadmapLayout(layoutOptions(roadmap, new Set(['p', 'c'])))
+    expect(competencyNodes(expandedLayout).map((node) => node.id)).toEqual(['p', 'c', 'g'])
+
+    const collapsedLayout = computeRoadmapLayout(layoutOptions(roadmap, new Set(['p'])))
+    expect(competencyNodes(collapsedLayout).map((node) => node.id)).toEqual(['p', 'c'])
+    expect(collapsedLayout.edges).toHaveLength(1)
+    expect(collapsedLayout.edges[0]?.id).toBe('parent-p-c')
   })
 
-  it('stacks track lanes vertically within a phase container', () => {
-    const layout = computeRoadmapLayout({ roadmap: buildRoadmap(), expanded: new Set(), onToggleExpand: noop })
-    const [first, second] = layout.phases[0].lanes
-    expect(layout.phases[0].lanes.map((lane) => lane.trackId)).toEqual(['t1', 't2'])
-    expect(second.y).toBeGreaterThan(first.y + first.height - 1)
+  it('keeps hierarchy edges as tree edges and prerequisites off the default canvas', () => {
+    const dependency = makeCompetency({ definitionId: 'dep', stableKey: 'CORE.DEP' })
+    const parent = makeCompetency({
+      definitionId: 'p',
+      stableKey: 'CORE.P',
+      prerequisites: [{ identityId: dependency.identityId, stableKey: dependency.stableKey, kind: 'required' }],
+    })
+    const child = makeCompetency({ definitionId: 'c', stableKey: 'CORE.C', parentDefinitionId: 'p' })
+    const roadmap = makeRoadmap([phaseWith('ph1', 'Foundations', 0, [makeTrack(trackWith('t1', 'Track', 0), [dependency, parent, child])])])
+
+    const layout = computeRoadmapLayout(layoutOptions(roadmap, new Set(['p'])))
+    expect(layout.edges).toHaveLength(1)
+    expect(layout.edges[0]?.type).toBe('tree')
+    expect(layout.edges.some((edge) => edge.id.startsWith('prereq-'))).toBe(false)
+    expect(layout.prereqEdges).toHaveLength(1)
+    expect(layout.prereqEdges[0]?.data?.kind).toBe('required')
+    expect(competencyNodes(layout).find((node) => node.id === 'p')?.data.prerequisiteCount).toBe(1)
   })
 
-  it('places expanded children below their parent and hides them when collapsed', () => {
-    const expanded = computeRoadmapLayout({ roadmap: buildRoadmap(), expanded: new Set(['a', 'e']), onToggleExpand: noop })
-    const parent = nodePosition(expanded, 'a')
-    const child = nodePosition(expanded, 'b')
-    expect(child.x).toBe(parent.x)
-    expect(child.y).toBe(parent.y + NODE_HEIGHT + NODE_GAP_Y)
+  it('lays each phase out as visible track sections with stacked track geometry', () => {
+    const firstTrack = makeTrack(trackWith('t1', 'First', 0), [makeCompetency(), makeCompetency()])
+    const secondTrack = makeTrack(trackWith('t2', 'Second', 1), [makeCompetency()])
+    const roadmap = makeRoadmap([phaseWith('ph1', 'Foundations', 0, [firstTrack, secondTrack])])
 
-    const collapsed = computeRoadmapLayout({ roadmap: buildRoadmap(), expanded: new Set(), onToggleExpand: noop })
-    expect(collapsed.visible.map((item) => item.definitionId)).not.toContain('b')
-    expect(collapsed.nodes.some((node) => node.id === 'b')).toBe(false)
+    const layout = computeRoadmapLayout(layoutOptions(roadmap, new Set()))
+    const phase = layout.phases[0]
+    expect(phase).toBeDefined()
+    expect(phase?.tracks.map((track) => track.title)).toEqual(['First', 'Second'])
+    expect((phase?.tracks[1]?.y ?? 0) > (phase?.tracks[0]?.y ?? 0)).toBe(true)
+    const ids = firstTrack.competencies.map((item) => item.definitionId)
+    const first = competencyNodes(layout).find((node) => node.id === ids[0])
+    const second = competencyNodes(layout).find((node) => node.id === ids[1])
+    expect((second?.position.y ?? 0) - (first?.position.y ?? 0)).toBeGreaterThanOrEqual(NODE_HEIGHT)
   })
 
-  it('honours a stored free-form position', () => {
-    const roadmap = buildRoadmap()
-    roadmap.phases[0].tracks[1].competencies[0].position = { x: 300, y: 202 }
-    const layout = computeRoadmapLayout({ roadmap, expanded: new Set(), onToggleExpand: noop })
-    const position = nodePosition(layout, 'd')
-    expect(position).toEqual({ x: layout.phases[0].origin.x + 300, y: 202 })
+  it('places children indented beneath their parent for a hierarchy-first reading', () => {
+    const parent = makeCompetency({ definitionId: 'p', stableKey: 'CORE.P' })
+    const firstChild = makeCompetency({ definitionId: 'c1', stableKey: 'CORE.C1', parentDefinitionId: 'p' })
+    const secondChild = makeCompetency({ definitionId: 'c2', stableKey: 'CORE.C2', parentDefinitionId: 'p' })
+    const roadmap = makeRoadmap([phaseWith('ph1', 'Foundations', 0, [makeTrack(trackWith('t1', 'Track', 0), [parent, firstChild, secondChild])])])
+
+    const layout = computeRoadmapLayout(layoutOptions(roadmap, new Set(['p'])))
+    const nodes = competencyNodes(layout)
+    const parentNode = nodes.find((node) => node.id === 'p')
+    const firstChildNode = nodes.find((node) => node.id === 'c1')
+    const secondChildNode = nodes.find((node) => node.id === 'c2')
+    expect(parentNode).toBeDefined()
+    expect((firstChildNode?.position.y ?? 0) > (parentNode?.position.y ?? 0)).toBe(true)
+    expect((firstChildNode?.position.x ?? 0) > (parentNode?.position.x ?? 0)).toBe(true)
+    expect((secondChildNode?.position.x ?? 0) > (firstChildNode?.position.x ?? 0)).toBe(true)
+    expect((secondChildNode?.position.y ?? 0) - (firstChildNode?.position.y ?? 0)).toBeGreaterThanOrEqual(NODE_HEIGHT)
+    expect(secondChildNode?.data.depth ?? 0).toBeGreaterThan(firstChildNode?.data.depth ?? 0)
   })
 
-  it.each([
-    ['negative Y above the phase', { x: 168, y: -140 }],
-    ['X beyond the phase right edge', { x: 900, y: 76 }],
-    ['Y below the phase bottom edge', { x: 168, y: 900 }],
-  ])('honours a manual position with %s', (_label, position) => {
-    const roadmap = buildRoadmap()
-    roadmap.phases[0].tracks[0].competencies.find((item) => item.definitionId === 'c')!.position = position
-    const layout = computeRoadmapLayout({ roadmap, expanded: new Set(), onToggleExpand: noop })
-    expect(nodePosition(layout, 'c')).toEqual(toCanvasPosition(layout.phases[0].origin, position))
+  it('never overlaps siblings within a track', () => {
+    const items = Array.from({ length: 8 }, (_, index) => makeCompetency({ orderIndex: index }))
+    const roadmap = makeRoadmap([phaseWith('ph1', 'Foundations', 0, [makeTrack(trackWith('t1', 'Track', 0), items)])])
+    const layout = computeRoadmapLayout(layoutOptions(roadmap, new Set()))
+    const rects = competencyNodes(layout).map((node) => ({
+      x0: node.position.x,
+      x1: node.position.x + (node.width ?? 0),
+      y0: node.position.y,
+      y1: node.position.y + (node.height ?? 0),
+    }))
+    rects.forEach((a, index) => {
+      rects.slice(index + 1).forEach((b) => {
+        const overlapX = Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0)
+        const overlapY = Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0)
+        expect(overlapX <= 0 || overlapY <= 0).toBe(true)
+      })
+    })
   })
 
-  it('does not let free-form positions inflate phase geometry or shift later phases', () => {
-    const clean = buildRoadmap()
-    const garbage = buildRoadmap()
-    garbage.phases[0].tracks[0].competencies.find((item) => item.definitionId === 'c')!.position = {
-      x: 500,
-      y: 300,
-    }
-    garbage.phases[0].tracks[1].competencies.find((item) => item.definitionId === 'd')!.position = {
-      x: 168,
-      y: -250,
-    }
-    const cleanLayout = computeRoadmapLayout({ roadmap: clean, expanded: new Set(), onToggleExpand: noop })
-    const garbageLayout = computeRoadmapLayout({ roadmap: garbage, expanded: new Set(), onToggleExpand: noop })
-    expect(garbageLayout.phases[0].width).toBe(cleanLayout.phases[0].width)
-    expect(garbageLayout.phases[0].height).toBe(cleanLayout.phases[0].height)
-    expect(garbageLayout.phases[1].origin.x).toBe(cleanLayout.phases[1].origin.x)
+  it('phase collapse hides every node in that phase by phase_id, regardless of manual position', () => {
+    const anchor = makeCompetency({ definitionId: 'a', stableKey: 'CORE.A' })
+    const drifted = makeCompetency({ definitionId: 'b', stableKey: 'CORE.B', position: { x: 1200, y: -400 } })
+    const other = makeCompetency({ definitionId: 'c', stableKey: 'CORE.C' })
+    const roadmap = makeRoadmap([
+      phaseWith('ph1', 'One', 0, [makeTrack(trackWith('t1', 'T1', 0), [anchor, drifted])]),
+      phaseWith('ph2', 'Two', 1, [makeTrack(trackWith('t2', 'T2', 0), [other])]),
+    ])
+
+    const layout = computeRoadmapLayout(layoutOptions(roadmap, new Set(), { collapsedPhases: new Set(['ph1']) }))
+    expect(competencyNodes(layout).map((node) => node.id)).toEqual(['c'])
+    const collapsed = layout.phases.find((entry) => entry.phase.id === 'ph1')
+    const open = layout.phases.find((entry) => entry.phase.id === 'ph2')
+    expect(collapsed?.collapsed).toBe(true)
+    expect(collapsed?.hasNodes).toBe(false)
+    expect(collapsed?.tracks).toEqual([])
+    expect(open?.collapsed).toBe(false)
+    expect(open?.origin.x ?? 0).toBeGreaterThan(collapsed?.width ?? 0)
+    const collapsedNode = layout.nodes.find((node) => node.id === 'phase-ph1')
+    expect(collapsedNode?.data.collapsed).toBe(true)
   })
 
-  it('never mutates stored positions while rendering and stays deterministic', () => {
-    const roadmap = buildRoadmap()
-    roadmap.phases[0].tracks[0].competencies.find((item) => item.definitionId === 'c')!.position = { x: 50, y: -120 }
-    const before = JSON.stringify(roadmap)
-    const first = computeRoadmapLayout({ roadmap, expanded: new Set(), onToggleExpand: noop })
-    const second = computeRoadmapLayout({ roadmap, expanded: new Set(), onToggleExpand: noop })
-    expect(JSON.stringify(roadmap)).toBe(before)
-    expect(second.nodes.map((node) => [node.id, node.position])).toEqual(
-      first.nodes.map((node) => [node.id, node.position]),
+  it('keeps phase geometry identical whether prerequisites are disclosed or not', () => {
+    const dependency = makeCompetency({ definitionId: 'dep', stableKey: 'CORE.DEP' })
+    const dependent = makeCompetency({
+      definitionId: 'p',
+      stableKey: 'CORE.P',
+      prerequisites: [{ identityId: dependency.identityId, stableKey: dependency.stableKey, kind: 'recommended' }],
+    })
+    const roadmap = makeRoadmap([phaseWith('ph1', 'Foundations', 0, [makeTrack(trackWith('t1', 'Track', 0), [dependency, dependent])])])
+
+    const layout = computeRoadmapLayout(layoutOptions(roadmap, new Set()))
+    const geometryBefore = competencyNodes(layout).map((node) => ({ id: node.id, position: node.position }))
+    expect(buildVisiblePrereqEdges(layout.prereqEdges, false, null)).toHaveLength(0)
+    expect(buildVisiblePrereqEdges(layout.prereqEdges, true, null)).toHaveLength(1)
+    expect(buildVisiblePrereqEdges(layout.prereqEdges, false, 'p')).toHaveLength(1)
+    expect(buildVisiblePrereqEdges(layout.prereqEdges, false, 'unrelated')).toHaveLength(0)
+
+    const layoutAfter = computeRoadmapLayout(layoutOptions(roadmap, new Set()))
+    expect(competencyNodes(layoutAfter).map((node) => ({ id: node.id, position: node.position }))).toEqual(geometryBefore)
+  })
+
+  it('preserves node object identity for nodes whose geometry and data are unchanged', () => {
+    const items = [
+      makeCompetency({ definitionId: 'a', stableKey: 'CORE.A', status: 'learning' }),
+      makeCompetency({ definitionId: 'b', stableKey: 'CORE.B' }),
+    ]
+    const roadmap = makeRoadmap([phaseWith('ph1', 'Foundations', 0, [makeTrack(trackWith('t1', 'Track', 0), items)])])
+    const onToggleExpand = () => undefined
+    const layout = computeRoadmapLayout(layoutOptions(roadmap, new Set(), { onToggleExpand }))
+
+    const first = mergeLayoutNodes([], layout, new Map(), null)
+    const second = mergeLayoutNodes(first, layout, new Map(), null)
+    expect(second.every((node, index) => node === first[index])).toBe(true)
+
+    const byId = (nodes: typeof first, id: string) => nodes.find((node) => node.id === id)
+    const selected = mergeLayoutNodes(first, layout, new Map(), 'b')
+    expect(byId(selected, 'a')).toBe(byId(first, 'a'))
+    expect(byId(selected, 'b')).not.toBe(byId(first, 'b'))
+    expect(byId(selected, 'b')?.data.selected).toBe(true)
+
+    const dragged = mergeLayoutNodes(selected, layout, new Map([['a', { x: 40, y: 60 }]]), 'b')
+    expect(byId(dragged, 'b')).toBe(byId(selected, 'b'))
+    expect(byId(dragged, 'a')).not.toBe(byId(selected, 'a'))
+    expect(byId(dragged, 'a')?.position).toEqual({ x: 40, y: 60 })
+
+    const statusesChanged = computeRoadmapLayout(
+      layoutOptions(
+        makeRoadmap([
+          phaseWith('ph1', 'Foundations', 0, [
+            makeTrack(trackWith('t1', 'Track', 0), [
+              { ...items[0], status: 'verified' as const },
+              items[1],
+            ]),
+          ]),
+        ]),
+        new Set(),
+        { onToggleExpand },
+      ),
     )
+    const merged = mergeLayoutNodes(first, statusesChanged, new Map(), null)
+    expect(byId(merged, 'a')).not.toBe(byId(first, 'a'))
+    expect(byId(merged, 'b')).toBe(byId(first, 'b'))
   })
 
-  it('uses the deterministic slot position when the stored position is null', () => {
-    const layout = computeRoadmapLayout({ roadmap: buildRoadmap(), expanded: new Set(), onToggleExpand: noop })
-    expect(nodePosition(layout, 'd')).toEqual({ x: layout.phases[0].origin.x + 168, y: 202 })
+  it('converts phase-local persisted coordinates to canvas coordinates', () => {
+    const phaseOneItems = [makeCompetency({ definitionId: 'a', position: { x: 24, y: 96 } })]
+    const phaseTwoItems = [makeCompetency({ definitionId: 'b', position: { x: 40, y: 120 } })]
+    const roadmap = makeRoadmap([
+      phaseWith('ph1', 'One', 0, [makeTrack(trackWith('t1', 'T1', 0), phaseOneItems)]),
+      phaseWith('ph2', 'Two', 1, [makeTrack(trackWith('t2', 'T2', 0), phaseTwoItems)]),
+    ])
+    const layout = computeRoadmapLayout(layoutOptions(roadmap, new Set()))
+    const phaseOne = layout.phases.find((phase) => phase.phase.id === 'ph1')
+    const phaseTwo = layout.phases.find((phase) => phase.phase.id === 'ph2')
+    expect(phaseOne?.origin).toEqual({ x: 0, y: 0 })
+    expect(phaseTwo?.origin.x).toBeGreaterThan(0)
+    const first = competencyNodes(layout).find((node) => node.id === 'a')
+    const second = competencyNodes(layout).find((node) => node.id === 'b')
+    expect(first?.position).toEqual({ x: 24, y: 96 })
+    expect(second?.position).toEqual({ x: (phaseTwo?.origin.x ?? 0) + 40, y: 120 })
+    expect(toPhaseLocalPosition(phaseTwo?.origin ?? { x: 0, y: 0 }, second?.position ?? { x: 0, y: 0 })).toEqual({ x: 40, y: 120 })
   })
 
-  it('honours overlapping manual positions without mutating them', () => {
-    const roadmap = buildRoadmap()
-    const d = roadmap.phases[0].tracks[1].competencies.find((item) => item.definitionId === 'd')!
-    const h = competency({ definitionId: 'h', orderIndex: 4 })
-    roadmap.phases[0].tracks[1].competencies.push(h)
-    d.position = { x: 168, y: 202 }
-    h.position = { x: 168, y: 202 }
-    const before = JSON.stringify(roadmap)
-    const layout = computeRoadmapLayout({ roadmap, expanded: new Set(), onToggleExpand: noop })
-    const dPosition = nodePosition(layout, 'd')
-    const hPosition = nodePosition(layout, 'h')
-    expect(hPosition).toEqual(dPosition)
-    expect(dPosition).toEqual({ x: layout.phases[0].origin.x + 168, y: 202 })
-    expect(JSON.stringify(roadmap)).toBe(before)
+  it('treats manual positions as free-form visual overrides, even outside the phase bounds', () => {
+    const anchored = makeCompetency({ definitionId: 'a', position: { x: -120, y: -48 } })
+    const freeform = makeCompetency({ definitionId: 'b', position: { x: 900, y: 640 } })
+    const roadmap = makeRoadmap([phaseWith('ph1', 'One', 0, [makeTrack(trackWith('t1', 'T1', 0), [anchored, freeform])])])
+    const layout = computeRoadmapLayout(layoutOptions(roadmap, new Set()))
+    const nodes = competencyNodes(layout)
+    expect(nodes.find((node) => node.id === 'a')?.position).toEqual({ x: -120, y: -48 })
+    expect(nodes.find((node) => node.id === 'b')?.position).toEqual({ x: 900, y: 640 })
+    const phase = layout.phases[0]
+    expect(phase).toBeDefined()
+    expect(phase?.width ?? 0).toBeLessThan(900)
+    expect(phase?.hasNodes).toBe(true)
+    expect(competencyNodes(layout).some((node) => node.position.x < 0)).toBe(true)
   })
 
-  it('distinguishes required, recommended, and hierarchy edges without always-on animation', () => {
-    const layout = computeRoadmapLayout({ roadmap: buildRoadmap(), expanded: new Set(['a', 'e']), onToggleExpand: noop })
-    const required = layout.edges.find((edge) => edge.id === 'prereq-a-f')
-    const recommended = layout.edges.find((edge) => edge.id === 'prereq-b-g')
-    const hierarchy = layout.edges.find((edge) => edge.id === 'parent-e-f')
-    expect(required?.style?.stroke).toBe('#326653')
-    expect(required?.style?.strokeDasharray).toBeUndefined()
-    expect(recommended?.style?.strokeDasharray).toBe('6 6')
-    expect(hierarchy?.sourceHandle).toBe('out-hierarchy')
-    expect(hierarchy?.targetHandle).toBe('in-hierarchy')
-    expect(layout.edges.every((edge) => !edge.animated)).toBe(true)
+  it('applies manual positions exactly without resolving overlaps against automatic slots', () => {
+    const first = makeCompetency({ definitionId: 'a', position: { x: 40, y: 80 } })
+    const second = makeCompetency({ definitionId: 'b', position: { x: 48, y: 88 } })
+    const roadmap = makeRoadmap([phaseWith('ph1', 'One', 0, [makeTrack(trackWith('t1', 'T1', 0), [first, second])])])
+    const layout = computeRoadmapLayout(layoutOptions(roadmap, new Set()))
+    const nodes = competencyNodes(layout)
+    expect(nodes.find((node) => node.id === 'a')?.position).toEqual({ x: 40, y: 80 })
+    expect(nodes.find((node) => node.id === 'b')?.position).toEqual({ x: 48, y: 88 })
   })
 
-  it('drops prerequisite edges whose source is not visible', () => {
-    const layout = computeRoadmapLayout({ roadmap: buildRoadmap(), expanded: new Set(['e']), onToggleExpand: noop })
-    expect(layout.edges.some((edge) => edge.id === 'prereq-b-g')).toBe(false)
-    expect(layout.edges.some((edge) => edge.id === 'prereq-a-f')).toBe(true)
-  })
-
-  it('renders an empty phase as a labelled container', () => {
-    const roadmap = buildRoadmap()
-    roadmap.phases.push(phase({ id: 'p3', orderIndex: 2 }))
-    const layout = computeRoadmapLayout({ roadmap, expanded: new Set(), onToggleExpand: noop })
-    const emptyPhase = layout.nodes.find((node) => node.id === 'phase-p3')
-    expect(emptyPhase?.data.empty).toBe(true)
-    expect(layout.phases[2].origin.x).toBeGreaterThan(layout.phases[1].origin.x)
-  })
-
-  it('keeps competency nodes interactive and exposes expand affordance data', () => {
-    const layout = computeRoadmapLayout({ roadmap: buildRoadmap(), expanded: new Set(['a']), onToggleExpand: noop })
-    const parent = layout.nodes.find((node): node is CompetencyFlowNode => node.id === 'a')
-    const leaf = layout.nodes.find((node): node is CompetencyFlowNode => node.id === 'c')
-    expect(parent?.data.childCount).toBe(1)
-    expect(parent?.data.expanded).toBe(true)
-    expect(leaf?.data.childCount).toBe(0)
-    expect(parent?.draggable).not.toBe(false)
-    expect(layout.nodes.find((node) => node.id === 'phase-p1')?.draggable).toBe(false)
-  })
-
-  it('restores deterministic placement after manual positions are cleared', () => {
-    const roadmap = buildRoadmap()
-    const item = roadmap.phases[0].tracks[1].competencies[0]
-    item.position = { x: 900, y: -140 }
-    const manual = computeRoadmapLayout({ roadmap, expanded: new Set(), onToggleExpand: noop })
-    expect(nodePosition(manual, 'd')).toEqual({ x: 900, y: -140 })
-
-    item.position = { x: null, y: null }
-    const reset = computeRoadmapLayout({ roadmap, expanded: new Set(), onToggleExpand: noop })
-    expect(nodePosition(reset, 'd')).toEqual({ x: 168, y: 202 })
-  })
-})
-
-describe('coordinate conversion', () => {
-  it('round-trips between phase-local and canvas coordinates', () => {
-    const origin = { x: 412, y: 0 }
-    const local = { x: 168, y: 208 }
-    expect(toPhaseLocalPosition(origin, toCanvasPosition(origin, local))).toEqual(local)
-  })
-})
-
-describe('mergeLayoutNodes', () => {
-  it('reuses unchanged node objects across selection-only changes', () => {
-    const roadmap = buildRoadmap()
-    const expanded = new Set(['a', 'e'])
-    const layout = computeRoadmapLayout({ roadmap, expanded, onToggleExpand: noop })
-    const seeded = mergeLayoutNodes([], layout, new Map(), null)
-
-    const afterSelectA = mergeLayoutNodes(seeded, layout, new Map(), 'a')
-    expect(afterSelectA.find((node) => node.id === 'a')?.data.selected).toBe(true)
-    expect(seeded.find((node) => node.id === 'a')?.data.selected).toBe(false)
-
-    const afterSelectC = mergeLayoutNodes(afterSelectA, layout, new Map(), 'c')
-    expect(afterSelectC.find((node) => node.id === 'a')?.data.selected).toBe(false)
-    expect(afterSelectC.find((node) => node.id === 'c')?.data.selected).toBe(true)
-
-    for (const id of ['b', 'd', 'e', 'f', 'g', 'phase-p1', 'phase-p2']) {
-      expect(afterSelectC.find((node) => node.id === id)).toBe(seeded.find((node) => node.id === id))
-    }
-  })
-
-  it('does not recompute the geometry layout for a selection-only merge', () => {
-    const roadmap = buildRoadmap()
-    const expanded = new Set(['a', 'e'])
-    const layout = computeRoadmapLayout({ roadmap, expanded, onToggleExpand: noop })
-    const seeded = mergeLayoutNodes([], layout, new Map(), null)
-    const merged = mergeLayoutNodes(seeded, layout, new Map(), 'g')
-    for (const node of merged) {
-      const original = seeded.find((entry) => entry.id === node.id)
-      if (node.type === 'competency' && node.id !== 'g') {
-        expect(original?.data.expanded).toBe(node.data.expanded)
-        expect(original?.position).toEqual(node.position)
-      }
-    }
-    expect(merged.find((node) => node.id === 'g')?.data.selected).toBe(true)
-  })
-
-  it('keeps unchanged identities when expanding changes the geometry', () => {
-    const roadmap = buildRoadmap()
-    const collapsedLayout = computeRoadmapLayout({ roadmap, expanded: new Set(), onToggleExpand: noop })
-    const seeded = mergeLayoutNodes([], collapsedLayout, new Map(), null)
-
-    const expandedLayout = computeRoadmapLayout({ roadmap, expanded: new Set(['a']), onToggleExpand: noop })
-    const merged = mergeLayoutNodes(seeded, expandedLayout, new Map(), null)
-
-    expect(merged.some((node) => node.id === 'b')).toBe(true)
-    expect(merged.find((node) => node.id === 'a')?.data.expanded).toBe(true)
-    expect(merged.find((node) => node.id === 'a')).not.toBe(seeded.find((node) => node.id === 'a'))
-    // Nodes whose geometry is untouched retain identity. Only the later lane
-    // in the same phase shifts when the expanded hierarchy makes lane one taller.
-    for (const id of ['c', 'e', 'g', 'phase-p2']) {
-      expect(merged.find((node) => node.id === id)).toBe(seeded.find((node) => node.id === id))
-    }
-    expect(merged.find((node) => node.id === 'd')).not.toBe(seeded.find((node) => node.id === 'd'))
-  })
-
-  it('leaves competency nodes ungrouped and without a drag extent for free canvas movement', () => {
-    const layout = computeRoadmapLayout({ roadmap: buildRoadmap(), expanded: new Set(), onToggleExpand: noop })
-    const seeded = mergeLayoutNodes([], layout, new Map(), null)
-    const competencies = seeded.filter((node) => node.type === 'competency')
-    expect(competencies.every((node) => node.parentId === undefined)).toBe(true)
-    expect(competencies.every((node) => node.extent === undefined)).toBe(true)
-  })
-
-  it('drops collapsed children from the merged node set', () => {
-    const roadmap = buildRoadmap()
-    const expandedLayout = computeRoadmapLayout({ roadmap, expanded: new Set(['a', 'e']), onToggleExpand: noop })
-    const seeded = mergeLayoutNodes([], expandedLayout, new Map(), null)
-    const collapsedLayout = computeRoadmapLayout({ roadmap, expanded: new Set(['e']), onToggleExpand: noop })
-    const merged = mergeLayoutNodes(seeded, collapsedLayout, new Map(), null)
-    expect(merged.some((node) => node.id === 'b')).toBe(false)
-    expect(merged.find((node) => node.id === 'a')?.data.expanded).toBe(false)
-  })
-
-  it('re-applies in-flight drag overrides when merging', () => {
-    const roadmap = buildRoadmap()
-    const layout = computeRoadmapLayout({ roadmap, expanded: new Set(), onToggleExpand: noop })
-    const seeded = mergeLayoutNodes([], layout, new Map(), null)
-    const dragged = new Map([['c', { x: 999, y: 42 }]])
-    const merged = mergeLayoutNodes(seeded, layout, dragged, null)
-    expect(merged.find((node) => node.id === 'c')?.position).toEqual({
-      x: layout.phases[0].origin.x + 999,
-      y: 42,
-    })
-    expect(merged.find((node) => node.id === 'd')).toBe(seeded.find((node) => node.id === 'd'))
-  })
-
-  it('keeps an outside-phase position through drag merge and persisted-layout reload', () => {
-    const roadmap = buildRoadmap()
-    const initial = computeRoadmapLayout({ roadmap, expanded: new Set(), onToggleExpand: noop })
-    const seeded = mergeLayoutNodes([], initial, new Map(), null)
-    const local = { x: initial.phases[1].origin.x + 120, y: -180 }
-    const dragged = mergeLayoutNodes(seeded, initial, new Map([['d', local]]), null)
-    expect(dragged.find((node) => node.id === 'd')?.position).toEqual({
-      x: initial.phases[0].origin.x + local.x,
-      y: initial.phases[0].origin.y + local.y,
-    })
-
-    roadmap.phases[0].tracks[1].competencies[0].position = local
-    const reloaded = computeRoadmapLayout({ roadmap, expanded: new Set(), onToggleExpand: noop })
-    const mergedReload = mergeLayoutNodes(dragged, reloaded, new Map(), null)
-    expect(mergedReload.find((node) => node.id === 'd')?.position).toEqual({
-      x: reloaded.phases[0].origin.x + local.x,
-      y: reloaded.phases[0].origin.y + local.y,
-    })
-    expect(reloaded.phaseByDefinition.get('d')).toBe('p1')
-    expect(roadmap.phases[0].tracks[1].competencies[0].definitionId).toBe('d')
+  it('uses deterministic ordering for tracks and competencies within a phase', () => {
+    const firstTrack = makeTrack(trackWith('t1', 'B', 1), [makeCompetency({ orderIndex: 2 })])
+    const secondTrack = makeTrack(trackWith('t2', 'A', 0), [makeCompetency({ orderIndex: 1 })])
+    const roadmap = makeRoadmap([phaseWith('ph1', 'Foundations', 0, [firstTrack, secondTrack])])
+    const layout = computeRoadmapLayout(layoutOptions(roadmap, new Set()))
+    expect(layout.phases[0]?.tracks[0]?.title).toBe('A')
+    expect(layout.phases[0]?.tracks[1]?.title).toBe('B')
   })
 })

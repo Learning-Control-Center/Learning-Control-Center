@@ -3,7 +3,9 @@ import {
   Controls,
   MiniMap,
   ReactFlow,
+  getViewportForBounds,
   useNodesState,
+  type EdgeTypes,
   type NodeMouseHandler,
   type NodeTypes,
   type OnNodeDrag,
@@ -12,15 +14,16 @@ import {
   type ReactFlowInstance,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { ChevronRight, ListTree, Maximize2, Network, RotateCcw, Search, ShieldCheck, Upload, X } from 'lucide-react'
+import { ChevronRight, Link2, ListTree, Maximize2, Network, RotateCcw, Search, ShieldCheck, Upload, X } from 'lucide-react'
 import { AnimatePresence, motion } from 'motion/react'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import { ApiError, api } from '../api'
 import { EmptyState, ErrorState, LoadingState } from '../components/PageState'
-import { CompetencyNode, PhaseContainerNode } from '../components/RoadmapNodes'
+import { CompetencyNode, PhaseContainerNode, TreeEdge } from '../components/RoadmapNodes'
 import {
+  buildVisiblePrereqEdges,
   computeRoadmapLayout,
   mergeLayoutNodes,
   phaseOriginFor,
@@ -36,6 +39,7 @@ type RoadmapResponse = { configured: boolean; guidance?: string; roadmap?: Roadm
 type Notice = { id: number; text: string; tone: 'success' | 'error' }
 
 const roadmapNodeTypes: NodeTypes = { competency: CompetencyNode, phase: PhaseContainerNode }
+const roadmapEdgeTypes: EdgeTypes = { tree: TreeEdge }
 const fitViewOptions = { padding: 0.14 }
 
 export function RoadmapPage() {
@@ -46,11 +50,18 @@ export function RoadmapPage() {
   const [listMode, setListMode] = useState(false)
   const [query, setQuery] = useState('')
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const [collapsedPhases, setCollapsedPhases] = useState<Set<string>>(new Set())
+  const [showPrereqs, setShowPrereqs] = useState(false)
+  const [currentBusyPhaseId, setCurrentBusyPhaseId] = useState<string | null>(null)
   const [resetOpen, setResetOpen] = useState(false)
   const [resetBusy, setResetBusy] = useState(false)
   const [fitNonce, setFitNonce] = useState(0)
   const [notice, setNotice] = useState<Notice | null>(null)
   const noticeTimer = useRef<number | undefined>(undefined)
+  // Phase focus needs the React Flow viewport instance, which only exists once
+  // the graph mounts. The layout memo receives this ref so the phase-node data
+  // callback stays referentially stable; RoadmapGraph rebinds the target.
+  const focusPhaseRef = useRef<(phaseId: string) => void>(() => {})
 
   const notify = useCallback((text: string, tone: Notice['tone'] = 'success') => {
     setNotice({ id: Date.now(), text, tone })
@@ -77,12 +88,12 @@ export function RoadmapPage() {
             ? refreshedCompetencies.find((item) => item.identityId === current.identityId) ?? null
             : null,
         )
+        // Default to an expanded graph: every competency that parents children
+        // starts expanded, so the full hierarchy is visible on first load.
         const parents = new Set(
-          response.roadmap.phases.flatMap((phase) =>
-            phase.tracks.flatMap((track) =>
-              track.competencies.filter((item) => item.parentDefinitionId === null).map((item) => item.definitionId),
-            ),
-          ),
+          refreshedCompetencies
+            .filter((item) => item.parentDefinitionId !== null)
+            .map((item) => item.parentDefinitionId as string),
         )
         setExpanded(parents)
       }
@@ -106,6 +117,15 @@ export function RoadmapPage() {
     })
   }, [])
 
+  const onTogglePhaseCollapse = useCallback((phaseId: string) => {
+    setCollapsedPhases((current) => {
+      const next = new Set(current)
+      if (next.has(phaseId)) next.delete(phaseId)
+      else next.add(phaseId)
+      return next
+    })
+  }, [])
+
   const confirmResetLayout = useCallback(async () => {
     setResetBusy(true)
     try {
@@ -125,16 +145,45 @@ export function RoadmapPage() {
     }
   }, [load, notify])
 
+  const onMakeCurrent = useCallback(
+    async (phaseId: string) => {
+      setCurrentBusyPhaseId(phaseId)
+      try {
+        await api(`/roadmap/current-phase/${phaseId}`, { method: 'PUT' })
+        await load()
+        notify('Current phase updated')
+      } catch (caught) {
+        notify(caught instanceof ApiError ? caught.message : 'The current phase could not be changed.', 'error')
+      } finally {
+        setCurrentBusyPhaseId(null)
+      }
+    },
+    [load, notify],
+  )
+
   const layout = useMemo(
     () =>
       roadmap
         ? computeRoadmapLayout({
             roadmap,
             expanded,
+            collapsedPhases,
+            currentBusyPhaseId,
             onToggleExpand,
+            onTogglePhaseCollapse,
+            focusPhaseRef,
+            onMakeCurrent,
           })
         : null,
-    [roadmap, expanded, onToggleExpand],
+    [
+      roadmap,
+      expanded,
+      collapsedPhases,
+      currentBusyPhaseId,
+      onToggleExpand,
+      onTogglePhaseCollapse,
+      onMakeCurrent,
+    ],
   )
 
   if (loading) return <LoadingState label="Mapping competencies" />
@@ -181,8 +230,12 @@ export function RoadmapPage() {
           selectedId={selected?.definitionId ?? null}
           select={setSelected}
           onToggleExpand={onToggleExpand}
+          onTogglePhaseCollapse={onTogglePhaseCollapse}
+          focusPhaseRef={focusPhaseRef}
           onRequestReset={() => setResetOpen(true)}
           resetBusy={resetBusy}
+          showPrereqs={showPrereqs}
+          onTogglePrereqs={() => setShowPrereqs((value) => !value)}
           notice={notice}
           onNotice={notify}
           fitNonce={fitNonce}
@@ -236,6 +289,7 @@ const RoadmapGraphCanvas = memo(function RoadmapGraphCanvas({
       nodes={nodes}
       edges={edges}
       nodeTypes={roadmapNodeTypes}
+      edgeTypes={roadmapEdgeTypes}
       elementsSelectable={false}
       onNodesChange={onNodesChange}
       onNodeClick={onNodeClick}
@@ -265,8 +319,12 @@ function RoadmapGraph({
   selectedId,
   select,
   onToggleExpand,
+  onTogglePhaseCollapse,
+  focusPhaseRef,
   onRequestReset,
   resetBusy,
+  showPrereqs,
+  onTogglePrereqs,
   notice,
   onNotice,
   fitNonce,
@@ -275,8 +333,12 @@ function RoadmapGraph({
   selectedId: string | null
   select: (item: Competency) => void
   onToggleExpand: (definitionId: string) => void
+  onTogglePhaseCollapse: (phaseId: string) => void
+  focusPhaseRef: { current: (phaseId: string) => void }
   onRequestReset: () => void
   resetBusy: boolean
+  showPrereqs: boolean
+  onTogglePrereqs: () => void
   notice: Notice | null
   onNotice: (text: string, tone?: Notice['tone']) => void
   fitNonce: number
@@ -290,6 +352,11 @@ function RoadmapGraph({
   useEffect(() => {
     setNodes((previous) => mergeLayoutNodes(previous, layout, draggedLocal.current, selectedId))
   }, [layout, selectedId, setNodes])
+
+  const edges = useMemo(
+    () => [...layout.edges, ...buildVisiblePrereqEdges(layout.prereqEdges, showPrereqs, selectedId)],
+    [layout, showPrereqs, selectedId],
+  )
 
   useEffect(() => {
     if (fitNonce === 0) return
@@ -310,6 +377,36 @@ function RoadmapGraph({
       // jsdom test viewports have zero size; real browsers never fail here.
     })
   }, [])
+
+  const focusPhase = useCallback((phaseId: string) => {
+    const instance = flowRef.current
+    if (!instance) return
+    const currentLayout = layoutRef.current
+    const phaseLayout = currentLayout.phases.find((entry) => entry.phase.id === phaseId)
+    if (!phaseLayout) return
+    const bounds = phaseLayout.collapsed
+      ? {
+          x: phaseLayout.origin.x,
+          y: phaseLayout.origin.y,
+          width: phaseLayout.width,
+          height: phaseLayout.height,
+        }
+      : {
+          x: phaseLayout.origin.x - 12,
+          y: phaseLayout.origin.y - 12,
+          width: phaseLayout.width + 24,
+          height: phaseLayout.height + 24,
+        }
+    // Focus is an instant, deterministic viewport jump: it must not depend on
+    // animation frames or d3 transitions (both can starve in throttled or
+    // automated environments), and it is inherently reduced-motion safe.
+    const paneElement = document.querySelector<HTMLElement>('.react-flow')
+    const rect = paneElement?.getBoundingClientRect()
+    if (!rect || rect.width === 0 || rect.height === 0) return
+    const target = getViewportForBounds(bounds, rect.width, rect.height, 0.15, 1.8, 0.12)
+    void instance.setViewport(target)
+  }, [])
+  focusPhaseRef.current = focusPhase
 
   const onNodeClick = useCallback<NodeMouseHandler>(
     (_event, node) => {
@@ -348,13 +445,14 @@ function RoadmapGraph({
     <section className="surface relative h-[min(72vh,48rem)] min-h-[32rem] overflow-hidden 2xl:h-[min(76vh,56rem)]" aria-label="Interactive competency roadmap">
       <RoadmapGraphCanvas
         nodes={nodes}
-        edges={layout.edges}
+        edges={edges}
         onNodesChange={onNodesChange}
         onNodeClick={onNodeClick}
         onNodeDoubleClick={onNodeDoubleClick}
         onNodeDragStop={onNodeDragStop}
         onInit={onInit}
       />
+      <PhaseNavigator layout={layout} onFocus={(phaseId) => focusPhaseRef.current(phaseId)} onToggleCollapse={onTogglePhaseCollapse} />
       <div className="absolute left-3 top-3 z-10 flex flex-wrap items-center gap-2">
         <button
           type="button"
@@ -363,6 +461,19 @@ function RoadmapGraph({
         >
           <Maximize2 className="size-3.5" aria-hidden="true" />
           Fit view
+        </button>
+        <button
+          type="button"
+          aria-pressed={showPrereqs}
+          className={`inline-flex min-h-8 items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-xs font-semibold shadow transition ${
+            showPrereqs
+              ? 'border-moss/50 bg-fern/20 text-ink'
+              : 'border-ink/15 bg-white/95 text-ink/70 hover:border-moss/40 hover:text-ink'
+          }`}
+          onClick={onTogglePrereqs}
+        >
+          <Link2 className="size-3.5" aria-hidden="true" />
+          Prerequisites
         </button>
         <button
           type="button"
@@ -386,24 +497,85 @@ function RoadmapGraph({
           {notice.text}
         </div>
       ) : null}
-      <div className="pointer-events-none absolute right-3 top-3 flex max-w-[calc(100%-1.5rem)] flex-wrap items-center gap-x-4 gap-y-1 rounded-full bg-white/90 px-3.5 py-2 text-xs text-ink/60 shadow">
-        <span className="flex items-center gap-1.5">
-          <svg width="26" height="6" aria-hidden="true"><line x1="1" y1="3" x2="25" y2="3" stroke="#326653" strokeWidth="2" /></svg>
-          Required prerequisite
+      <div className="pointer-events-none absolute bottom-3 right-3 z-10 max-w-[calc(100%-1.5rem)] rounded-full bg-white/90 px-3.5 py-2 text-xs text-ink/60 shadow">
+        <span className="mr-4 inline-flex items-center gap-1.5">
+          <svg width="26" height="10" aria-hidden="true">
+            <line x1="1" y1="9" x2="1" y2="5" stroke="#86a493" strokeWidth="1.75" />
+            <line x1="1" y1="5" x2="25" y2="5" stroke="#a7b8ad" strokeWidth="1.25" />
+          </svg>
+          Tree structure
         </span>
-        <span className="flex items-center gap-1.5">
+        <span className="mr-4 inline-flex items-center gap-1.5">
+          <svg width="26" height="6" aria-hidden="true"><line x1="1" y1="3" x2="25" y2="3" stroke="#326653" strokeWidth="2" /></svg>
+          Required
+        </span>
+        <span className="inline-flex items-center gap-1.5">
           <svg width="26" height="6" aria-hidden="true"><line x1="1" y1="3" x2="25" y2="3" stroke="#93a69b" strokeWidth="1.5" strokeDasharray="5 4" /></svg>
           Recommended
         </span>
-        <span className="flex items-center gap-1.5">
-          <svg width="26" height="6" aria-hidden="true"><line x1="1" y1="3" x2="25" y2="3" stroke="#b7c2ba" strokeWidth="1.5" /></svg>
-          Contains
-        </span>
       </div>
       <p className="pointer-events-none absolute bottom-3 left-1/2 max-w-[calc(100%-1.5rem)] -translate-x-1/2 rounded-full bg-white/90 px-3 py-1.5 text-center text-xs text-ink/60 shadow">
-        Select a node for details · double-click a parent or use its chevron to expand or collapse · dragging saves its free-form canvas position
+        Select a node for details and its prerequisite links · double-click a parent or use its chevron to expand or collapse · dragging saves a free-form canvas position
       </p>
     </section>
+  )
+}
+
+function PhaseNavigator({
+  layout,
+  onFocus,
+  onToggleCollapse,
+}: {
+  layout: RoadmapLayout
+  onFocus: (phaseId: string) => void
+  onToggleCollapse: (phaseId: string) => void
+}) {
+  return (
+    <nav
+      aria-label="Phases"
+      className="absolute left-1/2 top-3 z-10 flex max-w-[calc(100%-24rem)] -translate-x-1/2 items-center gap-1 overflow-x-auto rounded-full border border-ink/10 bg-white/90 px-1.5 py-1 shadow"
+    >
+      {layout.phases.map((phaseLayout, index) => {
+        const phase = phaseLayout.phase
+        return (
+          <div key={phase.id} className="flex shrink-0 items-center gap-1">
+            <button
+              type="button"
+              onClick={() => onFocus(phase.id)}
+              title={`${phase.title} · ${phaseLayout.verifiedCount} of ${phaseLayout.totalCount} verified`}
+              aria-label={`Go to phase ${phase.title}`}
+              className={`inline-flex min-h-7 items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold transition ${
+                phase.isCurrent ? 'bg-moss/10 text-moss' : 'text-ink/60 hover:bg-ink/5 hover:text-ink'
+              }`}
+            >
+              <span className="max-w-36 truncate">{phase.title}</span>
+              <span className="text-[0.65rem] font-normal text-ink/45">
+                {phaseLayout.verifiedCount}/{phaseLayout.totalCount}
+              </span>
+              {phase.isCurrent ? (
+                <span className="size-1.5 rounded-full bg-moss" aria-hidden="true" />
+              ) : null}
+            </button>
+            <button
+              type="button"
+              onClick={() => onToggleCollapse(phase.id)}
+              aria-expanded={!phaseLayout.collapsed}
+              aria-label={phaseLayout.collapsed ? `Expand ${phase.title}` : `Collapse ${phase.title}`}
+              title={phaseLayout.collapsed ? 'Expand phase' : 'Collapse phase'}
+              className="grid size-6 place-items-center rounded-full text-ink/40 transition hover:bg-ink/5 hover:text-ink"
+            >
+              <ChevronRight
+                className={`size-3.5 transition-transform ${phaseLayout.collapsed ? '' : 'rotate-90'}`}
+                aria-hidden="true"
+              />
+            </button>
+            {index < layout.phases.length - 1 ? (
+              <span className="mx-0.5 h-4 w-px bg-ink/10" aria-hidden="true" />
+            ) : null}
+          </div>
+        )
+      })}
+    </nav>
   )
 }
 
@@ -606,7 +778,7 @@ function ResetLayoutDialog({ busy, onCancel, onConfirm }: { busy: boolean; onCan
             onClick={onConfirm}
             disabled={busy}
           >
-            {busy ? 'Resetting…' : 'Reset layout'}
+            {busy ? 'Resetting...' : 'Reset layout'}
           </button>
         </div>
       </motion.div>

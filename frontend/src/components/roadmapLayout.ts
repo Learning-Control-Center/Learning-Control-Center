@@ -1,4 +1,4 @@
-import { MarkerType, type Edge, type Node } from '@xyflow/react'
+import { Position, type Edge, type Node } from '@xyflow/react'
 
 import type { Competency, Phase, Roadmap, Status } from '../types'
 
@@ -27,18 +27,24 @@ import type { Competency, Phase, Roadmap, Status } from '../types'
  */
 
 export const NODE_WIDTH = 232
-export const NODE_HEIGHT = 112
-export const PHASE_MIN_WIDTH = 360
+export const NODE_HEIGHT = 104
+export const CHILD_INDENT = 40
+export const TREE_SIBLING_GAP = 10
+export const TREE_GROUP_GAP = 20
+export const TREE_PADDING_X = 16
+export const TRACK_MIN_WIDTH = 300
+export const TRACK_HEADER_HEIGHT = 46
+export const TRACK_PADDING_BOTTOM = 16
+export const TRACK_EMPTY_HEIGHT = 44
+export const TRACK_GAP = 20
 export const PHASE_HEADER_HEIGHT = 64
-export const PHASE_PADDING_X = 20
-export const PHASE_PADDING_TOP = 12
-export const PHASE_PADDING_BOTTOM = 18
-export const LANE_LABEL_WIDTH = 148
-export const NODE_GAP_X = 28
-export const NODE_GAP_Y = 20
-export const PHASE_GAP = 56
-export const LANE_GAP = 14
-export const EMPTY_LANE_HEIGHT = 44
+export const PHASE_PADDING_X = 16
+export const PHASE_PADDING_TOP = 16
+export const PHASE_PADDING_BOTTOM = 16
+export const PHASE_EMPTY_HEIGHT = 96
+export const PHASE_COLLAPSED_WIDTH = 300
+export const PHASE_COLLAPSED_HEIGHT = PHASE_HEADER_HEIGHT + 54
+export const PHASE_GAP = 44
 
 export const statusColor: Record<Status, string> = {
   not_started: '#9ca39e',
@@ -48,6 +54,11 @@ export const statusColor: Record<Status, string> = {
   verified: '#326653',
   needs_review: '#b24f5c',
 }
+
+export const TREE_SPINE_COLOR = '#86a493'
+export const TREE_BRANCH_COLOR = '#a7b8ad'
+export const PREREQ_REQUIRED_COLOR = '#326653'
+export const PREREQ_RECOMMENDED_COLOR = '#93a69b'
 
 type Point = { x: number; y: number }
 
@@ -59,21 +70,30 @@ export function toPhaseLocalPosition(origin: Point, canvas: Point): Point {
   return { x: Math.round(canvas.x - origin.x), y: Math.round(canvas.y - origin.y) }
 }
 
-export type LaneLayout = { trackId: string; title: string; y: number; height: number }
+export type TrackLayout = { trackId: string; title: string; y: number; height: number; width: number }
 
 export type PhaseLayout = {
   phase: Phase
   origin: Point
   width: number
   height: number
-  lanes: LaneLayout[]
+  tracks: TrackLayout[]
   hasNodes: boolean
+  totalCount: number
+  verifiedCount: number
+  collapsed: boolean
 }
 
 export type CompetencyNodeData = {
   competency: Competency
+  depth: number
   childCount: number
   expanded: boolean
+  /**
+   * Visible prerequisites keyed off the currently visible graph; used for the
+   * restrained on-card indicator. The detail panel remains the complete list.
+   */
+  prerequisiteCount: number
   /**
    * Selection is a transient interaction layer, not part of the geometry.
    * `computeRoadmapLayout` never sets it; the graph page applies it to the
@@ -86,13 +106,26 @@ export type CompetencyNodeData = {
 }
 
 export type PhaseNodeData = {
+  phaseId: string
   title: string
-  orderIndex: number
   isCurrent: boolean
   width: number
   height: number
-  lanes: LaneLayout[]
+  tracks: TrackLayout[]
   empty: boolean
+  collapsed: boolean
+  totalCount: number
+  verifiedCount: number
+  currentBusy: boolean
+  onTogglePhaseCollapse: (phaseId: string) => void
+  /**
+   * Phase focus needs the live React Flow viewport instance, so the layout
+   * receives a stable ref to the focus implementation rather than the
+   * implementation itself. The ref identity never changes, keeping the layout
+   * memo stable; the target is rebound by the graph on every render.
+   */
+  focusPhaseRef: { current: (phaseId: string) => void }
+  onMakeCurrent: (phaseId: string) => void
   [key: string]: unknown
 }
 
@@ -100,13 +133,29 @@ export type CompetencyFlowNode = Node<CompetencyNodeData, 'competency'>
 export type PhaseFlowNode = Node<PhaseNodeData, 'phase'>
 export type RoadmapFlowNode = CompetencyFlowNode | PhaseFlowNode
 
+export type PrereqEdgeData = {
+  kind: 'required' | 'recommended'
+  sourceTitle: string
+  targetTitle: string
+  [key: string]: unknown
+}
+
+export type RoadmapFlowEdge = Edge<PrereqEdgeData>
+
 export type RoadmapLayout = {
   nodes: RoadmapFlowNode[]
-  edges: Edge[]
+  edges: RoadmapFlowEdge[]
   phases: PhaseLayout[]
   visible: Competency[]
   childrenByParent: Map<string, Competency[]>
   phaseByDefinition: Map<string, string>
+  /**
+   * Every prerequisite edge whose endpoints are both displayable right now.
+   * It is pure metadata: the graph page derives edge visibility from it, so
+   * toggling or selecting prerequisites never touches geometry.
+   */
+  prereqEdges: RoadmapFlowEdge[]
+  prerequisiteCountByDefinition: Map<string, number>
 }
 
 export function phaseOriginFor(layout: RoadmapLayout, definitionId: string): Point | null {
@@ -122,78 +171,105 @@ function byOrderThenKey(a: Competency, b: Competency): number {
 export function computeVisibleRoadmap(
   roadmap: Roadmap,
   expanded: ReadonlySet<string>,
+  collapsedPhases?: ReadonlySet<string>,
 ): { all: Competency[]; visible: Competency[]; childrenByParent: Map<string, Competency[]> } {
-  const all = roadmap.phases.flatMap((phase) => phase.tracks.flatMap((track) => track.competencies))
-  const byDefinition = new Map(all.map((item) => [item.definitionId, item]))
+  const collapsed = collapsedPhases ?? new Set<string>()
+  const all = roadmap.phases.flatMap((phase) =>
+    phase.tracks.flatMap((track) => track.competencies.map((item) => ({ item, phaseId: phase.id }))),
+  )
+  const byDefinition = new Map(all.map(({ item }) => [item.definitionId, item]))
+  const phaseByDefinition = new Map(all.map(({ item, phaseId }) => [item.definitionId, phaseId]))
   const childrenByParent = new Map<string, Competency[]>()
-  all.forEach((item) => {
+  all.forEach(({ item }) => {
     if (item.parentDefinitionId) {
       childrenByParent.set(item.parentDefinitionId, [...(childrenByParent.get(item.parentDefinitionId) ?? []), item])
     }
   })
-  const visible = all.filter((item) => {
-    if (!item.parentDefinitionId) return true
-    let parentId: string | null = item.parentDefinitionId
-    while (parentId) {
-      if (!expanded.has(parentId)) return false
-      parentId = byDefinition.get(parentId)?.parentDefinitionId ?? null
-    }
-    return true
-  })
-  return { all, visible, childrenByParent }
+  const visible = all
+    .filter(({ item }) => {
+      // Phase collapse is semantic: membership is decided by phase_id, never
+      // by where a manually positioned card happens to sit on the canvas.
+      if (collapsed.has(phaseByDefinition.get(item.definitionId) ?? '')) return false
+      if (!item.parentDefinitionId) return true
+      let parentId: string | null = item.parentDefinitionId
+      while (parentId) {
+        if (!expanded.has(parentId)) return false
+        parentId = byDefinition.get(parentId)?.parentDefinitionId ?? null
+      }
+      return true
+    })
+    .map(({ item }) => item)
+  return { all: all.map(({ item }) => item), visible, childrenByParent }
 }
 
-type Block = { item: Competency; width: number; height: number; children: Block[] }
+type Subtree = { item: Competency; height: number; children: Subtree[] }
 
-function layoutLane(
+/**
+ * Lays one track out as a hierarchy-first tree. Every parent sits directly
+ * above its children; children are indented one level under it. Within a
+ * sibling group each later child (and its subtree) is indented one extra
+ * step, so lineage is readable from position alone and the structural
+ * connector can run orthogonally: a vertical spine down the shared indent
+ * plus a short horizontal branch into each child card.
+ */
+function layoutTrackItems(
   items: Competency[],
   childrenByParent: Map<string, Competency[]>,
   expanded: ReadonlySet<string>,
-): { positions: Map<string, Point>; width: number; height: number } {
-  const laneIds = new Set(items.map((item) => item.definitionId))
+): { positions: Map<string, Point>; depthById: Map<string, number>; width: number; height: number } {
+  const trackIds = new Set(items.map((item) => item.definitionId))
   const roots = items
-    .filter((item) => !item.parentDefinitionId || !laneIds.has(item.parentDefinitionId))
+    .filter((item) => !item.parentDefinitionId || !trackIds.has(item.parentDefinitionId))
     .sort(byOrderThenKey)
-  const laneChildren = (item: Competency) =>
+  const trackChildren = (item: Competency) =>
     (childrenByParent.get(item.definitionId) ?? [])
-      .filter((child) => laneIds.has(child.definitionId))
+      .filter((child) => trackIds.has(child.definitionId))
       .sort(byOrderThenKey)
 
-  const buildBlock = (item: Competency): Block => {
-    const children = expanded.has(item.definitionId) ? laneChildren(item).map(buildBlock) : []
-    const rowWidth =
-      children.reduce((total, child) => total + child.width, 0) + NODE_GAP_X * Math.max(0, children.length - 1)
+  const buildSubtree = (item: Competency): Subtree => {
+    const children = expanded.has(item.definitionId) ? trackChildren(item).map(buildSubtree) : []
+    const childrenHeight =
+      children.reduce((total, child) => total + child.height, 0) +
+      TREE_SIBLING_GAP * Math.max(0, children.length - 1)
     return {
       item,
-      width: Math.max(NODE_WIDTH, rowWidth),
-      height:
-        NODE_HEIGHT +
-        (children.length ? NODE_GAP_Y + Math.max(...children.map((child) => child.height)) : 0),
+      height: NODE_HEIGHT + (children.length ? TREE_GROUP_GAP + childrenHeight : 0),
       children,
     }
   }
 
   const positions = new Map<string, Point>()
-  const place = (block: Block, x: number, y: number) => {
-    positions.set(block.item.definitionId, { x, y })
-    let childX = x
-    block.children.forEach((child) => {
-      place(child, childX, y + NODE_HEIGHT + NODE_GAP_Y)
-      childX += child.width + NODE_GAP_X
+  const depthById = new Map<string, number>()
+  let maxRight = 0
+
+  const placeChildren = (children: Subtree[], parentY: number, baseX: number, baseDepth: number) => {
+    let childY = parentY + NODE_HEIGHT + TREE_GROUP_GAP
+    children.forEach((child, index) => {
+      const x = baseX + (index > 0 ? CHILD_INDENT : 0)
+      const depth = baseDepth + (index > 0 ? 1 : 0)
+      positions.set(child.item.definitionId, { x, y: childY })
+      depthById.set(child.item.definitionId, depth)
+      maxRight = Math.max(maxRight, x + NODE_WIDTH)
+      placeChildren(child.children, childY, x + CHILD_INDENT, depth + 1)
+      childY += child.height + TREE_SIBLING_GAP
     })
   }
 
-  let cursor = 0
-  let height = 0
-  roots.map(buildBlock).forEach((block) => {
-    place(block, cursor, 0)
-    cursor += block.width + NODE_GAP_X
-    height = Math.max(height, block.height)
+  let cursorY = 0
+  roots.map(buildSubtree).forEach((subtree, index) => {
+    const x = index > 0 ? CHILD_INDENT : 0
+    positions.set(subtree.item.definitionId, { x, y: cursorY })
+    depthById.set(subtree.item.definitionId, index > 0 ? 1 : 0)
+    maxRight = Math.max(maxRight, x + NODE_WIDTH)
+    placeChildren(subtree.children, cursorY, x + CHILD_INDENT, index > 0 ? 2 : 1)
+    cursorY += subtree.height + TREE_SIBLING_GAP
   })
+
   return {
     positions,
-    width: roots.length ? cursor - NODE_GAP_X : 0,
-    height: roots.length ? height : EMPTY_LANE_HEIGHT,
+    depthById,
+    width: roots.length ? maxRight : 0,
+    height: roots.length ? cursorY - TREE_SIBLING_GAP : 0,
   }
 }
 
@@ -219,78 +295,128 @@ function layoutPhase(
   visible: ReadonlySet<string>,
   childrenByParent: Map<string, Competency[]>,
   expanded: ReadonlySet<string>,
-): { positions: Map<string, Point>; lanes: LaneLayout[]; width: number; height: number; hasNodes: boolean } {
+  collapsed: boolean,
+): {
+  positions: Map<string, Point>
+  depthById: Map<string, number>
+  tracks: TrackLayout[]
+  width: number
+  height: number
+  hasNodes: boolean
+} {
+  if (collapsed) {
+    return {
+      positions: new Map(),
+      depthById: new Map(),
+      tracks: [],
+      width: PHASE_COLLAPSED_WIDTH,
+      height: PHASE_COLLAPSED_HEIGHT,
+      hasNodes: false,
+    }
+  }
+
   const tracks = [...phase.tracks].sort((a, b) => a.orderIndex - b.orderIndex)
-  const lanes: LaneLayout[] = []
+  const trackLayouts: TrackLayout[] = []
   const slots = new Map<string, Point>()
+  const depthById = new Map<string, number>()
   const items: Competency[] = []
-  const nodeStartX = PHASE_PADDING_X + LANE_LABEL_WIDTH
-  let laneY = PHASE_HEADER_HEIGHT + PHASE_PADDING_TOP
-  let contentRight = PHASE_PADDING_X
-  let contentBottom = laneY
+  let trackY = PHASE_HEADER_HEIGHT + PHASE_PADDING_TOP
+  let contentRight = PHASE_PADDING_X + TRACK_MIN_WIDTH
+  let contentBottom = trackY
 
   tracks.forEach((track) => {
-    const laneItems = track.competencies
+    const trackItems = track.competencies
       .filter((item) => visible.has(item.definitionId))
       .sort(byOrderThenKey)
-    items.push(...laneItems)
-    const lane = layoutLane(laneItems, childrenByParent, expanded)
-    lane.positions.forEach((position, definitionId) => {
-      slots.set(definitionId, { x: position.x + nodeStartX, y: position.y + laneY })
+    items.push(...trackItems)
+    const tree = layoutTrackItems(trackItems, childrenByParent, expanded)
+    const trackWidth = Math.max(TRACK_MIN_WIDTH, tree.width + TREE_PADDING_X * 2)
+    const treeHeight =
+      TRACK_HEADER_HEIGHT + (tree.height > 0 ? tree.height + TRACK_PADDING_BOTTOM : TRACK_EMPTY_HEIGHT)
+    tree.positions.forEach((position, definitionId) => {
+      slots.set(definitionId, {
+        x: position.x + PHASE_PADDING_X + TREE_PADDING_X,
+        y: position.y + trackY + TRACK_HEADER_HEIGHT,
+      })
     })
-    lanes.push({ trackId: track.id, title: track.title, y: laneY, height: lane.height })
-    contentRight = Math.max(contentRight, nodeStartX + lane.width)
-    contentBottom = laneY + lane.height
-    laneY += lane.height + LANE_GAP
+    tree.depthById.forEach((depth, definitionId) => depthById.set(definitionId, depth))
+    trackLayouts.push({ trackId: track.id, title: track.title, y: trackY, height: treeHeight, width: trackWidth })
+    contentRight = Math.max(contentRight, PHASE_PADDING_X + trackWidth)
+    contentBottom = trackY + treeHeight
+    trackY += treeHeight + TRACK_GAP
   })
 
   // Phase geometry is defined only by the deterministic automatic layout.
   // Free-form visual overrides neither constrain nor inflate semantic phase
   // containers, keeping every phase origin stable across drag/reload.
-  const contentWidth = Math.max(PHASE_MIN_WIDTH, contentRight + PHASE_PADDING_X)
-  const contentHeight = (items.length ? contentBottom : laneY + 24) + PHASE_PADDING_BOTTOM
+  const width = contentRight + PHASE_PADDING_X
+  const height =
+    (items.length ? contentBottom : PHASE_HEADER_HEIGHT + PHASE_EMPTY_HEIGHT) + PHASE_PADDING_BOTTOM
   const positions = resolvePhasePositions(items, slots)
 
-  return {
-    positions,
-    lanes,
-    width: contentWidth,
-    height: contentHeight,
-    hasNodes: items.length > 0,
-  }
+  return { positions, depthById, tracks: trackLayouts, width, height, hasNodes: items.length > 0 }
 }
 
 export function computeRoadmapLayout(options: {
   roadmap: Roadmap
   expanded: ReadonlySet<string>
+  collapsedPhases?: ReadonlySet<string>
+  currentBusyPhaseId?: string | null
   onToggleExpand: (definitionId: string) => void
+  onTogglePhaseCollapse: (phaseId: string) => void
+  focusPhaseRef: { current: (phaseId: string) => void }
+  onMakeCurrent: (phaseId: string) => void
 }): RoadmapLayout {
-  const { roadmap, expanded, onToggleExpand } = options
-  const { all, visible, childrenByParent } = computeVisibleRoadmap(roadmap, expanded)
+  const {
+    roadmap,
+    expanded,
+    collapsedPhases = new Set<string>(),
+    currentBusyPhaseId = null,
+    onToggleExpand,
+    onTogglePhaseCollapse,
+    focusPhaseRef,
+    onMakeCurrent,
+  } = options
+  const { all, visible, childrenByParent } = computeVisibleRoadmap(roadmap, expanded, collapsedPhases)
   const visibleIds = new Set(visible.map((item) => item.definitionId))
-  const identityToDefinition = new Map(all.map((item) => [item.identityId, item.definitionId]))
+  const identityToDefinition = new Map(all.map((item) => [item.identityId, item]))
   const titleByDefinition = new Map(all.map((item) => [item.definitionId, item.title]))
+  const displayablePrereqCount = new Map<string, number>()
+  visible.forEach((item) => {
+    item.prerequisites.forEach((prerequisite) => {
+      const source = identityToDefinition.get(prerequisite.identityId)
+      if (!source || source.definitionId === item.definitionId || !visibleIds.has(source.definitionId)) return
+      displayablePrereqCount.set(item.definitionId, (displayablePrereqCount.get(item.definitionId) ?? 0) + 1)
+    })
+  })
 
   const phases: PhaseLayout[] = []
   const phaseByDefinition = new Map<string, string>()
   const canvasPositions = new Map<string, Point>()
+  const depthByDefinition = new Map<string, number>()
   let cursorX = 0
   ;[...roadmap.phases]
     .sort((a, b) => a.orderIndex - b.orderIndex)
     .forEach((phase) => {
-      const laidOut = layoutPhase(phase, visibleIds, childrenByParent, expanded)
+      const collapsed = collapsedPhases.has(phase.id)
+      const laidOut = layoutPhase(phase, visibleIds, childrenByParent, expanded, collapsed)
       const origin = { x: cursorX, y: 0 }
       laidOut.positions.forEach((local, definitionId) => {
         canvasPositions.set(definitionId, toCanvasPosition(origin, local))
         phaseByDefinition.set(definitionId, phase.id)
       })
+      laidOut.depthById.forEach((depth, definitionId) => depthByDefinition.set(definitionId, depth))
+      const allItems = phase.tracks.flatMap((track) => track.competencies)
       phases.push({
         phase,
         origin,
         width: laidOut.width,
         height: laidOut.height,
-        lanes: laidOut.lanes,
+        tracks: laidOut.tracks,
         hasNodes: laidOut.hasNodes,
+        totalCount: allItems.length,
+        verifiedCount: allItems.filter((item) => item.status === 'verified').length,
+        collapsed,
       })
       cursorX += laidOut.width + PHASE_GAP
     })
@@ -300,13 +426,20 @@ export function computeRoadmapLayout(options: {
     type: 'phase',
     position: layout.origin,
     data: {
+      phaseId: layout.phase.id,
       title: layout.phase.title,
-      orderIndex: layout.phase.orderIndex,
       isCurrent: layout.phase.isCurrent,
       width: layout.width,
       height: layout.height,
-      lanes: layout.lanes,
-      empty: !layout.hasNodes,
+      tracks: layout.tracks,
+      empty: layout.totalCount === 0,
+      collapsed: layout.collapsed,
+      totalCount: layout.totalCount,
+      verifiedCount: layout.verifiedCount,
+      currentBusy: currentBusyPhaseId === layout.phase.id,
+      onTogglePhaseCollapse,
+      focusPhaseRef,
+      onMakeCurrent,
     },
     width: layout.width,
     height: layout.height,
@@ -314,7 +447,7 @@ export function computeRoadmapLayout(options: {
     draggable: false,
     connectable: false,
     focusable: false,
-    style: { zIndex: -1, pointerEvents: 'none' },
+    style: { zIndex: -1 },
   }))
 
   const competencyNodes: CompetencyFlowNode[] = visible.map((item) => ({
@@ -323,65 +456,77 @@ export function computeRoadmapLayout(options: {
     position: canvasPositions.get(item.definitionId) ?? { x: 0, y: 0 },
     data: {
       competency: item,
+      depth: depthByDefinition.get(item.definitionId) ?? 0,
       childCount: (childrenByParent.get(item.definitionId) ?? []).length,
       expanded: expanded.has(item.definitionId),
+      prerequisiteCount: displayablePrereqCount.get(item.definitionId) ?? 0,
       statusColor: statusColor[item.status],
       onToggleExpand,
     },
+    // Static handle descriptors let React Flow resolve edge endpoints without
+    // waiting for DOM measurement, so edges render on first mount even where
+    // the initial ResizeObserver notification is throttled or starved
+    // (background tabs, automation). Measured handle bounds replace these once
+    // real observation lands.
+    handles: [
+      { id: 'in-hierarchy', type: 'target', position: Position.Top, x: NODE_WIDTH / 2, y: 0, width: 1, height: 1 },
+      { id: 'in-prereq', type: 'target', position: Position.Left, x: 0, y: NODE_HEIGHT / 2, width: 1, height: 1 },
+      { id: 'out-hierarchy', type: 'source', position: Position.Bottom, x: NODE_WIDTH / 2, y: NODE_HEIGHT, width: 1, height: 1 },
+      { id: 'out-prereq', type: 'source', position: Position.Right, x: NODE_WIDTH, y: NODE_HEIGHT / 2, width: 1, height: 1 },
+    ],
     width: NODE_WIDTH,
     height: NODE_HEIGHT,
     ariaLabel: `${item.title}, status ${item.status.replaceAll('_', ' ')}, priority ${item.priority}`,
   }))
 
-  const edges: Edge[] = visible.flatMap((item) => {
-    const hierarchy: Edge[] =
-      item.parentDefinitionId && visibleIds.has(item.parentDefinitionId)
-        ? [
-            {
-              id: `parent-${item.parentDefinitionId}-${item.definitionId}`,
-              source: item.parentDefinitionId,
-              target: item.definitionId,
-              type: 'smoothstep',
-              sourceHandle: 'out-hierarchy',
-              targetHandle: 'in-hierarchy',
-              style: { stroke: '#b7c2ba', strokeWidth: 1.5 },
-              ariaLabel: `${titleByDefinition.get(item.parentDefinitionId) ?? 'Parent'} contains ${item.title}`,
-            },
-          ]
-        : []
-    const prerequisites: Edge[] = item.prerequisites.flatMap((prerequisite) => {
+  const hierarchyEdges: RoadmapFlowEdge[] = visible.flatMap((item) => {
+    if (!item.parentDefinitionId || !visibleIds.has(item.parentDefinitionId)) return []
+    const parentTitle = titleByDefinition.get(item.parentDefinitionId)
+    if (!parentTitle) return []
+    return [
+      {
+        id: `parent-${item.parentDefinitionId}-${item.definitionId}`,
+        source: item.parentDefinitionId,
+        target: item.definitionId,
+        type: 'tree',
+        ariaLabel: `${parentTitle} contains ${item.title}`,
+      },
+    ]
+  })
+
+  const prereqEdges: RoadmapFlowEdge[] = visible.flatMap((item) =>
+    item.prerequisites.flatMap((prerequisite) => {
       const source = identityToDefinition.get(prerequisite.identityId)
-      if (!source || source === item.definitionId || !visibleIds.has(source)) return []
-      const required = prerequisite.kind === 'required'
-      const stroke = required ? '#326653' : '#93a69b'
+      if (!source || source.definitionId === item.definitionId || !visibleIds.has(source.definitionId)) return []
       return [
         {
-          id: `prereq-${source}-${item.definitionId}`,
-          source,
+          id: `prereq-${source.definitionId}-${item.definitionId}`,
+          source: source.definitionId,
           target: item.definitionId,
           type: 'smoothstep',
           sourceHandle: 'out-prereq',
           targetHandle: 'in-prereq',
-          style: {
-            stroke,
-            strokeWidth: required ? 2 : 1.5,
-            strokeDasharray: required ? undefined : '6 6',
+          data: {
+            kind: prerequisite.kind,
+            sourceTitle: titleByDefinition.get(source.definitionId) ?? prerequisite.stableKey,
+            targetTitle: item.title,
           },
-          markerEnd: { type: MarkerType.ArrowClosed, color: stroke, width: 18, height: 18 },
-          ariaLabel: `${titleByDefinition.get(source) ?? prerequisite.stableKey} is a ${prerequisite.kind} prerequisite for ${item.title}`,
         },
       ]
-    })
-    return [...hierarchy, ...prerequisites]
-  })
+    }),
+  )
+
+  const prerequisiteCountByDefinition = displayablePrereqCount
 
   return {
     nodes: [...phaseNodes, ...competencyNodes],
-    edges,
+    edges: hierarchyEdges,
     phases,
     visible,
     childrenByParent,
     phaseByDefinition,
+    prereqEdges,
+    prerequisiteCountByDefinition,
   }
 }
 
@@ -391,12 +536,13 @@ function samePoint(a: RenderPoint, b: RenderPoint): boolean {
   return Math.abs(a.x - b.x) <= 0.01 && Math.abs(a.y - b.y) <= 0.01
 }
 
-function sameLane(a: LaneLayout, b: LaneLayout): boolean {
+function sameTrack(a: TrackLayout, b: TrackLayout): boolean {
   return (
     a.trackId === b.trackId &&
     a.title === b.title &&
     a.y === b.y &&
-    a.height === b.height
+    a.height === b.height &&
+    a.width === b.width
   )
 }
 
@@ -404,6 +550,8 @@ function sameCompetencyData(a: CompetencyNodeData, b: CompetencyNodeData): boole
   return (
     a.childCount === b.childCount &&
     a.expanded === b.expanded &&
+    a.depth === b.depth &&
+    a.prerequisiteCount === b.prerequisiteCount &&
     a.statusColor === b.statusColor &&
     a.onToggleExpand === b.onToggleExpand &&
     a.competency.status === b.competency.status &&
@@ -415,13 +563,19 @@ function sameCompetencyData(a: CompetencyNodeData, b: CompetencyNodeData): boole
 function samePhaseData(a: PhaseNodeData, b: PhaseNodeData): boolean {
   return (
     a.title === b.title &&
-    a.orderIndex === b.orderIndex &&
     a.isCurrent === b.isCurrent &&
     a.width === b.width &&
     a.height === b.height &&
     a.empty === b.empty &&
-    a.lanes.length === b.lanes.length &&
-    a.lanes.every((lane, index) => sameLane(lane, b.lanes[index]))
+    a.collapsed === b.collapsed &&
+    a.totalCount === b.totalCount &&
+    a.verifiedCount === b.verifiedCount &&
+    a.currentBusy === b.currentBusy &&
+    a.tracks.length === b.tracks.length &&
+    a.tracks.every((track, index) => sameTrack(track, b.tracks[index])) &&
+    a.onTogglePhaseCollapse === b.onTogglePhaseCollapse &&
+    a.focusPhaseRef === b.focusPhaseRef &&
+    a.onMakeCurrent === b.onMakeCurrent
   )
 }
 
@@ -483,4 +637,39 @@ export function mergeLayoutNodes(
 
 function selectNode(node: CompetencyFlowNode, selected: boolean): CompetencyFlowNode {
   return { ...node, data: { ...node.data, selected } }
+}
+
+/**
+ * Derives the currently displayable prerequisite edges. This is a pure
+ * visibility projection over `layout.prereqEdges`: geometry is never
+ * recomputed for disclosure changes. Selected-node edges are emphasised and
+ * labelled; a global reveal renders every edge subordinate to the tree.
+ */
+export function buildVisiblePrereqEdges(
+  prereqEdges: RoadmapFlowEdge[],
+  showAll: boolean,
+  selectedId: string | null,
+): RoadmapFlowEdge[] {
+  return prereqEdges
+    .filter((edge) => showAll || edge.source === selectedId || edge.target === selectedId)
+    .map((edge) => {
+      const required = edge.data?.kind === 'required'
+      const focused = selectedId !== null && (edge.source === selectedId || edge.target === selectedId)
+      const stroke = required ? PREREQ_REQUIRED_COLOR : PREREQ_RECOMMENDED_COLOR
+      return {
+        ...edge,
+        style: {
+          stroke,
+          strokeWidth: focused ? 2 : required ? 1.75 : 1.25,
+          strokeDasharray: required ? undefined : '5 5',
+          opacity: showAll && !focused ? 0.6 : 1,
+        },
+        label: focused ? (required ? 'required' : 'recommended') : undefined,
+        labelStyle: { fill: '#3d4b44', fontSize: 11, fontWeight: 600 },
+        labelBgStyle: { fill: '#fbfaf6', fillOpacity: 0.9 },
+        labelBgPadding: [4, 2] as [number, number],
+        labelBgBorderRadius: 4,
+        zIndex: focused ? 10 : 0,
+      }
+    })
 }
