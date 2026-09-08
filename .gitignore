@@ -47,6 +47,9 @@ backups/
 tmp/
 .cache/
 
+# Local/private agent context
+memory-bank/
+
 # Editors and operating systems
 .idea/
 .vscode/
