@@ -32,16 +32,27 @@ class TimestampMixin:
 
 class User(Base, TimestampMixin):
     __tablename__ = "users"
-    __table_args__ = (CheckConstraint("singleton_key = 1", name="ck_single_user"),)
+    __table_args__ = (
+        CheckConstraint("singleton_key = 1", name="ck_single_user"),
+        CheckConstraint("credential_generation > 0", name="ck_user_credential_generation_positive"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     singleton_key: Mapped[int] = mapped_column(Integer, unique=True, default=1, nullable=False)
     username: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
     password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    credential_generation: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    password_changed_at: Mapped[int | None] = mapped_column(Integer)
 
 
 class AuthSession(Base):
     __tablename__ = "auth_sessions"
+    __table_args__ = (
+        CheckConstraint(
+            "credential_generation > 0",
+            name="ck_auth_session_credential_generation_positive",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
@@ -51,6 +62,47 @@ class AuthSession(Base):
     last_seen_at: Mapped[int] = mapped_column(Integer, default=utc_now_ms, nullable=False)
     absolute_expires_at: Mapped[int] = mapped_column(Integer, nullable=False)
     revoked_at: Mapped[int | None] = mapped_column(Integer)
+    credential_generation: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+
+
+class SecurityAuditEvent(Base):
+    __tablename__ = "security_audit_events"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_security_audit_idempotency"),
+        Index("ix_security_audit_event_time", "occurred_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    auth_session_id: Mapped[str | None] = mapped_column(
+        ForeignKey("auth_sessions.id", ondelete="SET NULL")
+    )
+    actor_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    client_key_hash: Mapped[str | None] = mapped_column(String(64))
+    details_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    occurred_at: Mapped[int] = mapped_column(Integer, default=utc_now_ms, nullable=False)
+    idempotency_key: Mapped[str | None] = mapped_column(String(128))
+
+
+class AuthRateLimitBucket(Base):
+    __tablename__ = "auth_rate_limit_buckets"
+    __table_args__ = (
+        UniqueConstraint(
+            "namespace", "client_key_hash", "window_started_at", name="uq_auth_rate_bucket"
+        ),
+        CheckConstraint("failure_count >= 0", name="ck_auth_rate_failure_count"),
+        Index("ix_auth_rate_bucket_cleanup", "updated_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    namespace: Mapped[str] = mapped_column(String(64), nullable=False)
+    client_key_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    key_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    window_started_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    failure_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    blocked_until: Mapped[int | None] = mapped_column(Integer)
+    updated_at: Mapped[int] = mapped_column(Integer, default=utc_now_ms, nullable=False)
 
 
 class Roadmap(Base, TimestampMixin):

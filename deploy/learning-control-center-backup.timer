@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule Learning Control Center operational backups
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=15m
+Unit=learning-control-center-backup.service
+
+[Install]
+WantedBy=timers.target

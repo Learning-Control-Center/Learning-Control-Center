@@ -12,6 +12,7 @@ from argon2.exceptions import InvalidHashError, VerifyMismatchError
 from app.time_utils import utc_now_ms
 
 password_hasher = PasswordHasher(time_cost=3, memory_cost=65_536, parallelism=4)
+dummy_password_hash = password_hasher.hash("lcc-constant-time-invalid-credential")
 
 
 def hash_password(password: str) -> str:
@@ -22,6 +23,13 @@ def verify_password(password_hash: str, password: str) -> bool:
     try:
         return password_hasher.verify(password_hash, password)
     except (VerifyMismatchError, InvalidHashError):
+        return False
+
+
+def password_needs_rehash(password_hash: str) -> bool:
+    try:
+        return password_hasher.check_needs_rehash(password_hash)
+    except InvalidHashError:
         return False
 
 

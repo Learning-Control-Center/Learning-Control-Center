@@ -1,0 +1,10 @@
+[Unit]
+Description=Create a Learning Control Center operational backup
+
+[Service]
+Type=oneshot
+User=lcc
+Group=lcc
+WorkingDirectory=/opt/learning-control-center
+EnvironmentFile=/etc/learning-control-center.env
+ExecStart=/opt/learning-control-center/scripts/operational-backup.sh

@@ -1,0 +1,20 @@
+[Unit]
+Description=Learning Control Center
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lcc
+Group=lcc
+WorkingDirectory=/opt/learning-control-center
+EnvironmentFile=/etc/learning-control-center.env
+ExecStart=/opt/learning-control-center/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1 --no-proxy-headers
+Restart=on-failure
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/learning-control-center /var/backups/learning-control-center
+
+[Install]
+WantedBy=multi-user.target

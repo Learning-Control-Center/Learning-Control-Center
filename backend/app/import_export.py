@@ -22,7 +22,7 @@ from app.analytics import build_analytics
 from app.api_serialization import serialize_api_instants
 from app.auth import AuthContext, get_auth_context, require_csrf
 from app.config import Settings, get_settings_dependency
-from app.database import Base, create_database_engine, get_db
+from app.database import create_database_engine, get_db, run_migrations
 from app.domain import transition_status
 from app.domain_integrity import (
     portable_state_presence,
@@ -568,9 +568,10 @@ def _validate_portable_payload(
             )
     validate_portable_row_types(tables, PORTABLE_BY_TABLE)
     with tempfile.NamedTemporaryFile(prefix="lcc-validate-", suffix=".sqlite3") as temporary:
-        validation_engine = create_database_engine(f"sqlite:///{temporary.name}")
+        validation_url = f"sqlite:///{temporary.name}"
+        run_migrations(validation_url)
+        validation_engine = create_database_engine(validation_url)
         try:
-            Base.metadata.create_all(validation_engine)
             with validation_engine.begin() as connection:
                 try:
                     _insert_portable_tables(connection, tables)
@@ -608,9 +609,10 @@ def _preflight_application(
 ) -> None:
     current_payload = _portable_payload(db)
     with tempfile.NamedTemporaryFile(prefix="lcc-preflight-", suffix=".sqlite3") as temporary:
-        validation_engine = create_database_engine(f"sqlite:///{temporary.name}")
+        validation_url = f"sqlite:///{temporary.name}"
+        run_migrations(validation_url)
+        validation_engine = create_database_engine(validation_url)
         try:
-            Base.metadata.create_all(validation_engine)
             with Session(validation_engine) as validation_db:
                 _insert_portable_tables(validation_db.connection(), current_payload["tables"])
                 validation_db.flush()

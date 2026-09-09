@@ -44,6 +44,27 @@ class AuthResponse(StrictModel):
     absolute_expires_at: str
 
 
+class PasswordChangeRequest(StrictModel):
+    current_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=12, max_length=256)
+    confirm_new_password: str = Field(min_length=12, max_length=256)
+
+    @model_validator(mode="after")
+    def passwords_match(self) -> PasswordChangeRequest:
+        if self.new_password != self.confirm_new_password:
+            raise ValueError("New password confirmation does not match.")
+        return self
+
+
+class AuthSessionResponse(StrictModel):
+    id: str
+    created_at: str
+    last_seen_at: str
+    absolute_expires_at: str
+    current: bool
+    revoked: bool
+
+
 class ExitCriterionInput(StrictModel):
     stable_key: str = Field(min_length=1, max_length=255)
     text: str = Field(min_length=1)

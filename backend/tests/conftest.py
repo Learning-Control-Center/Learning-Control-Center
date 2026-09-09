@@ -13,15 +13,16 @@ os.environ.setdefault("LCC_DATABASE_URL", "sqlite:////tmp/lcc-test-process.sqlit
 os.environ.setdefault("LCC_BOOTSTRAP_TOKEN", "test-bootstrap-token-with-enough-entropy")
 
 from app.config import Settings, get_settings_dependency  # noqa: E402
-from app.database import Base, create_database_engine, get_db  # noqa: E402
+from app.database import create_database_engine, get_db, run_migrations  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models import DisciplineProfile  # noqa: E402
 
 
 @pytest.fixture
 def db(tmp_path: Path) -> Generator[Session, None, None]:
-    engine = create_database_engine(f"sqlite:///{tmp_path / 'test.sqlite3'}")
-    Base.metadata.create_all(engine)
+    database_url = f"sqlite:///{tmp_path / 'test.sqlite3'}"
+    run_migrations(database_url)
+    engine = create_database_engine(database_url)
     maker = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     with maker() as session:
         session.add(

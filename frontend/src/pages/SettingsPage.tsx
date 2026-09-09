@@ -2,6 +2,7 @@ import { DatabaseBackup, LocateFixed, Save, ShieldCheck } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 
 import { ApiError, api, formatDuration } from '../api'
+import { useAuth } from '../auth'
 import { ErrorState, LoadingState } from '../components/PageState'
 
 type Discipline = {
@@ -21,6 +22,7 @@ function isValidTimezone(value: string) {
 }
 
 export function SettingsPage() {
+  const { endSession } = useAuth()
   const deviceTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
   const timezoneOptions = useMemo(() => {
     const supported =
@@ -33,6 +35,9 @@ export function SettingsPage() {
   const [timezone, setTimezone] = useState(deviceTimezone)
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
+  const [currentPassword, setCurrentPassword] = useState('')
+  const [newPassword, setNewPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
 
   useEffect(() => {
     void api<Discipline>('/settings/discipline')
@@ -90,6 +95,46 @@ export function SettingsPage() {
       )
     } catch (caught) {
       setError(caught instanceof ApiError ? caught.message : 'Backup could not be created.')
+    }
+  }
+
+  const changePassword = async () => {
+    setError('')
+    setMessage('')
+    try {
+      await api<void>('/auth/password/change', {
+        method: 'POST',
+        body: JSON.stringify({
+          current_password: currentPassword,
+          new_password: newPassword,
+          confirm_new_password: confirmPassword,
+        }),
+      })
+      endSession()
+    } catch (caught) {
+      setError(caught instanceof ApiError ? caught.message : 'Password could not be changed.')
+    }
+  }
+
+  const revokeOthers = async () => {
+    setError('')
+    setMessage('')
+    try {
+      await api<void>('/auth/sessions/revoke-others', { method: 'POST' })
+      setMessage('All other sessions were revoked. This session remains active.')
+    } catch (caught) {
+      setError(caught instanceof ApiError ? caught.message : 'Sessions could not be revoked.')
+    }
+  }
+
+  const revokeAll = async () => {
+    setError('')
+    setMessage('')
+    try {
+      await api<void>('/auth/sessions/revoke-all', { method: 'POST' })
+      endSession()
+    } catch (caught) {
+      setError(caught instanceof ApiError ? caught.message : 'Sessions could not be revoked.')
     }
   }
 
@@ -220,6 +265,64 @@ export function SettingsPage() {
             <DatabaseBackup className="size-4" />
             Create operational backup
           </button>
+        </section>
+        <section className="surface p-5 sm:p-6 xl:col-span-2">
+          <div className="flex items-center gap-3">
+            <span className="grid size-10 place-items-center rounded-xl bg-moss/10 text-moss">
+              <ShieldCheck className="size-5" />
+            </span>
+            <div>
+              <h2 className="font-display text-xl font-semibold">Account security</h2>
+              <p className="text-sm text-ink/55">Password changes end every active session.</p>
+            </div>
+          </div>
+          <div className="mt-6 grid gap-4 sm:grid-cols-3">
+            <label className="text-sm font-medium">
+              Current password
+              <input
+                className="field mt-2"
+                type="password"
+                autoComplete="current-password"
+                value={currentPassword}
+                onChange={(event) => setCurrentPassword(event.target.value)}
+              />
+            </label>
+            <label className="text-sm font-medium">
+              New password
+              <input
+                className="field mt-2"
+                type="password"
+                minLength={12}
+                maxLength={256}
+                autoComplete="new-password"
+                value={newPassword}
+                onChange={(event) => setNewPassword(event.target.value)}
+              />
+            </label>
+            <label className="text-sm font-medium">
+              Confirm new password
+              <input
+                className="field mt-2"
+                type="password"
+                minLength={12}
+                maxLength={256}
+                autoComplete="new-password"
+                value={confirmPassword}
+                onChange={(event) => setConfirmPassword(event.target.value)}
+              />
+            </label>
+          </div>
+          <div className="mt-5 flex flex-wrap gap-3">
+            <button className="button-primary" onClick={() => void changePassword()}>
+              Change password
+            </button>
+            <button className="button-secondary" onClick={() => void revokeOthers()}>
+              Revoke other sessions
+            </button>
+            <button className="button-secondary" onClick={() => void revokeAll()}>
+              Revoke all sessions
+            </button>
+          </div>
         </section>
       </div>
     </div>

@@ -18,6 +18,7 @@ type AuthContextValue = {
   login: (username: string, password: string) => Promise<void>
   bootstrap: (username: string, password: string, bootstrapToken: string) => Promise<void>
   logout: () => Promise<void>
+  endSession: () => void
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null)
@@ -77,7 +78,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setBootstrapAvailable(false)
   }
 
-  const value = { session, loading, bootstrapAvailable, refresh, login, bootstrap, logout }
+  const endSession = () => {
+    setSession(null)
+    setCsrfToken('')
+    setBootstrapAvailable(false)
+  }
+
+  const value = {
+    session,
+    loading,
+    bootstrapAvailable,
+    refresh,
+    login,
+    bootstrap,
+    logout,
+    endSession,
+  }
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
 }

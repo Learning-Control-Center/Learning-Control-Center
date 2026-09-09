@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "packageType": "portable_logical_backup",
+  "packageId": "fixture-v1-minimal",
+  "appVersion": "1.0.0",
+  "createdAt": "2026-01-01T00:00:00.000Z",
+  "payload": {
+    "tables": {
+      "roadmaps": [],
+      "roadmap_versions": [],
+      "phases": [],
+      "tracks": [],
+      "roadmap_scope_events": [],
+      "competency_identities": [],
+      "competency_definitions": [],
+      "competency_prerequisites": [],
+      "competency_understanding_items": [],
+      "competency_ability_items": [],
+      "exit_criterion_identities": [],
+      "exit_criterion_definitions": [],
+      "competency_states": [],
+      "verification_records": [],
+      "verification_evidence": [],
+      "competency_status_events": [],
+      "learning_sessions": [],
+      "daily_reflections": [],
+      "generated_reports": [],
+      "recommendation_snapshots": [],
+      "discipline_profiles": [
+        {
+          "id": 1,
+          "weekly_target_active_days": 5,
+          "target_duration_ms_per_active_day": 3600000,
+          "timezone": "UTC",
+          "adaptation_phase_config_json": "{}",
+          "updated_at": 1000
+        }
+      ],
+      "import_records": [],
+      "export_records": [],
+      "application_settings": []
+    }
+  }
+}

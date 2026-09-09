@@ -1,0 +1,44 @@
+{
+  "fixtureVersion": 1,
+  "sourceDatabase": "populated-0002.sqlite3",
+  "fixedTimezone": "UTC",
+  "api": {
+    "health": {
+      "status": "ok"
+    },
+    "bootstrapStatus": {
+      "bootstrapAvailable": false
+    },
+    "sessionHistory": {
+      "items": [
+        {
+          "id": "fixture-learning-session",
+          "competencyIdentityId": "fixture-competency",
+          "trackId": "fixture-track",
+          "sessionMode": "manual",
+          "timedState": null,
+          "activityType": "practice",
+          "assistanceMode": "docs_only",
+          "startedAt": "1970-01-01T00:00:01.000Z",
+          "endedAt": "1970-01-01T00:06:01.000Z",
+          "accumulatedDurationMs": 360000,
+          "activeSince": null,
+          "durationMs": 360000,
+          "difficulty": 3,
+          "outcome": "completed",
+          "notes": "Fixture",
+          "createdAt": "1970-01-01T00:00:01.000Z",
+          "updatedAt": "1970-01-01T00:06:01.000Z"
+        }
+      ],
+      "limit": 50,
+      "offset": 0
+    }
+  },
+  "history": {
+    "verificationRecordIds": ["fixture-verification"],
+    "verificationEvidenceIds": ["fixture-verification-evidence"],
+    "competencyStatusEventIds": ["fixture-status-event"],
+    "roadmapScopeEventIds": ["fixture-scope"]
+  }
+}

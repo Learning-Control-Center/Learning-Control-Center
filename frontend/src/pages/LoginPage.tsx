@@ -106,6 +106,13 @@ export function LoginPage() {
               <ArrowRight className="size-4" aria-hidden="true" />
             </button>
           </form>
+          {!bootstrapAvailable ? (
+            <p className="mt-6 text-xs leading-5 text-ink/50">
+              Lost access? Ask the server operator to stop LCC and run{' '}
+              <code className="font-mono text-ink/70">lcc-ops recover-password</code>. There is no
+              browser reset link or reusable recovery token.
+            </p>
+          ) : null}
         </motion.div>
       </section>
     </main>
