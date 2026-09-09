@@ -286,6 +286,7 @@ class StateUpdatePayload(StrictModel):
 
 class PortablePackagePayload(StrictModel):
     tables: dict[str, list[dict[str, Any]]]
+    manifest: dict[str, Any] | None = None
 
 
 class ImportInspectRequest(StrictModel):

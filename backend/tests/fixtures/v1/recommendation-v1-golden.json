@@ -1,0 +1,55 @@
+{
+  "apiPayload": {
+    "recommendationVersion": 1,
+    "generatedAt": 1788264000000,
+    "localDate": "2026-09-01",
+    "setupRequired": false,
+    "limitedTelemetry": false,
+    "todayCompletedDurationMs": 0,
+    "todayTargetDurationMs": 3600000,
+    "primary": {
+      "competencyIdentityId": "fixture-competency",
+      "stableKey": "fixture.competency",
+      "title": "Competency",
+      "activity": "review",
+      "suggestedDurationMs": 3600000,
+      "reasonCodes": [
+        "CORE_COMPETENCY",
+        "PRACTICING_CONTINUATION",
+        "INDEPENDENT_EVIDENCE_LOW",
+        "REVIEW_DUE"
+      ],
+      "activityReasonCode": "ACTIVITY_REVIEW_DUE",
+      "explanation": {
+        "priority": "core",
+        "weight": 5,
+        "status": "practicing",
+        "directRequiredDependents": 0,
+        "lastSuccessfulEvidenceAt": 1000,
+        "reviewUrgency": 25,
+        "independenceGap": 20,
+        "trackBalance": 0,
+        "recentRepetitionPenalty": 0,
+        "activityFacts": {
+          "status": "practicing",
+          "conceptualEvidenceDurationMs": 0,
+          "conceptualThresholdMs": 1800000,
+          "practicalEvidenceDurationMs": 360000,
+          "practicalThresholdMs": 1800000,
+          "exitCriteriaReady": false,
+          "independenceGapContribution": 20,
+          "latestBlockedSessionAt": null,
+          "latestLaterSuccessfulPracticalAt": null,
+          "precedenceRule": 2
+        }
+      }
+    },
+    "secondary": null
+  },
+  "persistedStructuredPayloadJson": "{\"recommendationVersion\":1,\"generatedAt\":1788264000000,\"localDate\":\"2026-09-01\",\"setupRequired\":false,\"limitedTelemetry\":false,\"todayCompletedDurationMs\":0,\"todayTargetDurationMs\":3600000,\"primary\":{\"competencyIdentityId\":\"fixture-competency\",\"stableKey\":\"fixture.competency\",\"title\":\"Competency\",\"activity\":\"review\",\"suggestedDurationMs\":3600000,\"reasonCodes\":[\"CORE_COMPETENCY\",\"PRACTICING_CONTINUATION\",\"INDEPENDENT_EVIDENCE_LOW\",\"REVIEW_DUE\"],\"activityReasonCode\":\"ACTIVITY_REVIEW_DUE\",\"explanation\":{\"priority\":\"core\",\"weight\":5,\"status\":\"practicing\",\"directRequiredDependents\":0,\"lastSuccessfulEvidenceAt\":1000,\"reviewUrgency\":25,\"independenceGap\":20,\"trackBalance\":0,\"recentRepetitionPenalty\":0,\"activityFacts\":{\"status\":\"practicing\",\"conceptualEvidenceDurationMs\":0,\"conceptualThresholdMs\":1800000,\"practicalEvidenceDurationMs\":360000,\"practicalThresholdMs\":1800000,\"exitCriteriaReady\":false,\"independenceGapContribution\":20,\"latestBlockedSessionAt\":null,\"latestLaterSuccessfulPracticalAt\":null,\"precedenceRule\":2}}},\"secondary\":null}",
+  "sideEffects": {
+    "analysisRuns": 1,
+    "analysisSnapshots": 1,
+    "recommendationSnapshots": 2
+  }
+}

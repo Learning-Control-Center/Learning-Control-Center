@@ -1,0 +1,1 @@
+"""Immutable analysis input boundaries."""

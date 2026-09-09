@@ -110,7 +110,7 @@ Competencies: Functions (programming.functions)
 
 Portable export uses purpose `portable_logical_backup`, format `json`, ignores selective scope, and emits the normal envelope with `packageType: "portable_logical_backup"` and payload `{"tables": {...}}`. Every table below is required, even when its value is an empty array:
 
-`roadmaps`, `roadmap_versions`, `phases`, `tracks`, `roadmap_scope_events`, `competency_identities`, `competency_definitions`, `competency_prerequisites`, `competency_understanding_items`, `competency_ability_items`, `exit_criterion_identities`, `exit_criterion_definitions`, `competency_states`, `verification_records`, `verification_evidence`, `competency_status_events`, `learning_sessions`, `daily_reflections`, `generated_reports`, `recommendation_snapshots`, `discipline_profiles`, `import_records`, `export_records`, `application_settings`.
+`roadmaps`, `roadmap_versions`, `phases`, `tracks`, `roadmap_scope_events`, `competency_identities`, `competency_definitions`, `competency_prerequisites`, `competency_understanding_items`, `competency_ability_items`, `exit_criterion_identities`, `exit_criterion_definitions`, `competency_states`, `verification_records`, `verification_evidence`, `competency_status_events`, `learning_sessions`, `daily_reflections`, `generated_reports`, `analysis_runs`, `analysis_snapshots`, `recommendation_snapshots`, `discipline_profiles`, `import_records`, `export_records`, `application_settings`.
 
 Every row must contain exactly every database column for that table. Use an application-produced export as the template; portable rows use internal database IDs and are not intended for hand authoring. `users`, `auth_sessions`, and `operational_backups` are excluded, as are password hashes, session/CSRF tokens, and backup filesystem paths.
 
@@ -120,7 +120,7 @@ Import inspection validates exact table/column coverage, strict canonical scalar
 
 The restore inspection response includes `replacementDiff`, which compares current and incoming portable state by table and by portable domain. It reports existing and incoming row counts plus rows that will be added, modified, or removed, identifies every affected domain, and states that authentication is preserved and merge restore is unsupported.
 
-Current application-produced backups include `roadmap_scope_events` while keeping the global envelope at `schemaVersion: 1`. Older valid V1 portable backups that lack only this table remain accepted. Inspection identifies them with `portableCompatibility: "legacy_scope_baseline"`; restore creates at most one deterministic current-scope baseline from the current roadmap pointers and that roadmap row's `updated_at`. It never invents earlier phase changes. A current-format restore preserves imported history and records a `portable_restore` event only when it changes the local current scope.
+Current application-produced portable backups use `schemaVersion: 2` and include immutable analysis lineage. Their manifest names included history and explicitly omits rebuildable `projection_invalidations`; restore clears that queue before rebuilding from canonical facts in checkpoints that define projection consumers. Frozen V1 portable backups remain accepted through a dedicated schema-version dispatch; their absent V2 tables are initialized empty and legacy recommendation rows retain a null analysis link. Older valid V1 backups that also lack `roadmap_scope_events` are identified with `portableCompatibility: "legacy_scope_baseline"`; restore creates at most one deterministic current-scope baseline from the current roadmap pointers and that roadmap row's `updated_at`. It never invents earlier phase changes. A current-format restore preserves imported history and records a `portable_restore` event only when it changes the local current scope.
 
 ### Representative empty portable package
 
@@ -128,12 +128,18 @@ This valid package represents an empty portable learning state. Non-empty export
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "packageType": "portable_logical_backup",
-  "packageId": "example-empty-portable-v1",
+  "packageId": "example-empty-portable-v2",
   "appVersion": "1.0.0",
   "createdAt": "2026-09-04T18:30:00.000Z",
   "payload": {
+    "manifest": {
+      "includedCanonicalDomains": ["learning_state"],
+      "includedImmutableHistory": ["analysis_runs", "analysis_snapshots"],
+      "omittedRebuildableState": ["projection_invalidations"],
+      "restoreActions": ["clear_projection_invalidations"]
+    },
     "tables": {
       "roadmaps": [],
       "roadmap_versions": [],
@@ -154,6 +160,8 @@ This valid package represents an empty portable learning state. Non-empty export
       "learning_sessions": [],
       "daily_reflections": [],
       "generated_reports": [],
+      "analysis_runs": [],
+      "analysis_snapshots": [],
       "recommendation_snapshots": [],
       "discipline_profiles": [],
       "import_records": [],
@@ -283,7 +291,7 @@ This synthetic package is for demonstrations and populated-state testing, not a 
 
 | Name | JSON type | Required | Allowed value/semantics | Example |
 | --- | --- | --- | --- | --- |
-| `schemaVersion` | integer | yes | Exactly `1` | `1` |
+| `schemaVersion` | integer | yes | `1` for V1 packages; portable backup/restore also accepts and exports `2` | `2` |
 | `packageType` | string | yes | One accepted import type listed above; exports use `analysis_snapshot` or `portable_logical_backup` | `roadmap_update` |
 | `packageId` | string | yes | Non-empty, at most 255 characters; must not have been applied before | `example-package-001` |
 | `appVersion` | string | yes | Producer application version; recorded, not semantically compared | `1.0.0` |

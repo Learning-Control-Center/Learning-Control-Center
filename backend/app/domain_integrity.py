@@ -7,9 +7,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import Boolean, Integer, String, Table, Text, func, select, text
 
+from app.analysis.contracts import content_hash
 from app.domain import has_required_dependency_cycle
 from app.errors import AppError
 from app.models import (
+    AnalysisRun,
+    AnalysisSnapshot,
     ApplicationSetting,
     CompetencyDefinition,
     CompetencyIdentity,
@@ -66,6 +69,16 @@ def _validate_json_columns(connection: Any) -> None:
         (ImportRecord, "dry_run_summary_json"),
         (ExportRecord, "scope_summary_json"),
         (ApplicationSetting, "value_json"),
+        (AnalysisRun, "scope_json"),
+        (AnalysisRun, "input_lineage_json"),
+        (AnalysisRun, "completeness_metadata_json"),
+        (AnalysisSnapshot, "semantic_definition_references_json"),
+        (AnalysisSnapshot, "capability_scale_version_references_json"),
+        (AnalysisSnapshot, "policy_versions_json"),
+        (AnalysisSnapshot, "input_lineage_json"),
+        (AnalysisSnapshot, "normalized_facts_json"),
+        (AnalysisSnapshot, "signals_json"),
+        (AnalysisSnapshot, "unknown_markers_json"),
     )
     for model, column_name in json_columns:
         column = getattr(model, column_name)
@@ -398,6 +411,129 @@ def _validate_competency_history(connection: Any) -> None:
             )
 
 
+def _validate_analysis_history(connection: Any) -> None:
+    runs = {
+        row.id: row
+        for row in connection.execute(
+            select(
+                AnalysisRun.id,
+                AnalysisRun.purpose,
+                AnalysisRun.status,
+                AnalysisRun.generated_at,
+                AnalysisRun.cutoff_at,
+                AnalysisRun.configuration_hash,
+                AnalysisRun.input_lineage_json,
+                AnalysisRun.input_hash,
+                AnalysisRun.application_version,
+            )
+        ).all()
+    }
+    snapshot_ids: set[str] = set()
+    snapshot_run_ids: set[str] = set()
+    snapshots = connection.execute(
+        select(
+            AnalysisSnapshot.id,
+            AnalysisSnapshot.run_id,
+            AnalysisSnapshot.purpose,
+            AnalysisSnapshot.generated_at,
+            AnalysisSnapshot.cutoff_at,
+            AnalysisSnapshot.cutoff_semantics,
+            AnalysisSnapshot.configuration_hash,
+            AnalysisSnapshot.application_version,
+            AnalysisSnapshot.input_lineage_json,
+            AnalysisSnapshot.input_hash,
+            AnalysisSnapshot.normalized_facts_json,
+            AnalysisSnapshot.signals_json,
+            AnalysisSnapshot.completeness,
+            AnalysisSnapshot.unknown_markers_json,
+            AnalysisSnapshot.semantic_definition_references_json,
+            AnalysisSnapshot.capability_scale_version_references_json,
+            AnalysisSnapshot.policy_versions_json,
+            AnalysisSnapshot.output_hash,
+        )
+    ).all()
+    for snapshot in snapshots:
+        run = runs.get(snapshot.run_id)
+        if run is None:
+            raise AppError(422, "PORTABLE_ANALYSIS_INVALID", "An analysis snapshot has no run.")
+        lineage = json.loads(snapshot.input_lineage_json)
+        normalized = json.loads(snapshot.normalized_facts_json)
+        signals = json.loads(snapshot.signals_json)
+        unknown = json.loads(snapshot.unknown_markers_json)
+        semantic_references = json.loads(snapshot.semantic_definition_references_json)
+        scale_references = json.loads(snapshot.capability_scale_version_references_json)
+        policy_versions = json.loads(snapshot.policy_versions_json)
+        matching = (
+            run.purpose == snapshot.purpose
+            and run.generated_at == snapshot.generated_at
+            and run.cutoff_at == snapshot.cutoff_at
+            and run.configuration_hash == snapshot.configuration_hash
+            and run.input_lineage_json == snapshot.input_lineage_json
+            and run.input_hash == snapshot.input_hash
+            and run.application_version == snapshot.application_version
+        )
+        structures_valid = (
+            snapshot.cutoff_semantics == "exclusive"
+            and snapshot.cutoff_at > snapshot.generated_at
+            and isinstance(lineage, list)
+            and isinstance(normalized, dict)
+            and isinstance(signals, list)
+            and isinstance(unknown, list)
+            and isinstance(semantic_references, list)
+            and isinstance(scale_references, list)
+            and isinstance(policy_versions, dict)
+            and all(
+                isinstance(marker, dict)
+                and all(isinstance(marker.get(key), str) for key in ("code", "path", "reason"))
+                for marker in unknown
+            )
+        )
+        expected_input = content_hash({"lineage": lineage, "normalizedFacts": normalized})
+        expected_output = content_hash(
+            {
+                "normalizedFacts": normalized,
+                "signals": signals,
+                "completeness": snapshot.completeness,
+                "unknownMarkers": unknown,
+            }
+        )
+        if (
+            not matching
+            or not structures_valid
+            or snapshot.input_hash != expected_input
+            or snapshot.output_hash != expected_output
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_ANALYSIS_INVALID",
+                "Analysis history lineage or hashes are inconsistent.",
+            )
+        snapshot_ids.add(snapshot.id)
+        snapshot_run_ids.add(snapshot.run_id)
+    invalid_run_lifecycle = any(
+        (run.status == "failed" and run_id in snapshot_run_ids)
+        or (run.status in {"completed", "partial"} and run_id not in snapshot_run_ids)
+        for run_id, run in runs.items()
+    )
+    if invalid_run_lifecycle:
+        raise AppError(
+            422,
+            "PORTABLE_ANALYSIS_INVALID",
+            "Analysis run status and snapshot lifecycle are inconsistent.",
+        )
+    linked_ids = connection.execute(
+        select(RecommendationSnapshot.analysis_snapshot_id).where(
+            RecommendationSnapshot.analysis_snapshot_id.is_not(None)
+        )
+    ).scalars()
+    if any(snapshot_id not in snapshot_ids for snapshot_id in linked_ids):
+        raise AppError(
+            422,
+            "PORTABLE_ANALYSIS_INVALID",
+            "Recommendation analysis lineage is invalid.",
+        )
+
+
 def validate_domain_integrity(connection: Any) -> None:
     violations = connection.execute(text("PRAGMA foreign_key_check")).all()
     if violations:
@@ -408,6 +544,7 @@ def validate_domain_integrity(connection: Any) -> None:
             {"violationCount": len(violations)},
         )
     _validate_json_columns(connection)
+    _validate_analysis_history(connection)
     _validate_roadmap_scope(connection)
     _validate_roadmap_scope_history(connection)
     _validate_versioned_roadmap(connection)

@@ -41,7 +41,7 @@ def test_scheduled_backup_manifest_permissions_and_retention(tmp_path: Path) -> 
         values = dict(line.split("=", 1) for line in manifest.read_text().splitlines())
         assert values == {
             "checksum_sha256": hashlib.sha256(backup.read_bytes()).hexdigest(),
-            "schema_revision": "0003_auth_security_foundation",
+            "schema_revision": "0004_analysis_projection_foundation",
             "app_version": "test-version",
             "database_path": str(database_path),
         }

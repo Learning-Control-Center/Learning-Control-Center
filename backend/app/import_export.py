@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from app.analytics import build_analytics
 from app.api_serialization import serialize_api_instants
 from app.auth import AuthContext, get_auth_context, require_csrf
+from app.compatibility.v1.portable import read_v1_portable_package
 from app.config import Settings, get_settings_dependency
 from app.database import create_database_engine, get_db, run_migrations
 from app.domain import transition_status
@@ -32,6 +33,8 @@ from app.domain_integrity import (
 from app.errors import AppError
 from app.import_diff import build_portable_replacement_diff, build_roadmap_diff
 from app.models import (
+    AnalysisRun,
+    AnalysisSnapshot,
     ApplicationSetting,
     CompetencyAbilityItem,
     CompetencyDefinition,
@@ -50,6 +53,7 @@ from app.models import (
     LearningSession,
     OperationalBackup,
     Phase,
+    ProjectionInvalidation,
     RecommendationSnapshot,
     Roadmap,
     RoadmapScopeEvent,
@@ -57,6 +61,13 @@ from app.models import (
     Track,
     VerificationEvidence,
     VerificationRecord,
+)
+from app.portability.registry import (
+    PORTABLE_SCHEMA_CURRENT,
+    PORTABLE_V1_FORBIDDEN_TABLES,
+    PORTABLE_V2_FOUNDATION_TABLES,
+    PORTABLE_V2_MANIFEST,
+    supports_portable_schema,
 )
 from app.schemas import (
     ExportRequest,
@@ -100,6 +111,8 @@ PORTABLE_MODELS = [
     LearningSession,
     DailyReflection,
     GeneratedReport,
+    AnalysisRun,
+    AnalysisSnapshot,
     RecommendationSnapshot,
     DisciplineProfile,
     ImportRecord,
@@ -146,10 +159,11 @@ def _row_dict(item: Any) -> dict[str, Any]:
 
 def _portable_payload(db: Session) -> dict[str, Any]:
     return {
+        "manifest": PORTABLE_V2_MANIFEST,
         "tables": {
             _table(model).name: [_row_dict(item) for item in db.scalars(select(model)).all()]
             for model in PORTABLE_MODELS
-        }
+        },
     }
 
 
@@ -404,10 +418,12 @@ def _human_report(payload: dict[str, Any], created_at: str) -> str:
     )
 
 
-def _envelope(package_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+def _envelope(
+    package_type: str, payload: dict[str, Any], *, schema_version: int = 1
+) -> dict[str, Any]:
     now = utc_now_ms()
     return {
-        "schemaVersion": 1,
+        "schemaVersion": schema_version,
         "packageType": package_type,
         "packageId": str(uuid.uuid4()),
         "appVersion": "1.0.0",
@@ -528,19 +544,39 @@ def _legacy_scope_baseline(
 
 
 def _normalize_portable_tables(
-    payload: dict[str, Any], package_id: str
+    payload: dict[str, Any], package_id: str, schema_version: int = 1
 ) -> tuple[dict[str, list[dict[str, Any]]], bool]:
     try:
-        parsed_tables = PortablePackagePayload.model_validate(payload).tables
+        parsed = PortablePackagePayload.model_validate(payload)
     except ValidationError as exc:
         raise AppError(
             422, "PORTABLE_SCHEMA_INVALID", "The portable backup payload is invalid."
         ) from exc
-    tables = {table_name: [dict(row) for row in rows] for table_name, rows in parsed_tables.items()}
+    if schema_version == 2 and parsed.manifest != PORTABLE_V2_MANIFEST:
+        raise AppError(
+            422,
+            "PORTABLE_MANIFEST_INVALID",
+            (
+                "The portable V2 manifest is missing or does not match the supported "
+                "recovery contract."
+            ),
+        )
+    if schema_version == 1 and parsed.manifest is not None:
+        raise AppError(
+            422, "PORTABLE_SCHEMA_INVALID", "A V1 portable package cannot contain a V2 manifest."
+        )
+    tables = {table_name: [dict(row) for row in rows] for table_name, rows in parsed.tables.items()}
+    if schema_version == 1 and set(tables) & set(PORTABLE_V1_FORBIDDEN_TABLES):
+        raise AppError(
+            422, "PORTABLE_SCHEMA_INVALID", "A V1 portable package cannot contain V2 tables."
+        )
     unknown = set(tables) - set(PORTABLE_BY_TABLE)
+    v2_tables = set(PORTABLE_V2_FOUNDATION_TABLES)
     missing = set(PORTABLE_BY_TABLE) - set(tables)
-    legacy_without_scope_history = missing == {"roadmap_scope_events"}
-    if unknown or (missing and not legacy_without_scope_history):
+    allowed_v1_missing = v2_tables | {"roadmap_scope_events"}
+    legacy_without_scope_history = schema_version == 1 and "roadmap_scope_events" in missing
+    valid_missing = (schema_version == 1 and missing <= allowed_v1_missing) or not missing
+    if unknown or not valid_missing:
         raise AppError(
             422,
             "PORTABLE_SCHEMA_INVALID",
@@ -549,13 +585,20 @@ def _normalize_portable_tables(
         )
     if legacy_without_scope_history:
         tables["roadmap_scope_events"] = _legacy_scope_baseline(tables, package_id)
+    if schema_version == 1:
+        for table_name in v2_tables:
+            tables.setdefault(table_name, [])
+        for row in tables.get("recommendation_snapshots", []):
+            row.setdefault("analysis_snapshot_id", None)
     return tables, legacy_without_scope_history
 
 
 def _validate_portable_payload(
-    payload: dict[str, Any], package_id: str
+    payload: dict[str, Any], package_id: str, schema_version: int = 1
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any]]:
-    tables, legacy_without_scope_history = _normalize_portable_tables(payload, package_id)
+    tables, legacy_without_scope_history = _normalize_portable_tables(
+        payload, package_id, schema_version
+    )
     for table_name, rows in tables.items():
         if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
             raise AppError(422, "PORTABLE_SCHEMA_INVALID", f"Table {table_name} has invalid rows.")
@@ -634,10 +677,18 @@ def _inspect_package(
     size = len(json.dumps(package, separators=(",", ":")).encode("utf-8"))
     if size > settings.max_import_bytes:
         raise AppError(413, "IMPORT_TOO_LARGE", "The import package is too large.")
-    if payload.package.schemaVersion != 1:
+    portable_package = payload.package.packageType in {"portable_logical_backup", "restore"}
+    supported = (
+        supports_portable_schema(payload.package.schemaVersion)
+        if portable_package
+        else payload.package.schemaVersion == 1
+    )
+    if not supported:
         raise AppError(
             422, "IMPORT_SCHEMA_UNSUPPORTED", "The import schema version is unsupported."
         )
+    if portable_package and payload.package.schemaVersion == 1:
+        read_v1_portable_package(package)
     if db.scalar(
         select(ImportRecord.id).where(ImportRecord.package_id == payload.package.packageId)
     ):
@@ -649,7 +700,7 @@ def _inspect_package(
     }
     if payload.package.packageType in {"portable_logical_backup", "restore"}:
         incoming_tables, validation_summary = _validate_portable_payload(
-            payload.package.payload, payload.package.packageId
+            payload.package.payload, payload.package.packageId, payload.package.schemaVersion
         )
         summary.update(validation_summary)
         existing_state = portable_state_presence(db, PORTABLE_MODELS)
@@ -771,6 +822,7 @@ def _delete_portable_state(db: Session) -> None:
         roadmap.current_phase_id = None
         roadmap.is_current = False
     db.flush()
+    db.execute(_table(ProjectionInvalidation).delete())
     for model in reversed(PORTABLE_MODELS):
         db.execute(_table(model).delete())
     db.flush()
@@ -793,8 +845,11 @@ def _apply_portable_restore(
     replace_existing: bool,
     *,
     package_id: str = "direct-restore",
+    schema_version: int = 1,
 ) -> None:
-    tables, legacy_without_scope_history = _normalize_portable_tables(payload, package_id)
+    tables, legacy_without_scope_history = _normalize_portable_tables(
+        payload, package_id, schema_version
+    )
     previous_scope = _current_scope(db)
     existing_state = portable_state_presence(db, PORTABLE_MODELS)
     if existing_state and not replace_existing:
@@ -891,7 +946,11 @@ async def export_data(
 ) -> dict[str, Any]:
     created_at = epoch_ms_to_rfc3339(utc_now_ms())
     if payload.purpose == "portable_logical_backup":
-        result: Any = _envelope(payload.purpose, _portable_payload(db))
+        result: Any = _envelope(
+            payload.purpose,
+            _portable_payload(db),
+            schema_version=PORTABLE_SCHEMA_CURRENT,
+        )
     else:
         analysis = _analysis_payload(db, payload)
         result = (
@@ -976,6 +1035,7 @@ async def apply_import(
                     payload.package.payload,
                     payload.replace_existing,
                     package_id=payload.package.packageId,
+                    schema_version=payload.package.schemaVersion,
                 )
             elif payload.package.packageType == "verification_update":
                 _apply_verification_update(

@@ -350,6 +350,7 @@ def build_analytics(
     competency_identity_ids: set[str] | None = None,
     track_ids: set[str] | None = None,
     historical_context: HistoricalEvaluationContext | None = None,
+    exclusive_cutoff_ms: int | None = None,
 ) -> dict[str, Any]:
     now = (
         historical_context.exclusive_cutoff_ms
@@ -370,7 +371,9 @@ def build_analytics(
         db,
         timezone_name,
         exclusive_cutoff_ms=(
-            historical_context.exclusive_cutoff_ms if historical_context is not None else None
+            historical_context.exclusive_cutoff_ms
+            if historical_context is not None
+            else exclusive_cutoff_ms
         ),
     )
     if competency_identity_ids is not None:
@@ -437,7 +440,9 @@ def build_analytics(
         now,
         identity_scope=effective_identity_scope,
         exclusive_cutoff_ms=(
-            historical_context.exclusive_cutoff_ms if historical_context is not None else None
+            historical_context.exclusive_cutoff_ms
+            if historical_context is not None
+            else exclusive_cutoff_ms
         ),
         evaluation_date=(
             historical_context.completed_through if historical_context is not None else None

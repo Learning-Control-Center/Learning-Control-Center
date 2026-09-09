@@ -11,6 +11,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    event,
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -512,8 +513,117 @@ class GeneratedReport(Base):
     rendered_markdown: Mapped[str | None] = mapped_column(Text)
 
 
+class AnalysisRun(Base):
+    __tablename__ = "analysis_runs"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_analysis_run_idempotency"),
+        CheckConstraint(
+            "status IN ('completed','failed','partial')", name="ck_analysis_run_status"
+        ),
+        Index("ix_analysis_run_purpose_time", "purpose", "generated_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    purpose: Mapped[str] = mapped_column(String(64), nullable=False)
+    scope_json: Mapped[str] = mapped_column(Text, nullable=False)
+    generated_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    cutoff_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    algorithm_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    configuration_reference: Mapped[str] = mapped_column(String(255), nullable=False)
+    configuration_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    input_lineage_json: Mapped[str] = mapped_column(Text, nullable=False)
+    input_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    application_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    failure_metadata_json: Mapped[str | None] = mapped_column(Text)
+    completeness_metadata_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class AnalysisSnapshot(Base):
+    __tablename__ = "analysis_snapshots"
+    __table_args__ = (
+        UniqueConstraint("run_id", name="uq_analysis_snapshot_run"),
+        CheckConstraint("cutoff_semantics = 'exclusive'", name="ck_analysis_cutoff_exclusive"),
+        CheckConstraint("completeness IN ('complete','partial')", name="ck_analysis_completeness"),
+        Index("ix_analysis_snapshot_purpose_time", "purpose", "generated_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("analysis_runs.id", ondelete="RESTRICT"), nullable=False
+    )
+    purpose: Mapped[str] = mapped_column(String(64), nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    generated_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    cutoff_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    cutoff_semantics: Mapped[str] = mapped_column(String(16), nullable=False)
+    timezone: Mapped[str] = mapped_column(String(128), nullable=False)
+    completed_through_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    target_profile_id: Mapped[str | None] = mapped_column(String(36))
+    target_profile_version_id: Mapped[str | None] = mapped_column(String(36))
+    capability_scale_version_references_json: Mapped[str] = mapped_column(Text, nullable=False)
+    learning_graph_reference: Mapped[str | None] = mapped_column(String(255))
+    curriculum_reference: Mapped[str | None] = mapped_column(String(255))
+    semantic_definition_references_json: Mapped[str] = mapped_column(Text, nullable=False)
+    policy_versions_json: Mapped[str] = mapped_column(Text, nullable=False)
+    discipline_configuration_reference: Mapped[str] = mapped_column(String(255), nullable=False)
+    configuration_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    application_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    input_lineage_json: Mapped[str] = mapped_column(Text, nullable=False)
+    input_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    normalized_facts_json: Mapped[str] = mapped_column(Text, nullable=False)
+    signals_json: Mapped[str] = mapped_column(Text, nullable=False)
+    completeness: Mapped[str] = mapped_column(String(16), nullable=False)
+    unknown_markers_json: Mapped[str] = mapped_column(Text, nullable=False)
+    output_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+@event.listens_for(AnalysisRun, "before_update")
+@event.listens_for(AnalysisRun, "before_delete")
+@event.listens_for(AnalysisSnapshot, "before_update")
+@event.listens_for(AnalysisSnapshot, "before_delete")
+def _reject_analysis_history_mutation(*_args: object) -> None:
+    raise ValueError("Analysis runs and snapshots are immutable.")
+
+
+class ProjectionInvalidation(Base):
+    __tablename__ = "projection_invalidations"
+    __table_args__ = (
+        UniqueConstraint(
+            "projection_kind",
+            "subject_type",
+            "subject_id",
+            "source_fact_id",
+            "target_policy_version",
+            name="uq_projection_invalidation_source_target",
+        ),
+        CheckConstraint("attempt_count >= 0", name="ck_projection_attempt_count"),
+        CheckConstraint(
+            "status IN ('pending','running','completed','permanent_failure')",
+            name="ck_projection_invalidation_status",
+        ),
+        Index("ix_projection_invalidation_drain", "status", "requested_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    projection_kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    subject_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    subject_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_fact_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    target_policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    requested_at: Mapped[int] = mapped_column(Integer, default=utc_now_ms, nullable=False)
+    started_at: Mapped[int | None] = mapped_column(Integer)
+    completed_at: Mapped[int | None] = mapped_column(Integer)
+    result_run_id: Mapped[str | None] = mapped_column(String(36))
+    error_json: Mapped[str | None] = mapped_column(Text)
+
+
 class RecommendationSnapshot(Base):
     __tablename__ = "recommendation_snapshots"
+    __table_args__ = (Index("ix_recommendation_analysis_snapshot", "analysis_snapshot_id"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     generated_at: Mapped[int] = mapped_column(Integer, default=utc_now_ms, nullable=False)
@@ -530,6 +640,9 @@ class RecommendationSnapshot(Base):
     accepted_primary: Mapped[bool | None] = mapped_column(Boolean)
     chosen_competency_identity_id: Mapped[str | None] = mapped_column(
         ForeignKey("competency_identities.id")
+    )
+    analysis_snapshot_id: Mapped[str | None] = mapped_column(
+        ForeignKey("analysis_snapshots.id", ondelete="RESTRICT")
     )
 
 

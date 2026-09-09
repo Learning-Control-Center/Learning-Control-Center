@@ -15,11 +15,16 @@ from alembic.config import Config
 from alembic.migration import MigrationContext
 from app import database, ops
 from app import models as _models  # noqa: F401
+from app.analysis import v1_compat
+from app.analysis.v1_compat import build_v1_recommendation_envelope
 from app.config import get_settings
 from app.database import Base, create_database_engine
 from app.import_export import _validate_portable_payload
-from app.models import LearningSession
+from app.models import AnalysisRun, AnalysisSnapshot, LearningSession, RecommendationSnapshot
+from app.recommendation.v1_policy import evaluate
+from app.recommendations import today_recommendation
 from app.sessions import serialize_session
+from sqlalchemy import select
 from sqlalchemy.exc import SAWarning
 from sqlalchemy.orm import Session
 
@@ -78,6 +83,7 @@ def test_frozen_v1_fixture_checksums() -> None:
         "populated-0002.sqlite3",
         "portable-empty-schema-v1.json",
         "portable-minimal-schema-v1.json",
+        "recommendation-v1-golden.json",
         "running-timer-0002.sqlite3",
         "schema-signature.json",
     }
@@ -108,7 +114,9 @@ def test_frozen_v1_fixture_checksums() -> None:
 def test_frozen_v1_portable_packages_are_valid(fixture_name: str) -> None:
     package = json.loads((FIXTURES / fixture_name).read_text())
     tables, summary = _validate_portable_payload(package["payload"], package["packageId"])
-    assert set(tables) == set(package["payload"]["tables"])
+    assert set(package["payload"]["tables"]) <= set(tables)
+    assert not tables["analysis_runs"]
+    assert not tables["analysis_snapshots"]
     assert summary["portableCompatibility"] == "current"
 
 
@@ -146,6 +154,45 @@ def test_frozen_v1_api_and_history_golden(tmp_path: Path) -> None:
         }
     finally:
         connection.close()
+
+
+async def test_frozen_v1_recommendation_api_bytes_and_side_effect_golden(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    golden = json.loads((FIXTURES / "recommendation-v1-golden.json").read_text())
+    database_path = tmp_path / "recommendation.sqlite3"
+    shutil.copyfile(FIXTURES / "populated-0002.sqlite3", database_path)
+    database_url = f"sqlite:///{database_path}"
+    command.upgrade(_config(database_path), "head")
+    engine = create_database_engine(database_url)
+    try:
+        with Session(engine) as session:
+            envelope = build_v1_recommendation_envelope(
+                session, now_ms=golden["apiPayload"]["generatedAt"]
+            )
+            assert evaluate(envelope) == golden["apiPayload"]
+            monkeypatch.setattr(
+                v1_compat, "utc_now_ms", lambda: golden["apiPayload"]["generatedAt"]
+            )
+            await today_recommendation(db=session)
+            recommendation = session.scalar(
+                select(RecommendationSnapshot).where(
+                    RecommendationSnapshot.analysis_snapshot_id.is_not(None)
+                )
+            )
+            assert recommendation is not None
+            assert (
+                recommendation.structured_payload_json == golden["persistedStructuredPayloadJson"]
+            )
+            assert {
+                "analysisRuns": len(session.scalars(select(AnalysisRun)).all()),
+                "analysisSnapshots": len(session.scalars(select(AnalysisSnapshot)).all()),
+                "recommendationSnapshots": len(
+                    session.scalars(select(RecommendationSnapshot)).all()
+                ),
+            } == golden["sideEffects"]
+    finally:
+        engine.dispose()
 
 
 @pytest.mark.parametrize(
@@ -206,7 +253,7 @@ def test_migration_creates_verified_backup_before_mutation(
     manifest = json.loads(manifest_path.read_text())
     assert manifest["checksumSha256"] == backup_digest
     assert manifest["sourceRevision"] == "0002_roadmap_scope_events"
-    assert manifest["targetRevision"] == "0003_auth_security_foundation"
+    assert manifest["targetRevision"] == "0004_analysis_projection_foundation"
     assert os.stat(manifest_path).st_mode & 0o777 == 0o600
     original = sqlite3.connect(FIXTURES / "populated-0002.sqlite3")
     copied = sqlite3.connect(backup)
@@ -313,7 +360,7 @@ def test_partial_0003_is_refused_then_verified_v1_restore_can_upgrade(
     restored = sqlite3.connect(database_path)
     try:
         assert restored.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "0003_auth_security_foundation",
+            "0004_analysis_projection_foundation",
         )
         assert restored.execute("SELECT credential_generation FROM users").fetchone() == (2,)
         assert restored.execute("SELECT revoked_at IS NOT NULL FROM auth_sessions").fetchone() == (

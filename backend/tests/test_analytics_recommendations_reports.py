@@ -1,19 +1,30 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, date, datetime, timedelta
 
+import pytest
+from app.analysis.v1_compat import build_v1_recommendation_envelope
 from app.analytics import build_analytics
 from app.models import (
+    AnalysisRun,
+    AnalysisSnapshot,
     CompetencyIdentity,
+    CompetencyState,
+    CompetencyStatusEvent,
+    DisciplineProfile,
     ExitCriterionIdentity,
     GeneratedReport,
     LearningSession,
+    RecommendationSnapshot,
+    VerificationRecord,
 )
 from app.recommendations import build_recommendation, round_half_up
 from app.reports import generate_report
 from app.time_utils import datetime_to_epoch_ms
 from httpx import AsyncClient
 from sqlalchemy import select
+from sqlalchemy.exc import StatementError
 from sqlalchemy.orm import Session
 
 NOW = datetime_to_epoch_ms(datetime(2026, 9, 1, 12, tzinfo=UTC))
@@ -154,6 +165,179 @@ async def test_recommendation_is_deterministic_and_uses_activity_precedence(
     blocked = build_recommendation(db, now_ms=NOW)
     assert blocked["primary"]["activity"] == "research"
     assert blocked["primary"]["activityReasonCode"] == "ACTIVITY_RESEARCH_UNRESOLVED_BLOCKER"
+
+
+async def test_today_persists_complete_immutable_v1_analysis_envelope(
+    configured_client: tuple[AsyncClient, str, dict[str, object]], db: Session
+) -> None:
+    client, _csrf, _roadmap = configured_client
+    first = await client.get("/api/v1/recommendations/today")
+    assert first.status_code == 200, first.text
+    first_analysis = db.scalars(
+        select(AnalysisSnapshot).order_by(AnalysisSnapshot.generated_at)
+    ).first()
+    assert first_analysis is not None
+    first_bytes = {
+        "normalized": first_analysis.normalized_facts_json,
+        "lineage": first_analysis.input_lineage_json,
+        "unknown": first_analysis.unknown_markers_json,
+        "outputHash": first_analysis.output_hash,
+    }
+    facts = json.loads(first_analysis.normalized_facts_json)
+    legacy = facts["legacy_v1_recommendation_input"]
+    assert first_analysis.purpose == "v1_recommendation_compat"
+    assert first_analysis.cutoff_semantics == "exclusive"
+    assert first_analysis.cutoff_at > first_analysis.generated_at
+    assert first_analysis.completeness == "partial"
+    assert legacy["candidateDefinitions"]
+    assert "disciplineConstraints" in legacy
+    assert "sessionFacts" in legacy
+    assert {marker["code"] for marker in json.loads(first_analysis.unknown_markers_json)} >= {
+        "TARGET_PROFILE_MISSING",
+        "LEARNING_GRAPH_MISSING",
+        "CAPABILITY_POLICY_MISSING",
+    }
+    recommendation = db.scalar(
+        select(RecommendationSnapshot).where(
+            RecommendationSnapshot.analysis_snapshot_id == first_analysis.id
+        )
+    )
+    assert recommendation is not None
+
+    second = await client.get("/api/v1/recommendations/today")
+    assert second.status_code == 200
+    db.expire_all()
+    assert db.get(AnalysisSnapshot, first_analysis.id) is not None
+    unchanged = db.get(AnalysisSnapshot, first_analysis.id)
+    assert unchanged is not None
+    assert {
+        "normalized": unchanged.normalized_facts_json,
+        "lineage": unchanged.input_lineage_json,
+        "unknown": unchanged.unknown_markers_json,
+        "outputHash": unchanged.output_hash,
+    } == first_bytes
+    assert len(db.scalars(select(AnalysisRun)).all()) == 2
+    assert len(db.scalars(select(AnalysisSnapshot)).all()) == 2
+
+
+def test_v1_analysis_hashes_are_deterministic(
+    configured_client: tuple[AsyncClient, str, dict[str, object]], db: Session
+) -> None:
+    first = build_v1_recommendation_envelope(db, now_ms=NOW)
+    second = build_v1_recommendation_envelope(db, now_ms=NOW)
+    assert first == second
+    assert first.input_hash == second.input_hash
+    assert first.output_hash == second.output_hash
+
+
+async def test_setup_and_no_eligible_results_persist_analysis_only(
+    authenticated_client: tuple[AsyncClient, str], db: Session
+) -> None:
+    client, _csrf = authenticated_client
+    setup = await client.get("/api/v1/recommendations/today")
+    assert setup.status_code == 200
+    assert setup.json()["setupRequired"] is True
+    assert len(db.scalars(select(AnalysisSnapshot)).all()) == 1
+    assert db.scalars(select(RecommendationSnapshot)).all() == []
+
+
+async def test_configured_no_eligible_result_persists_analysis_only(
+    configured_client: tuple[AsyncClient, str, dict[str, object]], db: Session
+) -> None:
+    client, _csrf, _roadmap = configured_client
+    for state in db.scalars(select(CompetencyState)).all():
+        state.current_status = "verified"
+    db.commit()
+    response = await client.get("/api/v1/recommendations/today")
+    assert response.status_code == 200
+    assert response.json()["primary"] is None
+    assert len(db.scalars(select(AnalysisSnapshot)).all()) == 1
+    assert db.scalars(select(RecommendationSnapshot)).all() == []
+
+
+def test_analysis_envelope_excludes_post_cutoff_sessions_and_is_deeply_immutable(
+    configured_client: tuple[AsyncClient, str, dict[str, object]], db: Session
+) -> None:
+    identity = _identity(db, "python.basics")
+    future = LearningSession(
+        competency_identity_id=identity.id,
+        session_mode="manual",
+        activity_type="learning",
+        assistance_mode="none",
+        started_at=NOW + 10_000,
+        ended_at=NOW + 20_000,
+        accumulated_duration_ms=10_000,
+        duration_ms=10_000,
+        outcome="completed",
+    )
+    future_verification = VerificationRecord(
+        competency_identity_id=identity.id,
+        verification_source="self",
+        method="Future verification",
+        result="partial",
+        created_at=NOW + 10_000,
+    )
+    future_event = CompetencyStatusEvent(
+        competency_identity_id=identity.id,
+        from_status="not_started",
+        to_status="learning",
+        reason="Future event",
+        source="manual",
+        created_at=NOW + 10_000,
+    )
+    db.add_all([future, future_verification, future_event])
+    db.commit()
+    envelope = build_v1_recommendation_envelope(db, now_ms=NOW)
+    sessions = envelope.normalized_facts["legacy_v1_recommendation_input"]["sessionFacts"]
+    assert all(item["sessionId"] != future.id for item in sessions)
+    lineage_ids = {item["sourceId"] for item in envelope.input_lineage}
+    assert future_verification.id not in lineage_ids
+    assert future_event.id not in lineage_ids
+    with pytest.raises(TypeError):
+        envelope.normalized_facts["unexpected"] = True
+
+
+def test_persisted_analysis_history_rejects_orm_mutation(
+    configured_client: tuple[AsyncClient, str, dict[str, object]], db: Session
+) -> None:
+    from app.analysis.persistence import persist_envelope
+
+    snapshot = persist_envelope(db, build_v1_recommendation_envelope(db, now_ms=NOW))
+    db.commit()
+    snapshot.output_hash = "0" * 64
+    with pytest.raises((ValueError, StatementError)):
+        db.commit()
+    db.rollback()
+
+
+def test_snapshot_windows_use_configured_timezone_across_dst_boundary(
+    configured_client: tuple[AsyncClient, str, dict[str, object]], db: Session
+) -> None:
+    profile = db.get(DisciplineProfile, 1)
+    assert profile is not None
+    profile.timezone = "America/New_York"
+    identity = _identity(db, "python.basics")
+    started = datetime_to_epoch_ms(datetime(2026, 11, 1, 5, 30, tzinfo=UTC))
+    session = LearningSession(
+        competency_identity_id=identity.id,
+        session_mode="manual",
+        activity_type="learning",
+        assistance_mode="none",
+        started_at=started,
+        ended_at=started + 60_000,
+        accumulated_duration_ms=60_000,
+        duration_ms=60_000,
+        outcome="completed",
+    )
+    db.add(session)
+    db.commit()
+    now = datetime_to_epoch_ms(datetime(2026, 11, 1, 7, 0, tzinfo=UTC))
+    envelope = build_v1_recommendation_envelope(db, now_ms=now)
+    data = envelope.normalized_facts["legacy_v1_recommendation_input"]
+    assert envelope.timezone == "America/New_York"
+    assert data["localDate"] == "2026-11-01"
+    fact = next(item for item in data["sessionFacts"] if item["sessionId"] == session.id)
+    assert fact["localDate"] == "2026-11-01"
 
 
 def test_recommendation_rounding_is_only_the_canonical_half_up_behavior() -> None:

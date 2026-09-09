@@ -147,7 +147,7 @@ async def test_new_portable_backup_round_trips_scope_history_and_preserves_auth(
     assert restored_events[-1]["event_sequence"] == len(expected_events) + 1
     assert restored_events[-1]["phase_id"] == phase_two_id
     round_trip = await _portable_export(client, csrf)
-    assert round_trip["schemaVersion"] == 1
+    assert round_trip["schemaVersion"] == 2
     assert round_trip["payload"]["tables"]["roadmap_scope_events"] == restored_events
 
 
@@ -160,6 +160,10 @@ async def test_legacy_portable_backup_gets_only_deterministic_current_scope_base
         row for row in package["payload"]["tables"]["roadmaps"] if row["is_current"]
     )
     package["payload"]["tables"].pop("roadmap_scope_events")
+    package["payload"]["tables"].pop("analysis_runs")
+    package["payload"]["tables"].pop("analysis_snapshots")
+    package["payload"].pop("manifest")
+    package["schemaVersion"] = 1
     auth_ids = set(db.scalars(select(AuthSession.id)).all())
 
     preview, _applied = await _restore(client, csrf, package)
