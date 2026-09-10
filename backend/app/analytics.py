@@ -72,7 +72,11 @@ class SessionFact:
 def session_facts(
     db: Session, timezone_name: str, *, exclusive_cutoff_ms: int | None = None
 ) -> list[SessionFact]:
-    query = select(LearningSession).order_by(LearningSession.started_at)
+    query = (
+        select(LearningSession)
+        .where(LearningSession.tombstoned_at.is_(None))
+        .order_by(LearningSession.started_at)
+    )
     if exclusive_cutoff_ms is not None:
         query = query.where(
             LearningSession.started_at < exclusive_cutoff_ms,

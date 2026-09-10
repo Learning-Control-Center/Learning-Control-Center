@@ -9,6 +9,15 @@ from sqlalchemy import Boolean, Integer, String, Table, Text, func, select, text
 
 from app.analysis.contracts import content_hash
 from app.capability_scales import builtin_scale_tables
+from app.compatibility.v1.activity_backfill import (
+    POLICY_KEY as ACTIVITY_POLICY_KEY,
+)
+from app.compatibility.v1.activity_backfill import (
+    RUN_ID as ACTIVITY_RUN_ID,
+)
+from app.compatibility.v1.activity_backfill import (
+    activity_category_rows,
+)
 from app.compatibility.v1.profile_competency_backfill import (
     POLICY_KEY,
     RUN_ID,
@@ -19,6 +28,8 @@ from app.errors import AppError
 from app.models import (
     ActiveCompetencyDefinitionState,
     ActiveTargetProfileState,
+    Activity,
+    ActivityCategoryVersion,
     AnalysisRun,
     AnalysisSnapshot,
     ApplicationSetting,
@@ -31,6 +42,7 @@ from app.models import (
     CompetencyPrerequisite,
     CompetencyState,
     CompetencyStatusEvent,
+    ContributionRetraction,
     CriterionDefinition,
     CriterionIdentity,
     DisciplineProfile,
@@ -39,6 +51,7 @@ from app.models import (
     ExportRecord,
     GeneratedReport,
     ImportRecord,
+    LearningSession,
     LegacyCriterionAssertion,
     MigrationBackfillRun,
     MilestoneIdentity,
@@ -58,6 +71,8 @@ from app.models import (
     RoadmapVersion,
     SemanticCompetencyDefinition,
     SemanticDefinitionDimension,
+    SessionContribution,
+    SessionCorrection,
     TargetProfile,
     TargetProfileActivationEvent,
     TargetProfileVersion,
@@ -1195,7 +1210,7 @@ def _validate_v2_profile_competency(connection: Any) -> None:
             MigrationBackfillRun.result_row_count,
             MigrationBackfillRun.source_hash,
             MigrationBackfillRun.result_hash,
-        )
+        ).where(MigrationBackfillRun.id == RUN_ID)
     ).all()
     if len(runs) != 1:
         raise AppError(422, "PORTABLE_BACKFILL_RUN_INVALID", "Backfill provenance is incomplete.")
@@ -1330,6 +1345,218 @@ def _validate_v2_profile_competency(connection: Any) -> None:
         )
 
 
+def _validate_activity_sessions(connection: Any) -> None:
+    category_table = cast(Table, ActivityCategoryVersion.__table__)
+    actual_categories = [
+        dict(row._mapping) for row in connection.execute(select(*category_table.columns)).all()
+    ]
+    if sorted(actual_categories, key=lambda row: str(row["id"])) != sorted(
+        activity_category_rows(), key=lambda row: str(row["id"])
+    ):
+        raise AppError(
+            422, "PORTABLE_ACTIVITY_CATEGORY_INVALID", "Activity vocabulary is inconsistent."
+        )
+    activities = {
+        row.id: row
+        for row in connection.execute(
+            select(
+                Activity.id,
+                Activity.category_stable_key,
+                Activity.category_version,
+                Activity.context_started_at,
+                Activity.context_ended_at,
+                Activity.supersedes_activity_id,
+                Activity.provenance,
+            )
+        ).all()
+    }
+    categories = {(row["stable_key"], row["vocabulary_version"]) for row in actual_categories}
+    for activity in activities.values():
+        if (
+            (activity.category_stable_key, activity.category_version) not in categories
+            or (
+                activity.context_started_at is not None
+                and activity.context_ended_at is not None
+                and activity.context_ended_at < activity.context_started_at
+            )
+            or (
+                activity.supersedes_activity_id is not None
+                and activity.supersedes_activity_id not in activities
+            )
+        ):
+            raise AppError(422, "PORTABLE_ACTIVITY_INVALID", "An Activity is inconsistent.")
+    for activity in activities.values():
+        seen: set[str] = set()
+        current = activity
+        while current.supersedes_activity_id is not None:
+            if current.id in seen:
+                raise AppError(
+                    422, "PORTABLE_ACTIVITY_INVALID", "Activity supersession contains a cycle."
+                )
+            seen.add(current.id)
+            current = activities[current.supersedes_activity_id]
+    sessions = {
+        row.id: row
+        for row in connection.execute(
+            select(
+                LearningSession.id,
+                LearningSession.activity_id,
+                LearningSession.competency_identity_id,
+                LearningSession.tombstoned_at,
+                LearningSession.tombstone_reason,
+            )
+        ).all()
+    }
+    if any(
+        item.activity_id not in activities
+        or ((item.tombstoned_at is None) != (item.tombstone_reason is None))
+        for item in sessions.values()
+    ):
+        raise AppError(422, "PORTABLE_SESSION_ACTIVITY_INVALID", "A Session is inconsistent.")
+    contributions = {
+        row.id: row
+        for row in connection.execute(
+            select(
+                SessionContribution.id,
+                SessionContribution.session_id,
+                SessionContribution.competency_identity_id,
+                SessionContribution.criterion_identity_id,
+                SessionContribution.relevance,
+                SessionContribution.created_at,
+                SessionContribution.provenance,
+            )
+        ).all()
+    }
+    criterion_competencies = {
+        row.id: row.competency_identity_id
+        for row in connection.execute(
+            select(CriterionIdentity.id, CriterionIdentity.competency_identity_id)
+        ).all()
+    }
+    retractions = {
+        row.contribution_id: row
+        for row in connection.execute(
+            select(
+                ContributionRetraction.contribution_id,
+                ContributionRetraction.replacement_contribution_id,
+            )
+        ).all()
+    }
+    primary_by_session: dict[str, int] = defaultdict(int)
+    for contribution in contributions.values():
+        criterion_competency = (
+            criterion_competencies.get(contribution.criterion_identity_id)
+            if contribution.criterion_identity_id
+            else contribution.competency_identity_id
+        )
+        if (
+            contribution.session_id not in sessions
+            or criterion_competency != contribution.competency_identity_id
+        ):
+            raise AppError(
+                422, "PORTABLE_SESSION_CONTRIBUTION_INVALID", "A contribution is inconsistent."
+            )
+        if contribution.id not in retractions and contribution.relevance == "primary":
+            primary_by_session[contribution.session_id] += 1
+    if any(count > 1 for count in primary_by_session.values()):
+        raise AppError(
+            422,
+            "PORTABLE_SESSION_CONTRIBUTION_INVALID",
+            "A Session has multiple Primary competencies.",
+        )
+    active_primary = {
+        contribution.session_id: contribution.competency_identity_id
+        for contribution in contributions.values()
+        if contribution.id not in retractions and contribution.relevance == "primary"
+    }
+    if any(
+        session.competency_identity_id != active_primary.get(session.id)
+        for session in sessions.values()
+    ):
+        raise AppError(
+            422,
+            "PORTABLE_SESSION_CONTRIBUTION_INVALID",
+            "The legacy competency projection does not match the active Primary contribution.",
+        )
+    for contribution_id, retraction in retractions.items():
+        replacement = contributions.get(retraction.replacement_contribution_id)
+        if contribution_id not in contributions or (
+            retraction.replacement_contribution_id == contribution_id
+            or (
+                replacement is not None
+                and replacement.session_id != contributions[contribution_id].session_id
+            )
+        ):
+            raise AppError(
+                422, "PORTABLE_CONTRIBUTION_RETRACTION_INVALID", "A retraction is inconsistent."
+            )
+    for correction in connection.execute(
+        select(
+            SessionCorrection.session_id,
+            SessionCorrection.changed_fields_json,
+            SessionCorrection.before_json,
+            SessionCorrection.after_json,
+        )
+    ).all():
+        try:
+            values = [
+                json.loads(correction.changed_fields_json),
+                json.loads(correction.before_json),
+                json.loads(correction.after_json),
+            ]
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise AppError(
+                422, "PORTABLE_SESSION_CORRECTION_INVALID", "A correction is malformed."
+            ) from exc
+        if (
+            correction.session_id not in sessions
+            or not isinstance(values[0], list)
+            or not isinstance(values[1], dict)
+            or not isinstance(values[2], dict)
+        ):
+            raise AppError(
+                422, "PORTABLE_SESSION_CORRECTION_INVALID", "A correction is inconsistent."
+            )
+    backfill_activities = [
+        dict(row._mapping)
+        for row in connection.execute(select(*cast(Table, Activity.__table__).columns)).all()
+        if row._mapping["provenance"] == ACTIVITY_POLICY_KEY
+    ]
+    backfill_contributions = [
+        dict(row._mapping)
+        for row in connection.execute(
+            select(*cast(Table, SessionContribution.__table__).columns)
+        ).all()
+        if row._mapping["provenance"] == "deterministic_legacy_backfill"
+    ]
+    result_rows = sorted(
+        backfill_activities + backfill_contributions,
+        key=lambda row: (str(row["id"]), len(row)),
+    )
+    run = connection.execute(
+        select(
+            MigrationBackfillRun.policy_key,
+            MigrationBackfillRun.source_kind,
+            MigrationBackfillRun.source_row_count,
+            MigrationBackfillRun.result_row_count,
+            MigrationBackfillRun.source_hash,
+            MigrationBackfillRun.result_hash,
+        ).where(MigrationBackfillRun.id == ACTIVITY_RUN_ID)
+    ).one_or_none()
+    if (
+        run is None
+        or run.policy_key != ACTIVITY_POLICY_KEY
+        or run.source_kind != "v1_learning_sessions"
+        or run.source_row_count != len(backfill_activities)
+        or run.result_row_count != len(result_rows)
+        or len(run.source_hash) != 64
+        or run.result_hash != canonical_rows_hash(result_rows)
+    ):
+        raise AppError(
+            422, "PORTABLE_ACTIVITY_BACKFILL_INVALID", "Activity backfill lineage is inconsistent."
+        )
+
+
 def validate_domain_integrity(connection: Any) -> None:
     violations = connection.execute(text("PRAGMA foreign_key_check")).all()
     if violations:
@@ -1346,6 +1573,7 @@ def validate_domain_integrity(connection: Any) -> None:
     _validate_versioned_roadmap(connection)
     _validate_competency_history(connection)
     _validate_v2_profile_competency(connection)
+    _validate_activity_sessions(connection)
     for timezone_name in connection.execute(select(DisciplineProfile.timezone)).scalars():
         try:
             ZoneInfo(timezone_name)
@@ -1363,6 +1591,7 @@ def portable_state_presence(connection: Any, portable_models: list[Any]) -> dict
         table_name: {str(row["id"]) for row in rows}
         for table_name, rows in builtin_scale_tables().items()
     }
+    builtin_ids["activity_category_versions"] = {str(row["id"]) for row in activity_category_rows()}
     for model in portable_models:
         if model is DisciplineProfile:
             profiles = connection.execute(select(DisciplineProfile)).scalars().all()
@@ -1378,7 +1607,7 @@ def portable_state_presence(connection: Any, portable_models: list[Any]) -> dict
             count = len(ids - builtin_ids[model.__table__.name])
         elif model is MigrationBackfillRun:
             ids = set(connection.execute(select(MigrationBackfillRun.id)).scalars())
-            count = len(ids - {RUN_ID})
+            count = len(ids - {RUN_ID, ACTIVITY_RUN_ID})
         else:
             count = connection.scalar(select(func.count()).select_from(model)) or 0
         if count:

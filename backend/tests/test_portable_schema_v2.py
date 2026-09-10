@@ -8,10 +8,14 @@ import pytest
 from app.compatibility.v1.portable import (
     UnsupportedV1PortableSchema,
     read_v1_portable_package,
+    upgrade_v1_activity_session_tables,
     upgrade_v1_profile_competency_tables,
 )
+from app.models import Activity, CriterionIdentity
 from app.portability.registry import PORTABLE_V2_MANIFEST
 from httpx import AsyncClient
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 
 def test_frozen_v1_reader_accepts_v1_and_rejects_v2() -> None:
@@ -69,6 +73,51 @@ def test_v1_upgrade_uses_database_migration_tie_break_for_legacy_criteria() -> N
     assert len(first_report["legacyCriterionResultHash"]) == 64
 
 
+def test_v1_activity_upgrade_is_deterministic_and_idempotent() -> None:
+    tables = {
+        "learning_sessions": [
+            {
+                "id": "session-with-target",
+                "competency_identity_id": "competency",
+                "activity_type": "coding",
+                "started_at": 10,
+                "ended_at": 20,
+                "outcome": "completed",
+                "created_at": 30,
+            },
+            {
+                "id": "session-without-target",
+                "competency_identity_id": None,
+                "activity_type": "review",
+                "started_at": 40,
+                "ended_at": 50,
+                "outcome": "partial",
+                "created_at": 60,
+            },
+        ],
+        "migration_backfill_runs": [{"id": "unrelated"}],
+    }
+    first_report = upgrade_v1_activity_session_tables(tables)
+    first_result = copy.deepcopy(tables)
+    second_report = upgrade_v1_activity_session_tables(tables)
+
+    assert tables == first_result
+    assert second_report == first_report
+    assert len(tables["activities"]) == 2
+    assert len(tables["session_contributions"]) == 1
+    assert set(tables["session_contributions"][0]) == {
+        "id",
+        "session_id",
+        "competency_identity_id",
+        "criterion_identity_id",
+        "relevance",
+        "created_at",
+        "provenance",
+    }
+    assert len(first_report["legacySessionSourceHash"]) == 64
+    assert len(first_report["legacySessionResultHash"]) == 64
+
+
 async def test_runtime_dispatch_rejects_v2_tables_in_v1_package(
     authenticated_client: tuple[AsyncClient, str],
 ) -> None:
@@ -111,3 +160,71 @@ async def test_portable_v2_manifest_and_tampered_analysis_hash_rejection(
     )
     assert inspected.status_code == 422
     assert inspected.json()["error"]["code"] == "PORTABLE_ANALYSIS_INVALID"
+
+
+async def test_portable_restore_defers_activity_supersession_and_criterion_contribution_fks(
+    configured_client: tuple[AsyncClient, str, dict[str, object]], db: Session
+) -> None:
+    client, csrf, _roadmap = configured_client
+    criterion = db.scalar(select(CriterionIdentity))
+    assert criterion is not None
+    original = await client.post(
+        "/api/v2/activities",
+        json={"title": "Original", "category_stable_key": "practice"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    predecessor_id = original.json()["id"]
+    successor = Activity(
+        title="Corrected",
+        category_stable_key="practice",
+        category_version="v1",
+        creator_source="user",
+        provenance="user_recorded",
+        supersedes_activity_id=predecessor_id,
+    )
+    db.add(successor)
+    db.commit()
+    session = await client.post(
+        "/api/v2/sessions/manual",
+        json={
+            "activity_id": successor.id,
+            "assistance_mode": "none",
+            "started_at": "2026-09-10T10:00:00Z",
+            "duration_ms": 600_000,
+            "outcome": "completed",
+            "contributions": [
+                {
+                    "competency_identity_id": criterion.competency_identity_id,
+                    "criterion_identity_id": criterion.id,
+                    "relevance": "primary",
+                }
+            ],
+        },
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert session.status_code == 201, session.text
+    exported = await client.post(
+        "/api/v1/import-export/export",
+        json={"purpose": "portable_logical_backup", "format": "json"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    package = exported.json()["content"]
+    package["packageId"] = "activity-order-round-trip"
+    package["payload"]["tables"]["activities"].reverse()
+    preview = await client.post(
+        "/api/v1/import-export/import/inspect",
+        json={"filename": "round-trip.json", "package": package},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert preview.status_code == 200, preview.text
+    restored = await client.post(
+        "/api/v1/import-export/import/apply",
+        json={
+            "filename": "round-trip.json",
+            "package": package,
+            "confirmation_token": preview.json()["confirmationToken"],
+            "replace_existing": True,
+        },
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert restored.status_code == 200, restored.text

@@ -360,6 +360,64 @@ class SessionUpdate(StrictModel):
     notes: str | None = None
 
 
+class ActivityCreate(StrictModel):
+    title: str = Field(min_length=1, max_length=255)
+    description: str | None = None
+    category_stable_key: ActivityType
+    occurred_at: datetime | None = None
+    outcome_classification: str | None = Field(default=None, max_length=64)
+
+    @field_validator("occurred_at")
+    @classmethod
+    def activity_instant_is_aware(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("occurred_at must include a timezone offset")
+        return value
+
+
+class SessionContributionCreate(StrictModel):
+    target_type: Literal["competency", "project"] = "competency"
+    competency_identity_id: str | None = None
+    project_id: str | None = None
+    criterion_identity_id: str | None = None
+    relevance: Literal["primary", "secondary", "supporting"]
+    provenance: Literal["user_selected", "user_confirmed"] = "user_selected"
+
+    @model_validator(mode="after")
+    def contribution_target_is_explicit(self) -> SessionContributionCreate:
+        if self.target_type == "project":
+            if self.project_id is None or self.competency_identity_id is not None:
+                raise ValueError("A project contribution requires only project_id.")
+        elif self.competency_identity_id is None or self.project_id is not None:
+            raise ValueError("A competency contribution requires only competency_identity_id.")
+        return self
+
+
+class V2ManualSessionCreate(StrictModel):
+    activity_id: str
+    assistance_mode: AssistanceMode
+    started_at: datetime
+    duration_ms: int = Field(gt=0)
+    difficulty: int | None = Field(default=None, ge=1, le=5)
+    outcome: SessionOutcome
+    notes: str | None = None
+    contributions: list[SessionContributionCreate] = Field(default_factory=list)
+
+    @field_validator("started_at")
+    @classmethod
+    def exact_instant_is_aware(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("started_at must include a timezone offset")
+        return value
+
+
+class V2TimedSessionStart(StrictModel):
+    activity_id: str
+    assistance_mode: AssistanceMode
+    notes: str | None = None
+    contributions: list[SessionContributionCreate] = Field(default_factory=list)
+
+
 class ReflectionUpsert(StrictModel):
     text: str = Field(max_length=100_000)
 

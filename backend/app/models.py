@@ -6,6 +6,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
@@ -967,6 +968,49 @@ class VerificationEvidence(Base):
     created_at: Mapped[int] = mapped_column(Integer, default=utc_now_ms, nullable=False)
 
 
+class ActivityCategoryVersion(Base):
+    __tablename__ = "activity_category_versions"
+    __table_args__ = (
+        UniqueConstraint("stable_key", "vocabulary_version", name="uq_activity_category_version"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    stable_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    vocabulary_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    display_label: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class Activity(Base):
+    __tablename__ = "activities"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["category_stable_key", "category_version"],
+            [
+                "activity_category_versions.stable_key",
+                "activity_category_versions.vocabulary_version",
+            ],
+            ondelete="RESTRICT",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    category_stable_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    category_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    occurred_at: Mapped[int | None] = mapped_column(Integer)
+    context_started_at: Mapped[int | None] = mapped_column(Integer)
+    context_ended_at: Mapped[int | None] = mapped_column(Integer)
+    creator_source: Mapped[str] = mapped_column(String(64), nullable=False)
+    provenance: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[int] = mapped_column(Integer, default=utc_now_ms, nullable=False)
+    supersedes_activity_id: Mapped[str | None] = mapped_column(
+        ForeignKey("activities.id", ondelete="RESTRICT")
+    )
+    outcome_classification: Mapped[str | None] = mapped_column(String(64))
+
+
 class LearningSession(Base, TimestampMixin):
     __tablename__ = "learning_sessions"
     __table_args__ = (
@@ -1023,6 +1067,9 @@ class LearningSession(Base, TimestampMixin):
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    activity_id: Mapped[str] = mapped_column(
+        ForeignKey("activities.id", ondelete="RESTRICT"), nullable=False
+    )
     competency_identity_id: Mapped[str | None] = mapped_column(
         ForeignKey("competency_identities.id")
     )
@@ -1039,6 +1086,78 @@ class LearningSession(Base, TimestampMixin):
     difficulty: Mapped[int | None] = mapped_column(Integer)
     outcome: Mapped[str | None] = mapped_column(String(32))
     notes: Mapped[str | None] = mapped_column(Text)
+    tombstoned_at: Mapped[int | None] = mapped_column(Integer)
+    tombstone_reason: Mapped[str | None] = mapped_column(Text)
+
+
+class SessionContribution(Base):
+    __tablename__ = "session_contributions"
+    __table_args__ = (
+        CheckConstraint(
+            "relevance IN ('primary','secondary','supporting')",
+            name="ck_session_contribution_relevance",
+        ),
+        CheckConstraint(
+            "provenance IN ('user_selected','user_confirmed','deterministic_legacy_backfill',"
+            "'imported_asserted')",
+            name="ck_session_contribution_provenance",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_sessions.id", ondelete="RESTRICT"), nullable=False
+    )
+    competency_identity_id: Mapped[str] = mapped_column(
+        ForeignKey("competency_identities.id", ondelete="RESTRICT"), nullable=False
+    )
+    criterion_identity_id: Mapped[str | None] = mapped_column(
+        ForeignKey("criterion_identities.id", ondelete="RESTRICT")
+    )
+    relevance: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_at: Mapped[int] = mapped_column(Integer, default=utc_now_ms, nullable=False)
+    provenance: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class ContributionRetraction(Base):
+    __tablename__ = "contribution_retractions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    contribution_id: Mapped[str] = mapped_column(
+        ForeignKey("session_contributions.id", ondelete="RESTRICT"), nullable=False, unique=True
+    )
+    replacement_contribution_id: Mapped[str | None] = mapped_column(
+        ForeignKey("session_contributions.id", ondelete="RESTRICT")
+    )
+    retracted_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class SessionCorrection(Base):
+    __tablename__ = "session_corrections"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_sessions.id", ondelete="RESTRICT"), nullable=False
+    )
+    corrected_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    changed_fields_json: Mapped[str] = mapped_column(Text, nullable=False)
+    before_json: Mapped[str] = mapped_column(Text, nullable=False)
+    after_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+for _immutable_activity_model in (
+    ActivityCategoryVersion,
+    Activity,
+    SessionContribution,
+    ContributionRetraction,
+    SessionCorrection,
+):
+    event.listen(_immutable_activity_model, "before_update", _reject_v2_semantic_history_mutation)
+    event.listen(_immutable_activity_model, "before_delete", _reject_v2_semantic_history_mutation)
 
 
 class DailyReflection(Base, TimestampMixin):

@@ -17,6 +17,7 @@ from app import database, ops
 from app import models as _models  # noqa: F401
 from app.analysis import v1_compat
 from app.analysis.v1_compat import build_v1_recommendation_envelope
+from app.compatibility.v1.activity_backfill import build_activity_session_backfill
 from app.config import get_settings
 from app.database import Base, create_database_engine
 from app.import_export import _validate_portable_payload
@@ -124,6 +125,7 @@ def test_frozen_v1_api_and_history_golden(tmp_path: Path) -> None:
     golden = json.loads((FIXTURES / "expected-api-history.json").read_text())
     database_path = tmp_path / "golden.sqlite3"
     shutil.copyfile(FIXTURES / "populated-0002.sqlite3", database_path)
+    database.run_migrations(f"sqlite:///{database_path}")
     engine = create_database_engine(f"sqlite:///{database_path}")
     try:
         with Session(engine) as session:
@@ -278,7 +280,7 @@ def test_migration_creates_verified_backup_before_mutation(
     manifest = json.loads(manifest_path.read_text())
     assert manifest["checksumSha256"] == backup_digest
     assert manifest["sourceRevision"] == "0002_roadmap_scope_events"
-    assert manifest["targetRevision"] == "0005_profile_competency_core"
+    assert manifest["targetRevision"] == "0008_activity_session_constraint"
     assert os.stat(manifest_path).st_mode & 0o777 == 0o600
     original = sqlite3.connect(FIXTURES / "populated-0002.sqlite3")
     copied = sqlite3.connect(backup)
@@ -385,7 +387,7 @@ def test_partial_0003_is_refused_then_verified_v1_restore_can_upgrade(
     restored = sqlite3.connect(database_path)
     try:
         assert restored.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "0005_profile_competency_core",
+            "0008_activity_session_constraint",
         )
         assert restored.execute("SELECT credential_generation FROM users").fetchone() == (2,)
         assert restored.execute("SELECT revoked_at IS NOT NULL FROM auth_sessions").fetchone() == (
@@ -420,6 +422,46 @@ def test_partial_0005_is_refused(tmp_path: Path, partial_sql: str) -> None:
         database.run_migrations(f"sqlite:///{database_path}")
 
 
+@pytest.mark.parametrize(
+    ("revision", "partial_sql"),
+    [
+        ("0005_profile_competency_core", "CREATE TABLE activities (id TEXT PRIMARY KEY)"),
+        (
+            "0006_activity_session_schema",
+            "INSERT INTO migration_backfill_runs "
+            "(id,policy_key,source_kind,source_row_count,result_row_count,source_hash,"
+            "result_hash,recorded_at) VALUES "
+            "('partial-activity','policy','v1_learning_sessions',0,0,'source','result',0)",
+        ),
+        (
+            "0006_activity_session_schema",
+            "INSERT INTO activity_category_versions "
+            "(id,stable_key,vocabulary_version,display_label,created_at) VALUES "
+            "('partial-category','partial','v1','Partial',0)",
+        ),
+        (
+            "0007_activity_session_backfill",
+            "CREATE TABLE _alembic_tmp_learning_sessions (id TEXT PRIMARY KEY)",
+        ),
+        ("0007_activity_session_backfill", "DROP TABLE session_corrections"),
+    ],
+)
+def test_partial_activity_session_migration_is_refused(
+    tmp_path: Path, revision: str, partial_sql: str
+) -> None:
+    database_path = tmp_path / f"partial-{revision}.sqlite3"
+    config = _config(database_path)
+    command.upgrade(config, revision)
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.execute(partial_sql)
+        connection.commit()
+    finally:
+        connection.close()
+    with pytest.raises(RuntimeError, match="ambiguously partial Activity/Session migration"):
+        database.run_migrations(f"sqlite:///{database_path}")
+
+
 def test_0003_downgrade_and_reupgrade_preserve_v1_rows(tmp_path: Path) -> None:
     database_path = tmp_path / "round-trip.sqlite3"
     shutil.copyfile(FIXTURES / "populated-0002.sqlite3", database_path)
@@ -441,3 +483,87 @@ def test_0003_downgrade_and_reupgrade_preserve_v1_rows(tmp_path: Path) -> None:
         downgraded.close()
     command.upgrade(config, "head")
     command.check(config)
+
+
+def test_activity_session_migration_is_staged_and_reconciled(tmp_path: Path) -> None:
+    database_path = tmp_path / "activity-staged.sqlite3"
+    shutil.copyfile(FIXTURES / "populated-0002.sqlite3", database_path)
+    config = _config(database_path)
+    command.upgrade(config, "0006_activity_session_schema")
+    connection = sqlite3.connect(database_path)
+    try:
+        columns = {
+            row[1]: row for row in connection.execute("PRAGMA table_info(learning_sessions)")
+        }
+        assert columns["activity_id"][3] == 0
+        assert connection.execute("SELECT COUNT(*) FROM activities").fetchone() == (0,)
+    finally:
+        connection.close()
+    command.upgrade(config, "0007_activity_session_backfill")
+    connection = sqlite3.connect(database_path)
+    try:
+        session_columns = [
+            row[1] for row in connection.execute("PRAGMA table_info(learning_sessions)")
+        ]
+        legacy_columns = [
+            column
+            for column in session_columns
+            if column not in {"activity_id", "tombstoned_at", "tombstone_reason"}
+        ]
+        selected = ",".join(f'"{column}"' for column in legacy_columns)
+        legacy_rows = [
+            dict(zip(legacy_columns, row, strict=True))
+            for row in connection.execute(f"SELECT {selected} FROM learning_sessions")
+        ]
+        expected = build_activity_session_backfill(legacy_rows)
+        source_count = connection.execute("SELECT COUNT(*) FROM learning_sessions").fetchone()[0]
+        assigned_count = connection.execute(
+            "SELECT COUNT(*) FROM learning_sessions WHERE activity_id IS NOT NULL"
+        ).fetchone()[0]
+        contribution_count = connection.execute(
+            "SELECT COUNT(*) FROM learning_sessions WHERE competency_identity_id IS NOT NULL"
+        ).fetchone()[0]
+        assert assigned_count == source_count
+        assert connection.execute("SELECT COUNT(*) FROM activities").fetchone() == (source_count,)
+        assert connection.execute("SELECT COUNT(*) FROM session_contributions").fetchone() == (
+            contribution_count,
+        )
+        run = connection.execute(
+            "SELECT source_row_count,result_row_count,source_hash,result_hash "
+            "FROM migration_backfill_runs WHERE source_kind='v1_learning_sessions'"
+        ).fetchone()
+        assert run == (
+            source_count,
+            source_count + contribution_count,
+            expected.source_hash,
+            expected.result_hash,
+        )
+        assert (
+            dict(connection.execute("SELECT id,activity_id FROM learning_sessions"))
+            == expected.session_activity_ids
+        )
+        assert {row[0] for row in connection.execute("SELECT id FROM session_contributions")} == {
+            row["id"] for row in expected.contributions
+        }
+    finally:
+        connection.close()
+    command.upgrade(config, "0008_activity_session_constraint")
+    connection = sqlite3.connect(database_path)
+    try:
+        columns = {
+            row[1]: row for row in connection.execute("PRAGMA table_info(learning_sessions)")
+        }
+        assert columns["activity_id"][3] == 1
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        connection.close()
+    command.downgrade(config, "0007_activity_session_backfill")
+    command.upgrade(config, "0008_activity_session_constraint")
+    connection = sqlite3.connect(database_path)
+    try:
+        assert dict(connection.execute("SELECT id,activity_id FROM learning_sessions")) == (
+            expected.session_activity_ids
+        )
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        connection.close()

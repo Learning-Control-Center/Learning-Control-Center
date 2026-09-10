@@ -52,7 +52,8 @@ def transition_status(
 
 def apply_session_promotion(db: Session, learning_session: LearningSession) -> None:
     if (
-        learning_session.competency_identity_id is None
+        learning_session.tombstoned_at is not None
+        or learning_session.competency_identity_id is None
         or learning_session.duration_ms is None
         or learning_session.duration_ms <= 0
         or learning_session.outcome not in SUCCESSFUL_OUTCOMES

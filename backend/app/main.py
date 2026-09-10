@@ -28,6 +28,7 @@ from app.roadmap import router as roadmap_router
 from app.sessions import router as session_router
 from app.settings_api import get_or_create_profile
 from app.settings_api import router as settings_router
+from app.v2_activities import router as v2_activity_router
 from app.v2_profiles import router as v2_profile_router
 from app.verification import router as verification_router
 
@@ -144,3 +145,4 @@ for api_router in (
     app.include_router(api_router, prefix="/api/v1")
 
 app.include_router(v2_profile_router, prefix="/api/v2")
+app.include_router(v2_activity_router, prefix="/api/v2")

@@ -179,6 +179,53 @@ def _assert_known_migration_source(
         }
         & competency_identity_columns
     )
+    activity_markers_present = bool(
+        any(name.startswith("_alembic_tmp_") for name in tables)
+        or {
+            "activity_category_versions",
+            "activities",
+            "session_contributions",
+            "contribution_retractions",
+            "session_corrections",
+        }
+        & tables
+    )
+    activity_id_columns = {
+        row[1]: row for row in connection.execute("PRAGMA table_info(learning_sessions)")
+    }
+    activity_tables = {
+        "activity_category_versions",
+        "activities",
+        "session_contributions",
+        "contribution_retractions",
+        "session_corrections",
+    }
+    activity_backfill_present = bool(
+        any(
+            connection.execute(f'SELECT 1 FROM "{table}" LIMIT 1').fetchone()
+            for table in activity_tables & tables
+        )
+        or (
+            "activities" in tables
+            and (
+                connection.execute("SELECT 1 FROM activities LIMIT 1").fetchone()
+                or (
+                    "activity_id" in activity_id_columns
+                    and connection.execute(
+                        "SELECT 1 FROM learning_sessions WHERE activity_id IS NOT NULL LIMIT 1"
+                    ).fetchone()
+                )
+                or (
+                    "migration_backfill_runs" in tables
+                    and connection.execute(
+                        "SELECT 1 FROM migration_backfill_runs "
+                        "WHERE source_kind='v1_learning_sessions' LIMIT 1"
+                    ).fetchone()
+                )
+            )
+        )
+    )
+    missing_activity_history_table = not activity_tables <= tables
     if revision in {"0001_initial", "0002_roadmap_scope_events"} and security_markers_present:
         raise RuntimeError(
             "Database has an ambiguously partial authentication migration; restore its verified "
@@ -201,6 +248,25 @@ def _assert_known_migration_source(
     ):
         raise RuntimeError(
             "Database has an ambiguously partial profile/competency migration; restore its "
+            "verified pre-migration backup before retrying."
+        )
+    if (
+        (revision == "0005_profile_competency_core" and activity_markers_present)
+        or (revision == "0006_activity_session_schema" and activity_backfill_present)
+        or (
+            revision == "0007_activity_session_backfill"
+            and (
+                any(name.startswith("_alembic_tmp_") for name in tables)
+                or missing_activity_history_table
+                or (
+                    "activity_id" in activity_id_columns
+                    and bool(activity_id_columns["activity_id"][3])
+                )
+            )
+        )
+    ):
+        raise RuntimeError(
+            "Database has an ambiguously partial Activity/Session migration; restore its "
             "verified pre-migration backup before retrying."
         )
 

@@ -31,6 +31,11 @@ PORTABLE_V2_FOUNDATION_TABLES = frozenset(
         "competency_definition_activation_events",
         "legacy_criterion_assertions",
         "migration_backfill_runs",
+        "activity_category_versions",
+        "activities",
+        "session_contributions",
+        "contribution_retractions",
+        "session_corrections",
     }
 )
 PORTABLE_V1_FORBIDDEN_TABLES = frozenset(
@@ -43,6 +48,8 @@ PORTABLE_V2_MANIFEST = {
         "semantic_competency_definitions",
         "capability_scales",
         "legacy_criterion_assertions",
+        "activities",
+        "session_contributions",
     ],
     "includedImmutableHistory": [
         "analysis_runs",
@@ -50,6 +57,8 @@ PORTABLE_V2_MANIFEST = {
         "target_profile_activation_events",
         "competency_definition_activation_events",
         "migration_backfill_runs",
+        "contribution_retractions",
+        "session_corrections",
     ],
     "omittedRebuildableState": ["projection_invalidations"],
     "restoreActions": ["clear_projection_invalidations"],

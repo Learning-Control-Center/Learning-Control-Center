@@ -23,6 +23,7 @@ from app.api_serialization import serialize_api_instants
 from app.auth import AuthContext, get_auth_context, require_csrf
 from app.compatibility.v1.portable import (
     read_v1_portable_package,
+    upgrade_v1_activity_session_tables,
     upgrade_v1_profile_competency_tables,
 )
 from app.config import Settings, get_settings_dependency
@@ -38,6 +39,8 @@ from app.import_diff import build_portable_replacement_diff, build_roadmap_diff
 from app.models import (
     ActiveCompetencyDefinitionState,
     ActiveTargetProfileState,
+    Activity,
+    ActivityCategoryVersion,
     AnalysisRun,
     AnalysisSnapshot,
     ApplicationSetting,
@@ -52,6 +55,7 @@ from app.models import (
     CompetencyState,
     CompetencyStatusEvent,
     CompetencyUnderstandingItem,
+    ContributionRetraction,
     CriterionDefinition,
     CriterionIdentity,
     DailyReflection,
@@ -83,6 +87,8 @@ from app.models import (
     RoadmapVersion,
     SemanticCompetencyDefinition,
     SemanticDefinitionDimension,
+    SessionContribution,
+    SessionCorrection,
     TargetProfile,
     TargetProfileActivationEvent,
     TargetProfileVersion,
@@ -135,11 +141,6 @@ PORTABLE_MODELS = [
     CompetencyAbilityItem,
     ExitCriterionIdentity,
     ExitCriterionDefinition,
-    CompetencyState,
-    VerificationRecord,
-    VerificationEvidence,
-    CompetencyStatusEvent,
-    LearningSession,
     TargetProfile,
     TargetProfileVersion,
     ProfileDomain,
@@ -161,6 +162,16 @@ PORTABLE_MODELS = [
     ActiveCompetencyDefinitionState,
     CompetencyDefinitionActivationEvent,
     LegacyCriterionAssertion,
+    ActivityCategoryVersion,
+    Activity,
+    LearningSession,
+    SessionContribution,
+    ContributionRetraction,
+    SessionCorrection,
+    CompetencyState,
+    VerificationRecord,
+    VerificationEvidence,
+    CompetencyStatusEvent,
     MigrationBackfillRun,
     DailyReflection,
     GeneratedReport,
@@ -522,6 +533,7 @@ def create_operational_backup(
 def _insert_portable_tables(connection: Any, tables: dict[str, list[dict[str, Any]]]) -> None:
     roadmap_pointers: list[tuple[str, str | None, str | None, bool]] = []
     parent_pointers: list[tuple[str, str | None]] = []
+    activity_supersession_pointers: list[tuple[str, str | None]] = []
     for model in PORTABLE_MODELS:
         table_name = _table(model).name
         rows = [dict(row) for row in tables.get(table_name, [])]
@@ -542,6 +554,12 @@ def _insert_portable_tables(connection: Any, tables: dict[str, list[dict[str, An
             for row in rows:
                 parent_pointers.append((row["id"], row.get("parent_definition_id")))
                 row["parent_definition_id"] = None
+        if model is Activity:
+            for row in rows:
+                activity_supersession_pointers.append(
+                    (row["id"], row.get("supersedes_activity_id"))
+                )
+                row["supersedes_activity_id"] = None
         if rows:
             connection.execute(insert(_table(model)), rows)
     for definition_id, parent_id in parent_pointers:
@@ -551,6 +569,14 @@ def _insert_portable_tables(connection: Any, tables: dict[str, list[dict[str, An
                 .update()
                 .where(CompetencyDefinition.id == definition_id)
                 .values(parent_definition_id=parent_id)
+            )
+    for activity_id, supersedes_id in activity_supersession_pointers:
+        if supersedes_id:
+            connection.execute(
+                _table(Activity)
+                .update()
+                .where(Activity.id == activity_id)
+                .values(supersedes_activity_id=supersedes_id)
             )
     for roadmap_id, version_id, phase_id, is_current in roadmap_pointers:
         connection.execute(
@@ -564,6 +590,7 @@ def _insert_portable_tables(connection: Any, tables: dict[str, list[dict[str, An
 def _clear_migration_seeded_portable_state(connection: Any) -> None:
     """Remove built-ins seeded by migrations before logical backup insertion."""
     connection.execute(_table(MigrationBackfillRun).delete())
+    connection.execute(_table(ActivityCategoryVersion).delete())
     connection.execute(_table(CapabilityScaleLevel).delete())
     connection.execute(_table(CapabilityScaleDimension).delete())
     connection.execute(_table(CapabilityScaleVersion).delete())
@@ -648,6 +675,7 @@ def _normalize_portable_tables(
         tables["roadmap_scope_events"] = _legacy_scope_baseline(tables, package_id)
     if schema_version == 1:
         upgrade_v1_profile_competency_tables(tables)
+        upgrade_v1_activity_session_tables(tables)
         for table_name in {"analysis_runs", "analysis_snapshots"}:
             tables[table_name] = []
         for row in tables.get("recommendation_snapshots", []):
@@ -690,6 +718,31 @@ def _validate_portable_payload(
                 validate_domain_integrity(connection)
         finally:
             validation_engine.dispose()
+    backfill_runs = {row["source_kind"]: row for row in tables["migration_backfill_runs"]}
+    criterion_backfill = backfill_runs.get("v1_exit_criteria")
+    activity_backfill = backfill_runs.get("v1_learning_sessions")
+    compatibility_conversions: dict[str, Any] = {}
+    if schema_version == 1:
+        if criterion_backfill is None or activity_backfill is None:
+            raise AppError(
+                422,
+                "PORTABLE_DATA_INVALID",
+                "The V1 compatibility conversion did not produce complete audit lineage.",
+            )
+        compatibility_conversions = {
+            "competencyIdentitiesWithLegacyCreationUnknown": len(tables["competency_identities"]),
+            "legacyCriterionAssertionsCreated": len(tables["legacy_criterion_assertions"]),
+            "legacyCriterionSourceRowCount": criterion_backfill["source_row_count"],
+            "legacyCriterionSourceHash": criterion_backfill["source_hash"],
+            "legacyCriterionResultHash": criterion_backfill["result_hash"],
+            "legacyActivitiesCreated": len(tables["activities"]),
+            "legacySessionContributionsCreated": len(tables["session_contributions"]),
+            "legacySessionSourceRowCount": activity_backfill["source_row_count"],
+            "legacySessionSourceHash": activity_backfill["source_hash"],
+            "legacySessionResultHash": activity_backfill["result_hash"],
+            "nativeSemanticDefinitionsInferred": 0,
+            "targetProfilesInferred": 0,
+        }
     return tables, {
         "tableCounts": {name: len(rows) for name, rows in sorted(tables.items())},
         "portableCompatibility": (
@@ -698,23 +751,7 @@ def _validate_portable_payload(
         "scopeHistoryBaselineAdded": bool(
             legacy_without_scope_history and tables["roadmap_scope_events"]
         ),
-        "compatibilityConversions": (
-            {
-                "competencyIdentitiesWithLegacyCreationUnknown": len(
-                    tables["competency_identities"]
-                ),
-                "legacyCriterionAssertionsCreated": len(tables["legacy_criterion_assertions"]),
-                "legacyCriterionSourceRowCount": tables["migration_backfill_runs"][0][
-                    "source_row_count"
-                ],
-                "legacyCriterionSourceHash": tables["migration_backfill_runs"][0]["source_hash"],
-                "legacyCriterionResultHash": tables["migration_backfill_runs"][0]["result_hash"],
-                "nativeSemanticDefinitionsInferred": 0,
-                "targetProfilesInferred": 0,
-            }
-            if schema_version == 1
-            else {}
-        ),
+        "compatibilityConversions": compatibility_conversions,
     }
 
 
@@ -904,6 +941,7 @@ def _delete_portable_state(db: Session) -> None:
         roadmap.is_current = False
     db.flush()
     db.execute(_table(ProjectionInvalidation).delete())
+    db.execute(_table(Activity).update().values(supersedes_activity_id=None))
     for model in reversed(PORTABLE_MODELS):
         db.execute(_table(model).delete())
     db.flush()

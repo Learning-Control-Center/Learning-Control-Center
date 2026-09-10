@@ -3,6 +3,16 @@ from __future__ import annotations
 from typing import Any
 
 from app.capability_scales import BUILTIN_CREATED_AT, builtin_scale_tables
+from app.compatibility.v1.activity_backfill import (
+    POLICY_KEY as ACTIVITY_POLICY_KEY,
+)
+from app.compatibility.v1.activity_backfill import (
+    RUN_ID as ACTIVITY_RUN_ID,
+)
+from app.compatibility.v1.activity_backfill import (
+    activity_category_rows,
+    build_activity_session_backfill,
+)
 from app.compatibility.v1.profile_competency_backfill import (
     POLICY_KEY,
     RUN_ID,
@@ -12,6 +22,42 @@ from app.compatibility.v1.profile_competency_backfill import (
 
 class UnsupportedV1PortableSchema(ValueError):
     pass
+
+
+def upgrade_v1_activity_session_tables(tables: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    try:
+        backfill = build_activity_session_backfill(tables.get("learning_sessions", []))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise UnsupportedV1PortableSchema(str(exc)) from exc
+    tables["activity_category_versions"] = activity_category_rows()
+    tables["activities"] = backfill.activities
+    tables["session_contributions"] = backfill.contributions
+    tables["contribution_retractions"] = []
+    tables["session_corrections"] = []
+    for session in tables.get("learning_sessions", []):
+        session["activity_id"] = backfill.session_activity_ids[str(session["id"])]
+        session["tombstoned_at"] = None
+        session["tombstone_reason"] = None
+    runs = tables.setdefault("migration_backfill_runs", [])
+    runs[:] = [row for row in runs if row.get("id") != ACTIVITY_RUN_ID]
+    runs.append(
+        {
+            "id": ACTIVITY_RUN_ID,
+            "policy_key": ACTIVITY_POLICY_KEY,
+            "source_kind": "v1_learning_sessions",
+            "source_row_count": len(tables.get("learning_sessions", [])),
+            "result_row_count": len(backfill.activities) + len(backfill.contributions),
+            "source_hash": backfill.source_hash,
+            "result_hash": backfill.result_hash,
+            "recorded_at": BUILTIN_CREATED_AT,
+        }
+    )
+    return {
+        "legacyActivitiesCreated": len(backfill.activities),
+        "legacySessionContributionsCreated": len(backfill.contributions),
+        "legacySessionSourceHash": backfill.source_hash,
+        "legacySessionResultHash": backfill.result_hash,
+    }
 
 
 def read_v1_portable_package(package: dict[str, Any]) -> dict[str, Any]:

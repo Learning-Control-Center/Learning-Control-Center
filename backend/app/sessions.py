@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any
 
@@ -12,11 +13,92 @@ from app.auth import AuthContext, get_auth_context, require_csrf
 from app.database import get_db
 from app.domain import active_timed_session, apply_session_promotion
 from app.errors import AppError
-from app.models import LearningSession
+from app.models import (
+    Activity,
+    ContributionRetraction,
+    LearningSession,
+    ProjectionInvalidation,
+    SessionContribution,
+    SessionCorrection,
+    new_id,
+)
 from app.schemas import ManualSessionCreate, SessionUpdate, TimedSessionComplete, TimedSessionStart
 from app.time_utils import datetime_to_epoch_ms, epoch_ms_to_rfc3339, utc_now_ms
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
+
+
+def _new_activity(
+    db: Session,
+    *,
+    activity_type: str,
+    started_at: int,
+    ended_at: int | None,
+    notes: str | None,
+    outcome: str | None,
+    supersedes_activity_id: str | None = None,
+) -> Activity:
+    activity = Activity(
+        title=f"{activity_type.replace('_', ' ').title()} session",
+        description=notes,
+        category_stable_key=activity_type,
+        category_version="v1",
+        occurred_at=started_at,
+        context_started_at=started_at,
+        context_ended_at=ended_at,
+        creator_source="user",
+        provenance="v1_compatibility",
+        supersedes_activity_id=supersedes_activity_id,
+        outcome_classification=outcome,
+    )
+    db.add(activity)
+    db.flush()
+    return activity
+
+
+def _add_primary_contribution(
+    db: Session, item: LearningSession, competency_identity_id: str | None
+) -> SessionContribution | None:
+    if competency_identity_id is None:
+        return None
+    contribution = SessionContribution(
+        session_id=item.id,
+        competency_identity_id=competency_identity_id,
+        relevance="primary",
+        provenance="user_selected",
+    )
+    db.add(contribution)
+    db.flush()
+    return contribution
+
+
+def _invalidate_session(db: Session, item: LearningSession, source_fact_id: str) -> None:
+    db.add(
+        ProjectionInvalidation(
+            projection_kind="analysis",
+            subject_type="learning_session",
+            subject_id=item.id,
+            source_fact_id=source_fact_id,
+            target_policy_version="analysis-policy/v1",
+            status="pending",
+            attempt_count=0,
+            requested_at=utc_now_ms(),
+        )
+    )
+
+
+def _supersede_activity_from_session(db: Session, item: LearningSession) -> Activity:
+    replacement = _new_activity(
+        db,
+        activity_type=item.activity_type,
+        started_at=item.started_at,
+        ended_at=item.ended_at,
+        notes=item.notes,
+        outcome=item.outcome,
+        supersedes_activity_id=item.activity_id,
+    )
+    item.activity_id = replacement.id
+    return replacement
 
 
 def serialize_session(item: LearningSession, now_ms: int | None = None) -> dict[str, Any]:
@@ -52,7 +134,7 @@ def serialize_session(item: LearningSession, now_ms: int | None = None) -> dict[
 
 def _get_timed(db: Session, session_id: str) -> LearningSession:
     item = db.get(LearningSession, session_id)
-    if item is None or item.session_mode != "timed":
+    if item is None or item.session_mode != "timed" or item.tombstoned_at is not None:
         raise AppError(404, "TIMED_SESSION_NOT_FOUND", "The timed session does not exist.")
     return item
 
@@ -65,7 +147,16 @@ async def create_manual_session(
 ) -> dict[str, Any]:
     started_at = datetime_to_epoch_ms(payload.started_at)
     ended_at = started_at + payload.duration_ms
+    activity = _new_activity(
+        db,
+        activity_type=payload.activity_type,
+        started_at=started_at,
+        ended_at=ended_at,
+        notes=payload.notes,
+        outcome=payload.outcome,
+    )
     item = LearningSession(
+        activity_id=activity.id,
         competency_identity_id=payload.competency_identity_id,
         track_id=payload.track_id,
         session_mode="manual",
@@ -82,6 +173,8 @@ async def create_manual_session(
     )
     db.add(item)
     db.flush()
+    _add_primary_contribution(db, item, payload.competency_identity_id)
+    _invalidate_session(db, item, activity.id)
     apply_session_promotion(db, item)
     db.commit()
     return serialize_session(item)
@@ -98,7 +191,16 @@ async def start_timed_session(
             409, "ACTIVE_SESSION_EXISTS", "Complete or cancel the active timed session first."
         )
     now = utc_now_ms()
+    activity = _new_activity(
+        db,
+        activity_type=payload.activity_type,
+        started_at=now,
+        ended_at=None,
+        notes=payload.notes,
+        outcome=None,
+    )
     item = LearningSession(
+        activity_id=activity.id,
         competency_identity_id=payload.competency_identity_id,
         track_id=payload.track_id,
         session_mode="timed",
@@ -111,6 +213,9 @@ async def start_timed_session(
         notes=payload.notes,
     )
     db.add(item)
+    db.flush()
+    _add_primary_contribution(db, item, payload.competency_identity_id)
+    _invalidate_session(db, item, activity.id)
     try:
         db.commit()
     except IntegrityError as exc:
@@ -197,6 +302,8 @@ async def complete_timed_session(
 ) -> dict[str, Any]:
     item = _get_timed(db, session_id)
     now = _finalize_timed(item, cancel=False, payload=payload)
+    replacement = _supersede_activity_from_session(db, item)
+    _invalidate_session(db, item, replacement.id)
     apply_session_promotion(db, item)
     db.commit()
     return serialize_session(item, now)
@@ -210,6 +317,8 @@ async def cancel_timed_session(
 ) -> dict[str, Any]:
     item = _get_timed(db, session_id)
     now = _finalize_timed(item, cancel=True, payload=None)
+    replacement = _supersede_activity_from_session(db, item)
+    _invalidate_session(db, item, replacement.id)
     db.commit()
     return serialize_session(item, now)
 
@@ -227,7 +336,11 @@ async def list_sessions(
     _auth: AuthContext = Depends(get_auth_context),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    query = select(LearningSession).order_by(LearningSession.started_at.desc())
+    query = (
+        select(LearningSession)
+        .where(LearningSession.tombstoned_at.is_(None))
+        .order_by(LearningSession.started_at.desc())
+    )
     filters = {
         LearningSession.competency_identity_id: competency_identity_id,
         LearningSession.track_id: track_id,
@@ -257,22 +370,95 @@ async def update_session(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     item = db.get(LearningSession, session_id)
-    if item is None:
+    if item is None or item.tombstoned_at is not None:
         raise AppError(404, "SESSION_NOT_FOUND", "The session does not exist.")
     if item.timed_state in {"running", "paused"}:
         raise AppError(
             409, "ACTIVE_SESSION_EDIT_FORBIDDEN", "An active timed session cannot be edited."
         )
-    changes = payload.model_dump(exclude_unset=True)
+    changes = {
+        key: value
+        for key, value in payload.model_dump(exclude_unset=True).items()
+        if value != getattr(item, key)
+    }
+    if not changes:
+        return serialize_session(item)
     if item.outcome == "cancelled" and "outcome" in changes:
         raise AppError(
             422, "CANCELLED_SESSION_IMMUTABLE", "A cancelled session cannot become learning work."
         )
+    now = utc_now_ms()
+    old_activity_id = item.activity_id
+    activity_owned_fields = {"activity_type", "notes", "outcome", "duration_ms"}
+    activity_changes = any(
+        key in changes and changes[key] != getattr(item, key) for key in activity_owned_fields
+    )
+    audit_fields = set(changes)
+    if activity_changes:
+        audit_fields.add("activity_id")
+    if "duration_ms" in changes:
+        audit_fields.update({"accumulated_duration_ms", "ended_at"})
+    before = {key: getattr(item, key) for key in audit_fields}
+    if activity_changes:
+        ended_at = item.ended_at
+        if "duration_ms" in changes:
+            ended_at = item.started_at + changes["duration_ms"]
+        activity = _new_activity(
+            db,
+            activity_type=changes.get("activity_type", item.activity_type),
+            started_at=item.started_at,
+            ended_at=ended_at,
+            notes=changes.get("notes", item.notes),
+            outcome=changes.get("outcome", item.outcome),
+            supersedes_activity_id=old_activity_id,
+        )
+        item.activity_id = activity.id
+    old_competency_id = item.competency_identity_id
     for key, value in changes.items():
         setattr(item, key, value)
     if "duration_ms" in changes:
         item.accumulated_duration_ms = changes["duration_ms"]
         item.ended_at = item.started_at + changes["duration_ms"]
+    if (
+        "competency_identity_id" in changes
+        and changes["competency_identity_id"] != old_competency_id
+    ):
+        active_contributions = db.scalars(
+            select(SessionContribution)
+            .outerjoin(
+                ContributionRetraction,
+                ContributionRetraction.contribution_id == SessionContribution.id,
+            )
+            .where(
+                SessionContribution.session_id == item.id,
+                SessionContribution.relevance == "primary",
+                ContributionRetraction.id.is_(None),
+            )
+        ).all()
+        replacement = _add_primary_contribution(db, item, changes["competency_identity_id"])
+        for contribution in active_contributions:
+            db.add(
+                ContributionRetraction(
+                    contribution_id=contribution.id,
+                    replacement_contribution_id=replacement.id if replacement else None,
+                    retracted_at=now,
+                    source="v1_compatibility",
+                    reason="Session competency attribution was corrected.",
+                )
+            )
+    after = {key: getattr(item, key) for key in audit_fields}
+    correction = SessionCorrection(
+        id=new_id(),
+        session_id=item.id,
+        corrected_at=now,
+        source="v1_compatibility",
+        reason="Session fields were corrected through the V1 API.",
+        changed_fields_json=json.dumps(sorted(audit_fields), separators=(",", ":")),
+        before_json=json.dumps(before, sort_keys=True, separators=(",", ":")),
+        after_json=json.dumps(after, sort_keys=True, separators=(",", ":")),
+    )
+    db.add(correction)
+    _invalidate_session(db, item, correction.id)
     apply_session_promotion(db, item)
     db.commit()
     return serialize_session(item)
@@ -290,12 +476,30 @@ async def delete_session(
             422, "DELETE_CONFIRMATION_REQUIRED", "Session deletion requires confirmation."
         )
     item = db.get(LearningSession, session_id)
-    if item is None:
+    if item is None or item.tombstoned_at is not None:
         raise AppError(404, "SESSION_NOT_FOUND", "The session does not exist.")
     if item.timed_state in {"running", "paused"}:
         raise AppError(
             409, "ACTIVE_SESSION_DELETE_FORBIDDEN", "An active session cannot be deleted."
         )
-    db.delete(item)
+    now = utc_now_ms()
+    item.tombstoned_at = now
+    item.tombstone_reason = "Deleted through the V1 compatibility API."
+    correction = SessionCorrection(
+        id=new_id(),
+        session_id=item.id,
+        corrected_at=now,
+        source="v1_compatibility",
+        reason=item.tombstone_reason,
+        changed_fields_json='["tombstoned_at","tombstone_reason"]',
+        before_json='{"tombstone_reason":null,"tombstoned_at":null}',
+        after_json=json.dumps(
+            {"tombstone_reason": item.tombstone_reason, "tombstoned_at": now},
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
+    db.add(correction)
+    _invalidate_session(db, item, correction.id)
     db.commit()
     return {"deleted": True}

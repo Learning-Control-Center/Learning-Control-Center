@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import event
 from sqlalchemy.orm import Session, sessionmaker
 
 os.environ.setdefault("LCC_DATABASE_URL", "sqlite:////tmp/lcc-test-process.sqlite3")
@@ -15,7 +16,45 @@ os.environ.setdefault("LCC_BOOTSTRAP_TOKEN", "test-bootstrap-token-with-enough-e
 from app.config import Settings, get_settings_dependency  # noqa: E402
 from app.database import create_database_engine, get_db, run_migrations  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import DisciplineProfile  # noqa: E402
+from app.models import (  # noqa: E402
+    Activity,
+    DisciplineProfile,
+    LearningSession,
+    SessionContribution,
+    new_id,
+)
+
+
+@event.listens_for(Session, "before_flush")
+def canonicalize_direct_test_sessions(session: Session, *_args: object) -> None:
+    """Keep direct ORM fixtures canonical without weakening production constraints."""
+    for item in list(session.new):
+        if not isinstance(item, LearningSession) or item.activity_id is not None:
+            continue
+        item.id = item.id or new_id()
+        activity = Activity(
+            id=new_id(),
+            title="Direct test session",
+            category_stable_key=item.activity_type,
+            category_version="v1",
+            occurred_at=item.started_at,
+            context_started_at=item.started_at,
+            context_ended_at=item.ended_at,
+            creator_source="test",
+            provenance="test_fixture",
+            outcome_classification=item.outcome,
+        )
+        session.add(activity)
+        item.activity_id = activity.id
+        if item.competency_identity_id is not None:
+            session.add(
+                SessionContribution(
+                    session_id=item.id,
+                    competency_identity_id=item.competency_identity_id,
+                    relevance="primary",
+                    provenance="user_selected",
+                )
+            )
 
 
 @pytest.fixture
