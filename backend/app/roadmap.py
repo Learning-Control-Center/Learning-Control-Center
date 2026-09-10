@@ -19,9 +19,12 @@ from app.models import (
     CompetencyState,
     CompetencyStatusEvent,
     CompetencyUnderstandingItem,
+    CriterionIdentity,
     ExitCriterionDefinition,
     ExitCriterionIdentity,
+    LegacyCriterionAssertion,
     Phase,
+    ProjectionInvalidation,
     Roadmap,
     RoadmapScopeEvent,
     RoadmapVersion,
@@ -369,7 +372,11 @@ def apply_roadmap_payload(
                     )
                 )
                 if identity is None:
-                    identity = CompetencyIdentity(stable_key=item.stable_key)
+                    identity = CompetencyIdentity(
+                        stable_key=item.stable_key,
+                        identity_created_at=utc_now_ms(),
+                        creation_source="v1_roadmap_compatibility",
+                    )
                     db.add(identity)
                     db.flush()
                     db.add(
@@ -459,15 +466,52 @@ def apply_roadmap_payload(
                         )
                         db.add(criterion_identity)
                         db.flush()
-                    db.add(
-                        ExitCriterionDefinition(
-                            exit_criterion_identity_id=criterion_identity.id,
-                            competency_definition_id=definition.id,
-                            text=criterion.text,
-                            required=criterion.required,
-                            weight=criterion.weight,
+                    source_definition = ExitCriterionDefinition(
+                        exit_criterion_identity_id=criterion_identity.id,
+                        competency_definition_id=definition.id,
+                        text=criterion.text,
+                        required=criterion.required,
+                        weight=criterion.weight,
+                    )
+                    db.add(source_definition)
+                    db.flush()
+                    canonical = db.scalar(
+                        select(CriterionIdentity).where(
+                            CriterionIdentity.competency_identity_id
+                            == criterion_identity.competency_identity_id,
+                            CriterionIdentity.stable_key == criterion_identity.stable_key,
                         )
                     )
+                    if canonical is None:
+                        now = utc_now_ms()
+                        canonical = CriterionIdentity(
+                            competency_identity_id=criterion_identity.competency_identity_id,
+                            stable_key=criterion_identity.stable_key,
+                            created_at=now,
+                            creation_source="v1_roadmap_compatibility",
+                        )
+                        db.add(canonical)
+                        db.flush()
+                        db.add(
+                            LegacyCriterionAssertion(
+                                criterion_identity_id=canonical.id,
+                                source_exit_criterion_identity_id=criterion_identity.id,
+                                source_exit_criterion_definition_id=source_definition.id,
+                                legacy_state=criterion_identity.current_state,
+                                requirement_type="required" if criterion.required else None,
+                                demonstration_rule=None,
+                                evidence_strength=None,
+                                independence=None,
+                                source_confidence=None,
+                                legacy_unspecified_reason=(
+                                    "V1 checkbox state does not specify V2 demonstration, evidence "
+                                    "quality, independence, or source confidence."
+                                ),
+                                asserted_at=now,
+                                cutoff_at=now + 1,
+                                provenance="v1_compatibility",
+                            )
+                        )
 
     roadmap.active_version_id = version.id
     roadmap.current_phase_id = phases[payload.current_phase_stable_key].id
@@ -564,6 +608,67 @@ async def set_exit_criterion_state(
     criterion = db.get(ExitCriterionIdentity, criterion_identity_id)
     if criterion is None:
         raise AppError(404, "EXIT_CRITERION_NOT_FOUND", "The exit criterion does not exist.")
+    source_definition = db.scalar(
+        select(ExitCriterionDefinition)
+        .join(
+            CompetencyDefinition,
+            CompetencyDefinition.id == ExitCriterionDefinition.competency_definition_id,
+        )
+        .join(RoadmapVersion, RoadmapVersion.id == CompetencyDefinition.roadmap_version_id)
+        .join(Roadmap, Roadmap.id == RoadmapVersion.roadmap_id)
+        .where(
+            ExitCriterionDefinition.exit_criterion_identity_id == criterion.id,
+            Roadmap.is_current.is_(True),
+            Roadmap.active_version_id == CompetencyDefinition.roadmap_version_id,
+        )
+        .order_by(ExitCriterionDefinition.created_at.desc(), ExitCriterionDefinition.id.desc())
+        .limit(1)
+    )
+    canonical = db.scalar(
+        select(CriterionIdentity).where(
+            CriterionIdentity.competency_identity_id == criterion.competency_identity_id,
+            CriterionIdentity.stable_key == criterion.stable_key,
+        )
+    )
+    if source_definition is None or canonical is None:
+        raise AppError(
+            409,
+            "V2_CRITERION_COMPATIBILITY_MISSING",
+            "The V2 legacy criterion compatibility baseline is missing.",
+        )
+    now = utc_now_ms()
+    assertion = LegacyCriterionAssertion(
+        criterion_identity_id=canonical.id,
+        source_exit_criterion_identity_id=criterion.id,
+        source_exit_criterion_definition_id=source_definition.id,
+        legacy_state=payload.state,
+        requirement_type="required" if source_definition.required else None,
+        demonstration_rule=None,
+        evidence_strength=None,
+        independence=None,
+        source_confidence=None,
+        legacy_unspecified_reason=(
+            "V1 checkbox state does not specify V2 demonstration, evidence quality, "
+            "independence, or source confidence."
+        ),
+        asserted_at=now,
+        cutoff_at=now + 1,
+        provenance="v1_compatibility",
+    )
+    db.add(assertion)
+    db.flush()
+    db.add(
+        ProjectionInvalidation(
+            projection_kind="analysis",
+            subject_type="criterion_identity",
+            subject_id=canonical.id,
+            source_fact_id=assertion.id,
+            target_policy_version="analysis-policy/v1",
+            status="pending",
+            attempt_count=0,
+            requested_at=now,
+        )
+    )
     criterion.current_state = payload.state
     db.commit()
     return {"id": criterion.id, "state": criterion.current_state}

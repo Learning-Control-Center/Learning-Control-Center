@@ -208,6 +208,565 @@ class CompetencyIdentity(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     stable_key: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    identity_created_at: Mapped[int | None] = mapped_column(Integer)
+    creation_source: Mapped[str | None] = mapped_column(String(64))
+    legacy_unspecified_reason: Mapped[str | None] = mapped_column(Text)
+    retired_at: Mapped[int | None] = mapped_column(Integer)
+    retirement_reason: Mapped[str | None] = mapped_column(Text)
+
+
+class CapabilityScaleVersion(Base):
+    __tablename__ = "capability_scale_versions"
+    __table_args__ = (
+        UniqueConstraint("scale_stable_key", "scale_version", name="uq_capability_scale_version"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    scale_stable_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    scale_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[int] = mapped_column(Integer, default=utc_now_ms, nullable=False)
+
+
+class CapabilityScaleDimension(Base):
+    __tablename__ = "capability_scale_dimensions"
+    __table_args__ = (
+        UniqueConstraint("scale_version_id", "stable_key", name="uq_scale_dimension_key"),
+        UniqueConstraint("scale_version_id", "order_index", name="uq_scale_dimension_order"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    scale_version_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_scale_versions.id", ondelete="RESTRICT"), nullable=False
+    )
+    stable_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    display_label: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    order_index: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class CapabilityScaleLevel(Base):
+    __tablename__ = "capability_scale_levels"
+    __table_args__ = (
+        UniqueConstraint("scale_version_id", "stable_key", name="uq_scale_level_key"),
+        UniqueConstraint("scale_version_id", "ordinal_rank", name="uq_scale_level_rank"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    scale_version_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_scale_versions.id", ondelete="RESTRICT"), nullable=False
+    )
+    stable_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    ordinal_rank: Mapped[int] = mapped_column(Integer, nullable=False)
+    display_label: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    criterion_policy_reference: Mapped[str] = mapped_column(String(128), nullable=False)
+    evidence_policy_reference: Mapped[str] = mapped_column(String(128), nullable=False)
+
+
+class TargetProfile(Base):
+    __tablename__ = "target_profiles"
+    __table_args__ = (UniqueConstraint("stable_key", name="uq_target_profile_stable_key"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    stable_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[int] = mapped_column(Integer, default=utc_now_ms, nullable=False)
+    creation_source: Mapped[str] = mapped_column(String(64), nullable=False)
+    retired_at: Mapped[int | None] = mapped_column(Integer)
+    retirement_reason: Mapped[str | None] = mapped_column(Text)
+
+
+class TargetProfileVersion(Base):
+    __tablename__ = "target_profile_versions"
+    __table_args__ = (
+        UniqueConstraint("target_profile_id", "version", name="uq_target_profile_version"),
+        CheckConstraint("version > 0", name="ck_target_profile_version_positive"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    target_profile_id: Mapped[str] = mapped_column(
+        ForeignKey("target_profiles.id", ondelete="RESTRICT"), nullable=False
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[int] = mapped_column(Integer, default=utc_now_ms, nullable=False)
+    effective_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    creation_source: Mapped[str] = mapped_column(String(64), nullable=False)
+    supersedes_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("target_profile_versions.id", ondelete="RESTRICT")
+    )
+
+
+class ProfileDomain(Base):
+    __tablename__ = "profile_domains"
+    __table_args__ = (
+        UniqueConstraint("profile_version_id", "stable_key", name="uq_profile_domain_key"),
+        UniqueConstraint("profile_version_id", "order_index", name="uq_profile_domain_order"),
+        CheckConstraint(
+            "minimum_percent IS NULL OR minimum_percent BETWEEN 0 AND 100",
+            name="ck_profile_domain_minimum",
+        ),
+        CheckConstraint(
+            "maximum_percent IS NULL OR maximum_percent BETWEEN 0 AND 100",
+            name="ck_profile_domain_maximum",
+        ),
+        CheckConstraint(
+            "minimum_percent IS NULL OR maximum_percent IS NULL OR "
+            "minimum_percent <= maximum_percent",
+            name="ck_profile_domain_range",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    profile_version_id: Mapped[str] = mapped_column(
+        ForeignKey("target_profile_versions.id", ondelete="RESTRICT"), nullable=False
+    )
+    stable_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    minimum_percent: Mapped[int | None] = mapped_column(Integer)
+    maximum_percent: Mapped[int | None] = mapped_column(Integer)
+    order_index: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class ProfileTargetIdentity(Base):
+    __tablename__ = "profile_target_identities"
+    __table_args__ = (
+        UniqueConstraint("target_profile_id", "stable_key", name="uq_profile_target_identity_key"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    target_profile_id: Mapped[str] = mapped_column(
+        ForeignKey("target_profiles.id", ondelete="RESTRICT"), nullable=False
+    )
+    stable_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    competency_identity_id: Mapped[str] = mapped_column(
+        ForeignKey("competency_identities.id", ondelete="RESTRICT"), nullable=False
+    )
+    dimension_key: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[int] = mapped_column(Integer, default=utc_now_ms, nullable=False)
+
+
+class ProfileTarget(Base):
+    __tablename__ = "profile_targets"
+    __table_args__ = (
+        UniqueConstraint(
+            "profile_version_id", "target_identity_id", name="uq_profile_target_version_identity"
+        ),
+        CheckConstraint(
+            "priority IN ('critical','core','important','supporting','optional')",
+            name="ck_profile_target_priority",
+        ),
+        CheckConstraint(
+            "(target_date IS NULL) != (target_month IS NULL) OR "
+            "(target_date IS NULL AND target_month IS NULL)",
+            name="ck_profile_target_date_precision",
+        ),
+        CheckConstraint(
+            "freshness_override_days IS NULL OR freshness_override_days > 0",
+            name="ck_profile_target_freshness",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    profile_version_id: Mapped[str] = mapped_column(
+        ForeignKey("target_profile_versions.id", ondelete="RESTRICT"), nullable=False
+    )
+    target_identity_id: Mapped[str] = mapped_column(
+        ForeignKey("profile_target_identities.id", ondelete="RESTRICT"), nullable=False
+    )
+    profile_domain_id: Mapped[str] = mapped_column(
+        ForeignKey("profile_domains.id", ondelete="RESTRICT"), nullable=False
+    )
+    scale_version_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_scale_versions.id", ondelete="RESTRICT"), nullable=False
+    )
+    target_level_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_scale_levels.id", ondelete="RESTRICT"), nullable=False
+    )
+    priority: Mapped[str] = mapped_column(String(16), nullable=False)
+    target_date: Mapped[str | None] = mapped_column(String(10))
+    target_month: Mapped[str | None] = mapped_column(String(7))
+    date_interpretation: Mapped[str | None] = mapped_column(Text)
+    freshness_override_days: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[int] = mapped_column(Integer, default=utc_now_ms, nullable=False)
+    creation_source: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class MilestoneIdentity(Base):
+    __tablename__ = "milestone_identities"
+    __table_args__ = (
+        UniqueConstraint("target_profile_id", "stable_key", name="uq_milestone_identity_key"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    target_profile_id: Mapped[str] = mapped_column(
+        ForeignKey("target_profiles.id", ondelete="RESTRICT"), nullable=False
+    )
+    stable_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[int] = mapped_column(Integer, default=utc_now_ms, nullable=False)
+
+
+class ProfileMilestone(Base):
+    __tablename__ = "profile_milestones"
+    __table_args__ = (
+        UniqueConstraint(
+            "profile_version_id", "milestone_identity_id", name="uq_profile_milestone_identity"
+        ),
+        UniqueConstraint("profile_version_id", "order_index", name="uq_profile_milestone_order"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    profile_version_id: Mapped[str] = mapped_column(
+        ForeignKey("target_profile_versions.id", ondelete="RESTRICT"), nullable=False
+    )
+    milestone_identity_id: Mapped[str] = mapped_column(
+        ForeignKey("milestone_identities.id", ondelete="RESTRICT"), nullable=False
+    )
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    target_date: Mapped[str | None] = mapped_column(String(10))
+    order_index: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class ProfileMilestoneTarget(Base):
+    __tablename__ = "profile_milestone_targets"
+
+    milestone_id: Mapped[str] = mapped_column(
+        ForeignKey("profile_milestones.id", ondelete="RESTRICT"), primary_key=True
+    )
+    profile_target_id: Mapped[str] = mapped_column(
+        ForeignKey("profile_targets.id", ondelete="RESTRICT"), primary_key=True
+    )
+
+
+class ReadinessGateIdentity(Base):
+    __tablename__ = "readiness_gate_identities"
+    __table_args__ = (
+        UniqueConstraint("target_profile_id", "stable_key", name="uq_readiness_gate_identity_key"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    target_profile_id: Mapped[str] = mapped_column(
+        ForeignKey("target_profiles.id", ondelete="RESTRICT"), nullable=False
+    )
+    stable_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[int] = mapped_column(Integer, default=utc_now_ms, nullable=False)
+
+
+class ReadinessGate(Base):
+    __tablename__ = "readiness_gates"
+    __table_args__ = (
+        UniqueConstraint(
+            "profile_version_id", "gate_identity_id", name="uq_readiness_gate_identity"
+        ),
+        CheckConstraint(
+            "effect IN ('hard_eligibility','urgency','display_only')",
+            name="ck_readiness_gate_effect",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    profile_version_id: Mapped[str] = mapped_column(
+        ForeignKey("target_profile_versions.id", ondelete="RESTRICT"), nullable=False
+    )
+    milestone_id: Mapped[str | None] = mapped_column(
+        ForeignKey("profile_milestones.id", ondelete="RESTRICT")
+    )
+    gate_identity_id: Mapped[str] = mapped_column(
+        ForeignKey("readiness_gate_identities.id", ondelete="RESTRICT"), nullable=False
+    )
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    effect: Mapped[str] = mapped_column(String(32), nullable=False)
+    order_index: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class ReadinessGatePredicate(Base):
+    __tablename__ = "readiness_gate_predicates"
+    __table_args__ = (
+        UniqueConstraint("gate_id", "order_index", name="uq_gate_predicate_order"),
+        CheckConstraint(
+            "predicate_type IN ('capability_at_least','criterion_demonstrated',"
+            "'project_criterion_demonstrated','evidence_present')",
+            name="ck_gate_predicate_type",
+        ),
+        CheckConstraint(
+            "requirement_type IN ('required','supporting')",
+            name="ck_gate_predicate_requirement",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    gate_id: Mapped[str] = mapped_column(
+        ForeignKey("readiness_gates.id", ondelete="RESTRICT"), nullable=False
+    )
+    order_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    predicate_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    requirement_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    subject_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class ReadinessGateTarget(Base):
+    __tablename__ = "readiness_gate_targets"
+
+    gate_id: Mapped[str] = mapped_column(
+        ForeignKey("readiness_gates.id", ondelete="RESTRICT"), primary_key=True
+    )
+    profile_target_id: Mapped[str] = mapped_column(
+        ForeignKey("profile_targets.id", ondelete="RESTRICT"), primary_key=True
+    )
+
+
+class ActiveTargetProfileState(Base):
+    __tablename__ = "active_target_profile_state"
+    __table_args__ = (CheckConstraint("id = 1", name="ck_active_target_profile_singleton"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    target_profile_id: Mapped[str] = mapped_column(
+        ForeignKey("target_profiles.id", ondelete="RESTRICT"), nullable=False
+    )
+    target_profile_version_id: Mapped[str] = mapped_column(
+        ForeignKey("target_profile_versions.id", ondelete="RESTRICT"), nullable=False
+    )
+    activated_at: Mapped[int] = mapped_column(Integer, default=utc_now_ms, nullable=False)
+
+
+class TargetProfileActivationEvent(Base):
+    __tablename__ = "target_profile_activation_events"
+    __table_args__ = (
+        UniqueConstraint("event_sequence", name="uq_target_profile_activation_sequence"),
+        UniqueConstraint("idempotency_key", name="uq_target_profile_activation_idempotency"),
+        CheckConstraint("event_sequence > 0", name="ck_target_profile_activation_sequence"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    from_profile_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("target_profile_versions.id", ondelete="RESTRICT")
+    )
+    to_profile_version_id: Mapped[str] = mapped_column(
+        ForeignKey("target_profile_versions.id", ondelete="RESTRICT"), nullable=False
+    )
+    activated_at: Mapped[int] = mapped_column(Integer, default=utc_now_ms, nullable=False)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    event_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+
+
+class SemanticCompetencyDefinition(Base):
+    __tablename__ = "semantic_competency_definitions"
+    __table_args__ = (
+        UniqueConstraint(
+            "competency_identity_id", "definition_version", name="uq_semantic_definition_version"
+        ),
+        CheckConstraint("definition_version > 0", name="ck_semantic_definition_version"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    competency_identity_id: Mapped[str] = mapped_column(
+        ForeignKey("competency_identities.id", ondelete="RESTRICT"), nullable=False
+    )
+    definition_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    scope: Mapped[str] = mapped_column(Text, nullable=False)
+    scale_version_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_scale_versions.id", ondelete="RESTRICT"), nullable=False
+    )
+    created_at: Mapped[int] = mapped_column(Integer, default=utc_now_ms, nullable=False)
+    creation_source: Mapped[str] = mapped_column(String(64), nullable=False)
+    effective_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    supersedes_definition_id: Mapped[str | None] = mapped_column(
+        ForeignKey("semantic_competency_definitions.id", ondelete="RESTRICT")
+    )
+
+
+class SemanticDefinitionDimension(Base):
+    __tablename__ = "semantic_definition_dimensions"
+
+    semantic_definition_id: Mapped[str] = mapped_column(
+        ForeignKey("semantic_competency_definitions.id", ondelete="RESTRICT"), primary_key=True
+    )
+    scale_dimension_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_scale_dimensions.id", ondelete="RESTRICT"), primary_key=True
+    )
+
+
+class CriterionIdentity(Base):
+    __tablename__ = "criterion_identities"
+    __table_args__ = (
+        UniqueConstraint("competency_identity_id", "stable_key", name="uq_criterion_identity_key"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    competency_identity_id: Mapped[str] = mapped_column(
+        ForeignKey("competency_identities.id", ondelete="RESTRICT"), nullable=False
+    )
+    stable_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[int | None] = mapped_column(Integer)
+    creation_source: Mapped[str | None] = mapped_column(String(64))
+    legacy_unspecified_reason: Mapped[str | None] = mapped_column(Text)
+    retired_at: Mapped[int | None] = mapped_column(Integer)
+    retirement_reason: Mapped[str | None] = mapped_column(Text)
+
+
+class CriterionDefinition(Base):
+    __tablename__ = "criterion_definitions"
+    __table_args__ = (
+        UniqueConstraint(
+            "criterion_identity_id", "definition_version", name="uq_criterion_definition_version"
+        ),
+        CheckConstraint("definition_version > 0", name="ck_criterion_definition_version"),
+        CheckConstraint(
+            "requirement_type IN ('required','important','supporting')",
+            name="ck_criterion_requirement_type",
+        ),
+        CheckConstraint(
+            "importance_weight IS NULL OR importance_weight BETWEEN 1 AND 5",
+            name="ck_criterion_importance_weight",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    criterion_identity_id: Mapped[str] = mapped_column(
+        ForeignKey("criterion_identities.id", ondelete="RESTRICT"), nullable=False
+    )
+    semantic_definition_id: Mapped[str] = mapped_column(
+        ForeignKey("semantic_competency_definitions.id", ondelete="RESTRICT"), nullable=False
+    )
+    definition_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    level_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_scale_levels.id", ondelete="RESTRICT"), nullable=False
+    )
+    dimension_id: Mapped[str | None] = mapped_column(
+        ForeignKey("capability_scale_dimensions.id", ondelete="RESTRICT")
+    )
+    requirement_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    demonstration_rule_json: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    verification_rubric: Mapped[str | None] = mapped_column(Text)
+    importance_weight: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[int] = mapped_column(Integer, default=utc_now_ms, nullable=False)
+    supersedes_definition_id: Mapped[str | None] = mapped_column(
+        ForeignKey("criterion_definitions.id", ondelete="RESTRICT")
+    )
+
+
+class ActiveCompetencyDefinitionState(Base):
+    __tablename__ = "active_competency_definition_states"
+
+    competency_identity_id: Mapped[str] = mapped_column(
+        ForeignKey("competency_identities.id", ondelete="RESTRICT"), primary_key=True
+    )
+    semantic_definition_id: Mapped[str] = mapped_column(
+        ForeignKey("semantic_competency_definitions.id", ondelete="RESTRICT"), nullable=False
+    )
+    activated_at: Mapped[int] = mapped_column(Integer, default=utc_now_ms, nullable=False)
+
+
+class CompetencyDefinitionActivationEvent(Base):
+    __tablename__ = "competency_definition_activation_events"
+    __table_args__ = (
+        UniqueConstraint("event_sequence", name="uq_competency_definition_activation_sequence"),
+        UniqueConstraint("idempotency_key", name="uq_competency_definition_activation_idempotency"),
+        CheckConstraint("event_sequence > 0", name="ck_competency_definition_activation_sequence"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    competency_identity_id: Mapped[str] = mapped_column(
+        ForeignKey("competency_identities.id", ondelete="RESTRICT"), nullable=False
+    )
+    from_definition_id: Mapped[str | None] = mapped_column(
+        ForeignKey("semantic_competency_definitions.id", ondelete="RESTRICT")
+    )
+    to_definition_id: Mapped[str] = mapped_column(
+        ForeignKey("semantic_competency_definitions.id", ondelete="RESTRICT"), nullable=False
+    )
+    activated_at: Mapped[int] = mapped_column(Integer, default=utc_now_ms, nullable=False)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    event_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+
+
+class LegacyCriterionAssertion(Base):
+    __tablename__ = "legacy_criterion_assertions"
+    __table_args__ = (
+        CheckConstraint(
+            "legacy_state IN ('not_met','partial','met')", name="ck_legacy_criterion_state"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    criterion_identity_id: Mapped[str] = mapped_column(
+        ForeignKey("criterion_identities.id", ondelete="RESTRICT"), nullable=False
+    )
+    source_exit_criterion_identity_id: Mapped[str] = mapped_column(
+        ForeignKey("exit_criterion_identities.id", ondelete="RESTRICT"), nullable=False
+    )
+    source_exit_criterion_definition_id: Mapped[str] = mapped_column(
+        ForeignKey("exit_criterion_definitions.id", ondelete="RESTRICT"), nullable=False
+    )
+    legacy_state: Mapped[str] = mapped_column(String(16), nullable=False)
+    requirement_type: Mapped[str | None] = mapped_column(String(16))
+    demonstration_rule: Mapped[str | None] = mapped_column(String(64))
+    evidence_strength: Mapped[str | None] = mapped_column(String(32))
+    independence: Mapped[str | None] = mapped_column(String(32))
+    source_confidence: Mapped[str | None] = mapped_column(String(32))
+    legacy_unspecified_reason: Mapped[str] = mapped_column(Text, nullable=False)
+    asserted_at: Mapped[int] = mapped_column(Integer, default=utc_now_ms, nullable=False)
+    cutoff_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    provenance: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class MigrationBackfillRun(Base):
+    __tablename__ = "migration_backfill_runs"
+    __table_args__ = (
+        UniqueConstraint("policy_key", "source_kind", name="uq_migration_backfill_policy_source"),
+        CheckConstraint("source_row_count >= 0", name="ck_migration_backfill_source_count"),
+        CheckConstraint("result_row_count >= 0", name="ck_migration_backfill_result_count"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    policy_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    source_kind: Mapped[str] = mapped_column(String(128), nullable=False)
+    source_row_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    result_row_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    result_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    recorded_at: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+def _reject_v2_semantic_history_mutation(*_args: object) -> None:
+    raise ValueError("V2 semantic version and assertion history is immutable.")
+
+
+for _immutable_v2_model in (
+    CapabilityScaleVersion,
+    CapabilityScaleDimension,
+    CapabilityScaleLevel,
+    TargetProfileVersion,
+    ProfileDomain,
+    ProfileTarget,
+    MilestoneIdentity,
+    ProfileMilestone,
+    ProfileMilestoneTarget,
+    ReadinessGate,
+    ReadinessGateIdentity,
+    ReadinessGatePredicate,
+    ReadinessGateTarget,
+    TargetProfileActivationEvent,
+    SemanticCompetencyDefinition,
+    SemanticDefinitionDimension,
+    CriterionDefinition,
+    CompetencyDefinitionActivationEvent,
+    LegacyCriterionAssertion,
+    MigrationBackfillRun,
+):
+    event.listen(_immutable_v2_model, "before_update", _reject_v2_semantic_history_mutation)
+    event.listen(_immutable_v2_model, "before_delete", _reject_v2_semantic_history_mutation)
 
 
 class CompetencyDefinition(Base, TimestampMixin):

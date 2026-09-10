@@ -39,3 +39,9 @@ def test_analysis_layer_does_not_depend_on_recommendation_policy() -> None:
     root = Path(__file__).resolve().parents[1] / "app" / "analysis"
     imports = set().union(*(_imports(path) for path in root.glob("*.py")))
     assert not {name for name in imports if name.startswith("app.recommendation")}
+
+
+def test_v2_profile_authoring_does_not_depend_on_v1_roadmap_services() -> None:
+    root = Path(__file__).resolve().parents[1]
+    imports = _imports(root / "app" / "v2_profiles.py")
+    assert "app.roadmap" not in imports

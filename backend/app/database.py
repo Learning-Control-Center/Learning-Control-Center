@@ -150,11 +150,34 @@ def _assert_known_migration_source(
     }
     user_columns = {row[1] for row in connection.execute("PRAGMA table_info(users)")}
     session_columns = {row[1] for row in connection.execute("PRAGMA table_info(auth_sessions)")}
+    competency_identity_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(competency_identities)")
+    }
     security_markers_present = bool(
         any(name.startswith("_alembic_tmp_") for name in tables)
         or {"security_audit_events", "auth_rate_limit_buckets"} & tables
         or {"credential_generation", "password_changed_at"} & user_columns
         or "credential_generation" in session_columns
+    )
+    profile_markers_present = bool(
+        any(name.startswith("_alembic_tmp_") for name in tables)
+        or {
+            "capability_scale_versions",
+            "target_profiles",
+            "semantic_competency_definitions",
+            "criterion_identities",
+            "legacy_criterion_assertions",
+            "migration_backfill_runs",
+        }
+        & tables
+        or {
+            "identity_created_at",
+            "creation_source",
+            "legacy_unspecified_reason",
+            "retired_at",
+            "retirement_reason",
+        }
+        & competency_identity_columns
     )
     if revision in {"0001_initial", "0002_roadmap_scope_events"} and security_markers_present:
         raise RuntimeError(
@@ -165,6 +188,20 @@ def _assert_known_migration_source(
         raise RuntimeError(
             "Database has an ambiguously partial roadmap-scope migration; restore a verified "
             "backup before retrying."
+        )
+    if (
+        revision
+        in {
+            "0001_initial",
+            "0002_roadmap_scope_events",
+            "0003_auth_security_foundation",
+            "0004_analysis_projection_foundation",
+        }
+        and profile_markers_present
+    ):
+        raise RuntimeError(
+            "Database has an ambiguously partial profile/competency migration; restore its "
+            "verified pre-migration backup before retrying."
         )
 
 

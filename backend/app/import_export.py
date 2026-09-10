@@ -21,7 +21,10 @@ from sqlalchemy.orm import Session
 from app.analytics import build_analytics
 from app.api_serialization import serialize_api_instants
 from app.auth import AuthContext, get_auth_context, require_csrf
-from app.compatibility.v1.portable import read_v1_portable_package
+from app.compatibility.v1.portable import (
+    read_v1_portable_package,
+    upgrade_v1_profile_competency_tables,
+)
 from app.config import Settings, get_settings_dependency
 from app.database import create_database_engine, get_db, run_migrations
 from app.domain import transition_status
@@ -33,16 +36,24 @@ from app.domain_integrity import (
 from app.errors import AppError
 from app.import_diff import build_portable_replacement_diff, build_roadmap_diff
 from app.models import (
+    ActiveCompetencyDefinitionState,
+    ActiveTargetProfileState,
     AnalysisRun,
     AnalysisSnapshot,
     ApplicationSetting,
+    CapabilityScaleDimension,
+    CapabilityScaleLevel,
+    CapabilityScaleVersion,
     CompetencyAbilityItem,
     CompetencyDefinition,
+    CompetencyDefinitionActivationEvent,
     CompetencyIdentity,
     CompetencyPrerequisite,
     CompetencyState,
     CompetencyStatusEvent,
     CompetencyUnderstandingItem,
+    CriterionDefinition,
+    CriterionIdentity,
     DailyReflection,
     DisciplineProfile,
     ExitCriterionDefinition,
@@ -51,13 +62,30 @@ from app.models import (
     GeneratedReport,
     ImportRecord,
     LearningSession,
+    LegacyCriterionAssertion,
+    MigrationBackfillRun,
+    MilestoneIdentity,
     OperationalBackup,
     Phase,
+    ProfileDomain,
+    ProfileMilestone,
+    ProfileMilestoneTarget,
+    ProfileTarget,
+    ProfileTargetIdentity,
     ProjectionInvalidation,
+    ReadinessGate,
+    ReadinessGateIdentity,
+    ReadinessGatePredicate,
+    ReadinessGateTarget,
     RecommendationSnapshot,
     Roadmap,
     RoadmapScopeEvent,
     RoadmapVersion,
+    SemanticCompetencyDefinition,
+    SemanticDefinitionDimension,
+    TargetProfile,
+    TargetProfileActivationEvent,
+    TargetProfileVersion,
     Track,
     VerificationEvidence,
     VerificationRecord,
@@ -98,6 +126,9 @@ PORTABLE_MODELS = [
     Track,
     RoadmapScopeEvent,
     CompetencyIdentity,
+    CapabilityScaleVersion,
+    CapabilityScaleDimension,
+    CapabilityScaleLevel,
     CompetencyDefinition,
     CompetencyPrerequisite,
     CompetencyUnderstandingItem,
@@ -109,6 +140,28 @@ PORTABLE_MODELS = [
     VerificationEvidence,
     CompetencyStatusEvent,
     LearningSession,
+    TargetProfile,
+    TargetProfileVersion,
+    ProfileDomain,
+    ProfileTargetIdentity,
+    ProfileTarget,
+    MilestoneIdentity,
+    ProfileMilestone,
+    ProfileMilestoneTarget,
+    ReadinessGateIdentity,
+    ReadinessGate,
+    ReadinessGatePredicate,
+    ReadinessGateTarget,
+    ActiveTargetProfileState,
+    TargetProfileActivationEvent,
+    SemanticCompetencyDefinition,
+    SemanticDefinitionDimension,
+    CriterionIdentity,
+    CriterionDefinition,
+    ActiveCompetencyDefinitionState,
+    CompetencyDefinitionActivationEvent,
+    LegacyCriterionAssertion,
+    MigrationBackfillRun,
     DailyReflection,
     GeneratedReport,
     AnalysisRun,
@@ -508,6 +561,14 @@ def _insert_portable_tables(connection: Any, tables: dict[str, list[dict[str, An
         )
 
 
+def _clear_migration_seeded_portable_state(connection: Any) -> None:
+    """Remove built-ins seeded by migrations before logical backup insertion."""
+    connection.execute(_table(MigrationBackfillRun).delete())
+    connection.execute(_table(CapabilityScaleLevel).delete())
+    connection.execute(_table(CapabilityScaleDimension).delete())
+    connection.execute(_table(CapabilityScaleVersion).delete())
+
+
 def _legacy_scope_baseline(
     tables: dict[str, list[dict[str, Any]]], package_id: str
 ) -> list[dict[str, Any]]:
@@ -586,8 +647,9 @@ def _normalize_portable_tables(
     if legacy_without_scope_history:
         tables["roadmap_scope_events"] = _legacy_scope_baseline(tables, package_id)
     if schema_version == 1:
-        for table_name in v2_tables:
-            tables.setdefault(table_name, [])
+        upgrade_v1_profile_competency_tables(tables)
+        for table_name in {"analysis_runs", "analysis_snapshots"}:
+            tables[table_name] = []
         for row in tables.get("recommendation_snapshots", []):
             row.setdefault("analysis_snapshot_id", None)
     return tables, legacy_without_scope_history
@@ -617,6 +679,7 @@ def _validate_portable_payload(
         try:
             with validation_engine.begin() as connection:
                 try:
+                    _clear_migration_seeded_portable_state(connection)
                     _insert_portable_tables(connection, tables)
                 except SQLAlchemyError as exc:
                     raise AppError(
@@ -634,6 +697,23 @@ def _validate_portable_payload(
         ),
         "scopeHistoryBaselineAdded": bool(
             legacy_without_scope_history and tables["roadmap_scope_events"]
+        ),
+        "compatibilityConversions": (
+            {
+                "competencyIdentitiesWithLegacyCreationUnknown": len(
+                    tables["competency_identities"]
+                ),
+                "legacyCriterionAssertionsCreated": len(tables["legacy_criterion_assertions"]),
+                "legacyCriterionSourceRowCount": tables["migration_backfill_runs"][0][
+                    "source_row_count"
+                ],
+                "legacyCriterionSourceHash": tables["migration_backfill_runs"][0]["source_hash"],
+                "legacyCriterionResultHash": tables["migration_backfill_runs"][0]["result_hash"],
+                "nativeSemanticDefinitionsInferred": 0,
+                "targetProfilesInferred": 0,
+            }
+            if schema_version == 1
+            else {}
         ),
     }
 
@@ -657,6 +737,7 @@ def _preflight_application(
         validation_engine = create_database_engine(validation_url)
         try:
             with Session(validation_engine) as validation_db:
+                _clear_migration_seeded_portable_state(validation_db.connection())
                 _insert_portable_tables(validation_db.connection(), current_payload["tables"])
                 validation_db.flush()
                 operation(validation_db)

@@ -228,6 +228,31 @@ def test_populated_0002_upgrades_without_changing_v1_values(
             assert _table_rows(after, table, columns[table]) == rows_before[table]
         assert after.execute("SELECT credential_generation FROM users").fetchone() == (1,)
         assert after.execute("SELECT credential_generation FROM auth_sessions").fetchone() == (1,)
+        assert (
+            after.execute(
+                "SELECT id,competency_identity_id,stable_key FROM criterion_identities ORDER BY id"
+            ).fetchall()
+            == after.execute(
+                "SELECT id,competency_identity_id,stable_key "
+                "FROM exit_criterion_identities ORDER BY id"
+            ).fetchall()
+        )
+        assert (
+            after.execute("SELECT COUNT(*) FROM legacy_criterion_assertions").fetchone()
+            == after.execute("SELECT COUNT(*) FROM exit_criterion_identities").fetchone()
+        )
+        assert after.execute(
+            "SELECT COUNT(*) FROM legacy_criterion_assertions WHERE demonstration_rule IS NOT NULL "
+            "OR evidence_strength IS NOT NULL OR independence IS NOT NULL "
+            "OR source_confidence IS NOT NULL"
+        ).fetchone() == (0,)
+        assert after.execute("SELECT COUNT(*) FROM target_profiles").fetchone() == (0,)
+        assert after.execute("SELECT COUNT(*) FROM semantic_competency_definitions").fetchone() == (
+            0,
+        )
+        assert after.execute("SELECT COUNT(*) FROM capability_scale_versions").fetchone() == (2,)
+        assert after.execute("SELECT COUNT(*) FROM capability_scale_dimensions").fetchone() == (6,)
+        assert after.execute("SELECT COUNT(*) FROM capability_scale_levels").fetchone() == (12,)
         assert after.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         after.close()
@@ -253,7 +278,7 @@ def test_migration_creates_verified_backup_before_mutation(
     manifest = json.loads(manifest_path.read_text())
     assert manifest["checksumSha256"] == backup_digest
     assert manifest["sourceRevision"] == "0002_roadmap_scope_events"
-    assert manifest["targetRevision"] == "0004_analysis_projection_foundation"
+    assert manifest["targetRevision"] == "0005_profile_competency_core"
     assert os.stat(manifest_path).st_mode & 0o777 == 0o600
     original = sqlite3.connect(FIXTURES / "populated-0002.sqlite3")
     copied = sqlite3.connect(backup)
@@ -360,7 +385,7 @@ def test_partial_0003_is_refused_then_verified_v1_restore_can_upgrade(
     restored = sqlite3.connect(database_path)
     try:
         assert restored.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "0004_analysis_projection_foundation",
+            "0005_profile_competency_core",
         )
         assert restored.execute("SELECT credential_generation FROM users").fetchone() == (2,)
         assert restored.execute("SELECT revoked_at IS NOT NULL FROM auth_sessions").fetchone() == (
@@ -371,6 +396,28 @@ def test_partial_0003_is_refused_then_verified_v1_restore_can_upgrade(
     finally:
         restored.close()
     assert len(list(backup_directory.glob("lcc-pre-restore-*.sqlite3"))) == 1
+
+
+@pytest.mark.parametrize(
+    "partial_sql",
+    [
+        "CREATE TABLE capability_scale_versions (id TEXT PRIMARY KEY)",
+        "ALTER TABLE competency_identities ADD COLUMN identity_created_at INTEGER",
+        "CREATE TABLE _alembic_tmp_competency_identities (id TEXT PRIMARY KEY)",
+    ],
+)
+def test_partial_0005_is_refused(tmp_path: Path, partial_sql: str) -> None:
+    database_path = tmp_path / "partial-profile.sqlite3"
+    config = _config(database_path)
+    command.upgrade(config, "0004_analysis_projection_foundation")
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.execute(partial_sql)
+        connection.commit()
+    finally:
+        connection.close()
+    with pytest.raises(RuntimeError, match="ambiguously partial profile/competency migration"):
+        database.run_migrations(f"sqlite:///{database_path}")
 
 
 def test_0003_downgrade_and_reupgrade_preserve_v1_rows(tmp_path: Path) -> None:

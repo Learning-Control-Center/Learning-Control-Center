@@ -11,6 +11,7 @@ from alembic.config import Config
 from app.config import get_settings
 from app.database import create_database_engine
 from app.models import AuthSession, RoadmapScopeEvent
+from app.portability.registry import PORTABLE_V2_FOUNDATION_TABLES
 from httpx import AsyncClient
 from sqlalchemy import inspect, select, text
 from sqlalchemy.orm import Session
@@ -160,8 +161,8 @@ async def test_legacy_portable_backup_gets_only_deterministic_current_scope_base
         row for row in package["payload"]["tables"]["roadmaps"] if row["is_current"]
     )
     package["payload"]["tables"].pop("roadmap_scope_events")
-    package["payload"]["tables"].pop("analysis_runs")
-    package["payload"]["tables"].pop("analysis_snapshots")
+    for table_name in PORTABLE_V2_FOUNDATION_TABLES:
+        package["payload"]["tables"].pop(table_name)
     package["payload"].pop("manifest")
     package["schemaVersion"] = 1
     auth_ids = set(db.scalars(select(AuthSession.id)).all())

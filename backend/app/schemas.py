@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime
+import re
+from datetime import date, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -124,6 +125,177 @@ class StatusUpdate(StrictModel):
 
 class ExitCriterionStateUpdate(StrictModel):
     state: Literal["not_met", "partial", "met"]
+
+
+class CompetencyIdentityCreate(StrictModel):
+    stable_key: str = Field(min_length=1, max_length=255)
+    creation_source: str = Field(min_length=1, max_length=64)
+
+
+DemonstrationRule = Literal[
+    "exposure",
+    "guided_performance",
+    "independent_performance",
+    "repeated_independent_performance",
+    "authoritative_assessment",
+]
+
+
+class CriterionDefinitionInput(StrictModel):
+    stable_key: str = Field(min_length=1, max_length=255)
+    level_stable_key: str = Field(min_length=1, max_length=64)
+    dimension_key: str | None
+    requirement_type: Literal["required", "important", "supporting"]
+    demonstration_rule: DemonstrationRule
+    description: str = Field(min_length=1)
+    verification_rubric: str | None = None
+    importance_weight: int | None = Field(default=None, ge=1, le=5)
+
+
+class SemanticCompetencyDefinitionCreate(StrictModel):
+    title: str = Field(min_length=1, max_length=255)
+    description: str = ""
+    scope: str = Field(min_length=1)
+    scale_stable_key: Literal["technical", "cefr"]
+    scale_version: str = Field(min_length=1, max_length=64)
+    dimension_keys: list[str] = Field(default_factory=list)
+    effective_at: datetime
+    creation_source: str = Field(min_length=1, max_length=64)
+    criteria: list[CriterionDefinitionInput] = Field(min_length=1)
+
+    @field_validator("effective_at")
+    @classmethod
+    def effective_at_is_aware(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("effective_at must include a timezone offset")
+        return value
+
+
+class ActivationRequest(StrictModel):
+    reason: str = Field(min_length=1, max_length=1000)
+    source: str = Field(default="user", min_length=1, max_length=64)
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class ProfileDomainInput(StrictModel):
+    stable_key: str = Field(min_length=1, max_length=255)
+    title: str = Field(min_length=1, max_length=255)
+    description: str = ""
+    minimum_percent: int | None = Field(default=None, ge=0, le=100)
+    maximum_percent: int | None = Field(default=None, ge=0, le=100)
+    order_index: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def range_is_ordered(self) -> ProfileDomainInput:
+        if (
+            self.minimum_percent is not None
+            and self.maximum_percent is not None
+            and self.minimum_percent > self.maximum_percent
+        ):
+            raise ValueError("minimum_percent cannot exceed maximum_percent")
+        return self
+
+
+class ProfileTargetInput(StrictModel):
+    stable_key: str = Field(min_length=1, max_length=255)
+    competency_identity_id: str
+    dimension_key: str | None
+    domain_stable_key: str
+    scale_stable_key: Literal["technical", "cefr"]
+    scale_version: str = Field(min_length=1, max_length=64)
+    target_level_stable_key: str = Field(min_length=1, max_length=64)
+    priority: Literal["critical", "core", "important", "supporting", "optional"]
+    target_date: str | None = None
+    target_month: str | None = None
+    date_interpretation: str | None = None
+    freshness_override_days: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def date_precision_is_explicit(self) -> ProfileTargetInput:
+        if self.target_date is not None and self.target_month is not None:
+            raise ValueError("Specify target_date or target_month, not both")
+        if self.target_date is not None:
+            try:
+                date.fromisoformat(self.target_date)
+            except ValueError as exc:
+                raise ValueError("target_date must be a valid YYYY-MM-DD date") from exc
+        if self.target_month is not None and not re.fullmatch(
+            r"\d{4}-(0[1-9]|1[0-2])", self.target_month
+        ):
+            raise ValueError("target_month must be a valid YYYY-MM month")
+        dated = self.target_date is not None or self.target_month is not None
+        if (dated and not self.date_interpretation) or (
+            not dated and self.date_interpretation is not None
+        ):
+            raise ValueError(
+                "Dated targets require date_interpretation, and undated targets omit it"
+            )
+        return self
+
+
+class ProfileMilestoneInput(StrictModel):
+    stable_key: str = Field(min_length=1, max_length=255)
+    title: str = Field(min_length=1, max_length=255)
+    description: str = ""
+    target_date: str | None = None
+    order_index: int = Field(ge=0)
+    target_stable_keys: list[str] = Field(default_factory=list)
+
+    @field_validator("target_date")
+    @classmethod
+    def target_date_is_valid(cls, value: str | None) -> str | None:
+        if value is not None:
+            try:
+                date.fromisoformat(value)
+            except ValueError as exc:
+                raise ValueError("target_date must be a valid YYYY-MM-DD date") from exc
+        return value
+
+
+class ReadinessPredicateInput(StrictModel):
+    predicate_type: Literal[
+        "capability_at_least",
+        "criterion_demonstrated",
+        "project_criterion_demonstrated",
+        "evidence_present",
+    ]
+    requirement_type: Literal["required", "supporting"]
+    order_index: int = Field(ge=0)
+    subject: dict[str, Any]
+
+
+class ReadinessGateInput(StrictModel):
+    stable_key: str = Field(min_length=1, max_length=255)
+    title: str = Field(min_length=1, max_length=255)
+    effect: Literal["hard_eligibility", "urgency", "display_only"] = "urgency"
+    order_index: int = Field(ge=0)
+    milestone_stable_key: str | None = None
+    target_stable_keys: list[str] = Field(default_factory=list)
+    predicates: list[ReadinessPredicateInput] = Field(default_factory=list)
+
+
+class TargetProfileVersionCreate(StrictModel):
+    title: str = Field(min_length=1, max_length=255)
+    description: str = ""
+    creation_source: str = Field(min_length=1, max_length=64)
+    effective_at: datetime
+    domains: list[ProfileDomainInput] = Field(min_length=1)
+    targets: list[ProfileTargetInput] = Field(min_length=1)
+    milestones: list[ProfileMilestoneInput] = Field(default_factory=list)
+    readiness_gates: list[ReadinessGateInput] = Field(default_factory=list)
+
+    @field_validator("effective_at")
+    @classmethod
+    def profile_effective_at_is_aware(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("effective_at must include a timezone offset")
+        return value
+
+
+class TargetProfileCreate(StrictModel):
+    stable_key: str = Field(min_length=1, max_length=255)
+    creation_source: str = Field(min_length=1, max_length=64)
+    version: TargetProfileVersionCreate
 
 
 class VerificationEvidenceInput(StrictModel):
