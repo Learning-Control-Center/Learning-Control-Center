@@ -11,6 +11,12 @@ from app.auth import AuthContext, get_auth_context, require_csrf
 from app.database import get_db
 from app.domain import active_timed_session, apply_session_promotion
 from app.errors import AppError
+from app.evidence import (
+    create_session_evidence,
+    link_contribution_to_session_evidence,
+    retract_contribution_evidence_links,
+    retract_session_evidence,
+)
 from app.models import (
     Activity,
     CompetencyIdentity,
@@ -242,6 +248,7 @@ async def create_manual_session(
     db.add(session)
     db.flush()
     _add_initial_contributions(db, session, validated)
+    create_session_evidence(db, session)
     _queue_session_invalidation(db, session, session.id)
     apply_session_promotion(db, session)
     db.commit()
@@ -326,6 +333,7 @@ async def complete_timed_session(
 ) -> dict[str, Any]:
     session = _get_timed(db, session_id)
     now = _finalize_timed(session, cancel=False, payload=payload)
+    create_session_evidence(db, session)
     _queue_session_invalidation(db, session, session.id)
     apply_session_promotion(db, session)
     db.commit()
@@ -340,6 +348,7 @@ async def cancel_timed_session(
 ) -> dict[str, Any]:
     session = _get_timed(db, session_id)
     now = _finalize_timed(session, cancel=True, payload=None)
+    retract_session_evidence(db, session.id, "Timed Session was cancelled.")
     _queue_session_invalidation(db, session, session.id)
     db.commit()
     return _serialize_session(db, session, now)
@@ -403,6 +412,7 @@ async def add_session_contribution(
     )
     db.add(contribution)
     db.flush()
+    link_contribution_to_session_evidence(db, session_id, contribution)
     if payload.relevance == "primary":
         session.competency_identity_id = payload.competency_identity_id
         apply_session_promotion(db, session)
@@ -447,6 +457,7 @@ async def retract_session_contribution(
     )
     db.add(retraction)
     db.flush()
+    retract_contribution_evidence_links(db, contribution)
     if contribution.relevance == "primary":
         session = db.get(LearningSession, session_id)
         assert session is not None

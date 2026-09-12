@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from datetime import date, datetime
 from typing import Any, Literal
+from urllib.parse import parse_qsl, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -27,6 +28,34 @@ ExportCategory = Literal["roadmap", "analytics", "sessions", "verification", "re
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", from_attributes=True)
+
+
+_SENSITIVE_REFERENCE_KEYS = {
+    "access_token",
+    "api_key",
+    "apikey",
+    "auth",
+    "authorization",
+    "credential",
+    "key",
+    "password",
+    "secret",
+    "signature",
+    "token",
+}
+
+
+def validate_external_reference(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if "bearer " in value.lower():
+        raise ValueError("External references must not contain credentials.")
+    parsed = urlsplit(value)
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("External references must not contain URL user information.")
+    if any(key.lower() in _SENSITIVE_REFERENCE_KEYS for key, _value in parse_qsl(parsed.query)):
+        raise ValueError("External references must not contain credential query parameters.")
+    return value
 
 
 class AuthCredentials(StrictModel):
@@ -303,6 +332,8 @@ class VerificationEvidenceInput(StrictModel):
     reference: str = Field(min_length=1)
     description: str = ""
 
+    _reference_is_safe = field_validator("reference")(validate_external_reference)
+
 
 class VerificationCreate(StrictModel):
     competency_identity_id: str
@@ -416,6 +447,62 @@ class V2TimedSessionStart(StrictModel):
     assistance_mode: AssistanceMode
     notes: str | None = None
     contributions: list[SessionContributionCreate] = Field(default_factory=list)
+
+
+class EvidenceLinkCreate(StrictModel):
+    competency_identity_id: str
+    criterion_identity_id: str | None = None
+    criterion_definition_id: str | None = None
+    scale_version_id: str | None = None
+    dimension_id: str | None = None
+    level_id: str | None = None
+    effect: Literal["supports", "contradicts", "context_only"] = "supports"
+    relevance: Literal["primary", "secondary", "supporting"] = "primary"
+
+
+class EvidenceLinkCommand(EvidenceLinkCreate):
+    idempotency_key: str = Field(min_length=8, max_length=255)
+
+
+class EvidenceCreate(StrictModel):
+    idempotency_key: str = Field(min_length=8, max_length=255)
+    evidence_type: Literal["code", "assessment", "manual", "review", "project"]
+    title: str = Field(min_length=1, max_length=255)
+    description: str | None = None
+    strength: Literal["unknown", "weak", "moderate", "strong"]
+    strength_unknown_reason: Literal["user_unspecified"] | None = None
+    independence: Literal["unknown", "guided", "assisted", "independent", "not_applicable"]
+    independence_unknown_reason: Literal["user_unspecified"] | None = None
+    occurred_at: datetime | None = None
+    occurred_at_unknown_reason: Literal["user_unspecified"] | None = None
+    capture_method: str = Field(min_length=1, max_length=128)
+    artifact_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    external_reference: str | None = None
+    links: list[EvidenceLinkCreate] = Field(min_length=1)
+
+    _external_reference_is_safe = field_validator("external_reference")(validate_external_reference)
+
+    @model_validator(mode="after")
+    def explicit_unknowns_and_occurrence(self) -> EvidenceCreate:
+        if (self.strength == "unknown") != (self.strength_unknown_reason is not None):
+            raise ValueError("Unknown strength requires exactly one unknown reason.")
+        if (self.independence == "unknown") != (self.independence_unknown_reason is not None):
+            raise ValueError("Unknown independence requires exactly one unknown reason.")
+        if (self.occurred_at is None) != (self.occurred_at_unknown_reason is not None):
+            raise ValueError("Unknown occurrence time requires exactly one unknown reason.")
+        if self.occurred_at is not None and (
+            self.occurred_at.tzinfo is None or self.occurred_at.utcoffset() is None
+        ):
+            raise ValueError("occurred_at must include a timezone offset")
+        return self
+
+
+class EvidenceLifecycleRequest(StrictModel):
+    reason: str = Field(min_length=1, max_length=10_000)
+
+
+class EvidenceRedactionRequest(EvidenceLifecycleRequest):
+    redacted_fields: list[Literal["description", "external_reference"]] = Field(min_length=1)
 
 
 class ReflectionUpsert(StrictModel):

@@ -24,6 +24,7 @@ from app.auth import AuthContext, get_auth_context, require_csrf
 from app.compatibility.v1.portable import (
     read_v1_portable_package,
     upgrade_v1_activity_session_tables,
+    upgrade_v1_evidence_tables,
     upgrade_v1_profile_competency_tables,
 )
 from app.config import Settings, get_settings_dependency
@@ -35,6 +36,7 @@ from app.domain_integrity import (
     validate_portable_row_types,
 )
 from app.errors import AppError
+from app.evidence import create_verification_with_evidence
 from app.import_diff import build_portable_replacement_diff, build_roadmap_diff
 from app.models import (
     ActiveCompetencyDefinitionState,
@@ -60,6 +62,12 @@ from app.models import (
     CriterionIdentity,
     DailyReflection,
     DisciplineProfile,
+    Evidence,
+    EvidenceInvalidation,
+    EvidenceLink,
+    EvidenceLinkRetraction,
+    EvidenceRedaction,
+    EvidenceRetraction,
     ExitCriterionDefinition,
     ExitCriterionIdentity,
     ExportRecord,
@@ -112,6 +120,7 @@ from app.schemas import (
     RoadmapPackagePayload,
     StateUpdatePayload,
     VerificationUpdatePayload,
+    validate_external_reference,
 )
 from app.security import RateLimitRule, new_secret, rate_limiter
 from app.settings_api import get_or_create_profile
@@ -171,6 +180,12 @@ PORTABLE_MODELS = [
     CompetencyState,
     VerificationRecord,
     VerificationEvidence,
+    Evidence,
+    EvidenceLink,
+    EvidenceRetraction,
+    EvidenceInvalidation,
+    EvidenceLinkRetraction,
+    EvidenceRedaction,
     CompetencyStatusEvent,
     MigrationBackfillRun,
     DailyReflection,
@@ -222,13 +237,48 @@ def _row_dict(item: Any) -> dict[str, Any]:
 
 
 def _portable_payload(db: Session) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "manifest": PORTABLE_V2_MANIFEST,
         "tables": {
             _table(model).name: [_row_dict(item) for item in db.scalars(select(model)).all()]
             for model in PORTABLE_MODELS
         },
     }
+    tables = payload["tables"]
+    evidence_by_id = {row["id"]: row for row in tables["evidence"]}
+    verification_records = {row["id"]: row for row in tables["verification_records"]}
+    verification_context = {row["id"]: row for row in tables["verification_evidence"]}
+    for evidence in evidence_by_id.values():
+        try:
+            validate_external_reference(evidence["external_reference"])
+        except ValueError:
+            evidence["external_reference"] = None
+    for source in verification_context.values():
+        try:
+            validate_external_reference(source["reference"])
+        except ValueError:
+            source["reference"] = "[redacted]"
+    for redaction in tables["evidence_redactions"]:
+        evidence = evidence_by_id.get(redaction["evidence_id"])
+        if evidence is None:
+            continue
+        fields = set(json.loads(redaction["redacted_fields_json"]))
+        if "description" in fields:
+            evidence["description"] = None
+        if "external_reference" in fields:
+            evidence["external_reference"] = None
+        if evidence["source_type"] == "verification_record" and "description" in fields:
+            source = verification_records.get(evidence["source_id"])
+            if source is not None:
+                source["evidence_summary"] = None
+        if evidence["source_type"] == "verification_evidence":
+            source = verification_context.get(evidence["source_id"])
+            if source is not None:
+                if "description" in fields:
+                    source["description"] = ""
+                if "external_reference" in fields:
+                    source["reference"] = "[redacted]"
+    return payload
 
 
 def _resolve_export_scope(db: Session, request: ExportRequest) -> ResolvedExportScope:
@@ -534,6 +584,9 @@ def _insert_portable_tables(connection: Any, tables: dict[str, list[dict[str, An
     roadmap_pointers: list[tuple[str, str | None, str | None, bool]] = []
     parent_pointers: list[tuple[str, str | None]] = []
     activity_supersession_pointers: list[tuple[str, str | None]] = []
+    evidence_supersession_pointers: list[tuple[str, str | None]] = []
+    evidence_replacement_pointers: list[tuple[str, str | None]] = []
+    evidence_link_replacement_pointers: list[tuple[str, str | None]] = []
     for model in PORTABLE_MODELS:
         table_name = _table(model).name
         rows = [dict(row) for row in tables.get(table_name, [])]
@@ -560,6 +613,24 @@ def _insert_portable_tables(connection: Any, tables: dict[str, list[dict[str, An
                     (row["id"], row.get("supersedes_activity_id"))
                 )
                 row["supersedes_activity_id"] = None
+        if model is Evidence:
+            for row in rows:
+                evidence_supersession_pointers.append(
+                    (row["id"], row.get("supersedes_evidence_id"))
+                )
+                row["supersedes_evidence_id"] = None
+        if model is EvidenceRetraction:
+            for row in rows:
+                evidence_replacement_pointers.append(
+                    (row["id"], row.get("replacement_evidence_id"))
+                )
+                row["replacement_evidence_id"] = None
+        if model is EvidenceLinkRetraction:
+            for row in rows:
+                evidence_link_replacement_pointers.append(
+                    (row["id"], row.get("replacement_link_id"))
+                )
+                row["replacement_link_id"] = None
         if rows:
             connection.execute(insert(_table(model)), rows)
     for definition_id, parent_id in parent_pointers:
@@ -577,6 +648,30 @@ def _insert_portable_tables(connection: Any, tables: dict[str, list[dict[str, An
                 .update()
                 .where(Activity.id == activity_id)
                 .values(supersedes_activity_id=supersedes_id)
+            )
+    for evidence_id, supersedes_id in evidence_supersession_pointers:
+        if supersedes_id:
+            connection.execute(
+                _table(Evidence)
+                .update()
+                .where(Evidence.id == evidence_id)
+                .values(supersedes_evidence_id=supersedes_id)
+            )
+    for retraction_id, replacement_id in evidence_replacement_pointers:
+        if replacement_id:
+            connection.execute(
+                _table(EvidenceRetraction)
+                .update()
+                .where(EvidenceRetraction.id == retraction_id)
+                .values(replacement_evidence_id=replacement_id)
+            )
+    for retraction_id, replacement_id in evidence_link_replacement_pointers:
+        if replacement_id:
+            connection.execute(
+                _table(EvidenceLinkRetraction)
+                .update()
+                .where(EvidenceLinkRetraction.id == retraction_id)
+                .values(replacement_link_id=replacement_id)
             )
     for roadmap_id, version_id, phase_id, is_current in roadmap_pointers:
         connection.execute(
@@ -676,6 +771,7 @@ def _normalize_portable_tables(
     if schema_version == 1:
         upgrade_v1_profile_competency_tables(tables)
         upgrade_v1_activity_session_tables(tables)
+        upgrade_v1_evidence_tables(tables, import_package_id=package_id)
         for table_name in {"analysis_runs", "analysis_snapshots"}:
             tables[table_name] = []
         for row in tables.get("recommendation_snapshots", []):
@@ -721,9 +817,10 @@ def _validate_portable_payload(
     backfill_runs = {row["source_kind"]: row for row in tables["migration_backfill_runs"]}
     criterion_backfill = backfill_runs.get("v1_exit_criteria")
     activity_backfill = backfill_runs.get("v1_learning_sessions")
+    evidence_backfill = backfill_runs.get("v1_evidence_sources")
     compatibility_conversions: dict[str, Any] = {}
     if schema_version == 1:
-        if criterion_backfill is None or activity_backfill is None:
+        if criterion_backfill is None or activity_backfill is None or evidence_backfill is None:
             raise AppError(
                 422,
                 "PORTABLE_DATA_INVALID",
@@ -740,6 +837,11 @@ def _validate_portable_payload(
             "legacySessionSourceRowCount": activity_backfill["source_row_count"],
             "legacySessionSourceHash": activity_backfill["source_hash"],
             "legacySessionResultHash": activity_backfill["result_hash"],
+            "legacyEvidenceCreated": len(tables["evidence"]),
+            "legacyEvidenceLinksCreated": len(tables["evidence_links"]),
+            "legacyEvidenceSourceRowCount": evidence_backfill["source_row_count"],
+            "legacyEvidenceSourceHash": evidence_backfill["source_hash"],
+            "legacyEvidenceResultHash": evidence_backfill["result_hash"],
             "nativeSemanticDefinitionsInferred": 0,
             "targetProfilesInferred": 0,
         }
@@ -856,7 +958,11 @@ def _inspect_package(
             )
         _preflight_application(
             db,
-            lambda validation_db: _apply_verification_update(validation_db, verification_payload),
+            lambda validation_db: _apply_verification_update(
+                validation_db,
+                verification_payload,
+                import_package_id=payload.package.packageId,
+            ),
             "VERIFICATION_UPDATE_INVALID",
             "The verification update cannot be applied to the current state.",
         )
@@ -884,7 +990,11 @@ def _inspect_package(
                 raise AppError(422, "STATE_UPDATE_INVALID", "A competency state is invalid.")
         _preflight_application(
             db,
-            lambda validation_db: _apply_state_update(validation_db, state_payload),
+            lambda validation_db: _apply_state_update(
+                validation_db,
+                state_payload,
+                import_package_id=payload.package.packageId,
+            ),
             "STATE_UPDATE_INVALID",
             "The competency state update cannot be applied to the current state.",
         )
@@ -942,6 +1052,9 @@ def _delete_portable_state(db: Session) -> None:
     db.flush()
     db.execute(_table(ProjectionInvalidation).delete())
     db.execute(_table(Activity).update().values(supersedes_activity_id=None))
+    db.execute(_table(Evidence).update().values(supersedes_evidence_id=None))
+    db.execute(_table(EvidenceRetraction).update().values(replacement_evidence_id=None))
+    db.execute(_table(EvidenceLinkRetraction).update().values(replacement_link_id=None))
     for model in reversed(PORTABLE_MODELS):
         db.execute(_table(model).delete())
     db.flush()
@@ -999,43 +1112,23 @@ def _apply_portable_restore(
     validate_domain_integrity(db)
 
 
-def _apply_verification_update(db: Session, payload: VerificationUpdatePayload) -> None:
+def _apply_verification_update(
+    db: Session, payload: VerificationUpdatePayload, *, import_package_id: str | None = None
+) -> None:
     for item in payload.verifications:
-        record = VerificationRecord(
-            competency_identity_id=item.competency_identity_id,
-            verification_source=item.verification_source,
-            method=item.method,
-            result=item.result,
-            confidence=item.confidence,
-            reviewer_label=item.reviewer_label,
-            evidence_summary=item.evidence_summary,
-            notes=item.notes,
-        )
-        db.add(record)
-        db.flush()
-        for evidence in item.evidence:
-            db.add(
-                VerificationEvidence(
-                    verification_record_id=record.id,
-                    kind=evidence.kind,
-                    reference=evidence.reference,
-                    description=evidence.description,
-                )
-            )
-        status = {"passed": "verified", "partial": "practicing", "failed": "needs_review"}[
-            item.result
-        ]
-        transition_status(
+        create_verification_with_evidence(
             db,
-            item.competency_identity_id,
-            status,
-            reason=f"Imported verification result: {item.result}",
-            source="import",
-            verification_record_id=record.id if item.result == "passed" else None,
+            item,
+            origin_kind="import",
+            lifecycle_source="import",
+            lifecycle_reason_prefix="Imported verification result",
+            import_package_id=import_package_id,
         )
 
 
-def _apply_state_update(db: Session, payload: StateUpdatePayload) -> None:
+def _apply_state_update(
+    db: Session, payload: StateUpdatePayload, *, import_package_id: str | None = None
+) -> None:
     for item in payload.states:
         if item.status == "verified":
             if item.verification is None:
@@ -1045,7 +1138,9 @@ def _apply_state_update(db: Session, payload: StateUpdatePayload) -> None:
                     "Imported verified status requires a matching passed verification record.",
                 )
             _apply_verification_update(
-                db, VerificationUpdatePayload(verifications=[item.verification])
+                db,
+                VerificationUpdatePayload(verifications=[item.verification]),
+                import_package_id=import_package_id,
             )
             continue
         transition_status(
@@ -1158,10 +1253,16 @@ async def apply_import(
                 )
             elif payload.package.packageType == "verification_update":
                 _apply_verification_update(
-                    db, VerificationUpdatePayload.model_validate(payload.package.payload)
+                    db,
+                    VerificationUpdatePayload.model_validate(payload.package.payload),
+                    import_package_id=payload.package.packageId,
                 )
             elif payload.package.packageType == "state_update":
-                _apply_state_update(db, StateUpdatePayload.model_validate(payload.package.payload))
+                _apply_state_update(
+                    db,
+                    StateUpdatePayload.model_validate(payload.package.payload),
+                    import_package_id=payload.package.packageId,
+                )
             else:
                 roadmap_payload = RoadmapPackagePayload.model_validate(
                     payload.package.payload

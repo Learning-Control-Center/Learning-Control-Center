@@ -17,6 +17,7 @@ from app.auth import router as auth_router
 from app.config import get_settings, is_strong_operator_secret
 from app.database import SessionLocal, initialize_database, run_migrations
 from app.errors import install_error_handlers
+from app.evidence import router as evidence_router
 from app.import_export import router as import_export_router
 from app.models import User
 from app.operation_lock import exclusive_operation_lock
@@ -146,3 +147,4 @@ for api_router in (
 
 app.include_router(v2_profile_router, prefix="/api/v2")
 app.include_router(v2_activity_router, prefix="/api/v2")
+app.include_router(evidence_router, prefix="/api/v2")

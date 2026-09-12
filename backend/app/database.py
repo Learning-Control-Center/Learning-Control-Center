@@ -200,6 +200,14 @@ def _assert_known_migration_source(
         "contribution_retractions",
         "session_corrections",
     }
+    evidence_tables = {
+        "evidence",
+        "evidence_links",
+        "evidence_retractions",
+        "evidence_invalidations",
+        "evidence_link_retractions",
+        "evidence_redactions",
+    }
     activity_backfill_present = bool(
         any(
             connection.execute(f'SELECT 1 FROM "{table}" LIMIT 1').fetchone()
@@ -267,6 +275,21 @@ def _assert_known_migration_source(
     ):
         raise RuntimeError(
             "Database has an ambiguously partial Activity/Session migration; restore its "
+            "verified pre-migration backup before retrying."
+        )
+    if revision == "0008_activity_session_constraint" and (
+        any(name.startswith("_alembic_tmp_") for name in tables)
+        or bool(evidence_tables & tables)
+        or (
+            "migration_backfill_runs" in tables
+            and connection.execute(
+                "SELECT 1 FROM migration_backfill_runs "
+                "WHERE source_kind='v1_evidence_sources' LIMIT 1"
+            ).fetchone()
+        )
+    ):
+        raise RuntimeError(
+            "Database has an ambiguously partial unified Evidence migration; restore its "
             "verified pre-migration backup before retrying."
         )
 

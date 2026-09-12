@@ -10,8 +10,8 @@ from sqlalchemy.orm import Session
 
 from app.auth import AuthContext, get_auth_context, require_csrf
 from app.database import get_db
-from app.domain import transition_status
 from app.errors import AppError
+from app.evidence import create_verification_with_evidence
 from app.models import VerificationEvidence, VerificationRecord
 from app.schemas import VerificationCreate
 from app.time_utils import datetime_to_epoch_ms, epoch_ms_to_rfc3339
@@ -25,37 +25,11 @@ async def create_verification(
     _auth: AuthContext = Depends(require_csrf),
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
-    record = VerificationRecord(
-        competency_identity_id=payload.competency_identity_id,
-        verification_source=payload.verification_source,
-        method=payload.method,
-        result=payload.result,
-        confidence=payload.confidence,
-        reviewer_label=payload.reviewer_label,
-        evidence_summary=payload.evidence_summary,
-        notes=payload.notes,
-    )
-    db.add(record)
-    db.flush()
-    for evidence in payload.evidence:
-        db.add(
-            VerificationEvidence(
-                verification_record_id=record.id,
-                kind=evidence.kind,
-                reference=evidence.reference,
-                description=evidence.description,
-            )
-        )
-    status = {"passed": "verified", "partial": "practicing", "failed": "needs_review"}[
-        payload.result
-    ]
-    transition_status(
+    record, status = create_verification_with_evidence(
         db,
-        payload.competency_identity_id,
-        status,
-        reason=f"Verification result: {payload.result}",
-        source="verification",
-        verification_record_id=record.id if payload.result == "passed" else None,
+        payload,
+        origin_kind="local",
+        lifecycle_source="verification",
     )
     db.commit()
     return {"id": record.id, "result": record.result, "status": status}

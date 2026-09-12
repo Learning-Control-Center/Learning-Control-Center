@@ -13,6 +13,7 @@ from app.auth import AuthContext, get_auth_context, require_csrf
 from app.database import get_db
 from app.domain import active_timed_session, apply_session_promotion
 from app.errors import AppError
+from app.evidence import create_session_evidence, replace_session_evidence, retract_session_evidence
 from app.models import (
     Activity,
     ContributionRetraction,
@@ -174,6 +175,7 @@ async def create_manual_session(
     db.add(item)
     db.flush()
     _add_primary_contribution(db, item, payload.competency_identity_id)
+    create_session_evidence(db, item)
     _invalidate_session(db, item, activity.id)
     apply_session_promotion(db, item)
     db.commit()
@@ -303,6 +305,7 @@ async def complete_timed_session(
     item = _get_timed(db, session_id)
     now = _finalize_timed(item, cancel=False, payload=payload)
     replacement = _supersede_activity_from_session(db, item)
+    create_session_evidence(db, item)
     _invalidate_session(db, item, replacement.id)
     apply_session_promotion(db, item)
     db.commit()
@@ -318,6 +321,7 @@ async def cancel_timed_session(
     item = _get_timed(db, session_id)
     now = _finalize_timed(item, cancel=True, payload=None)
     replacement = _supersede_activity_from_session(db, item)
+    retract_session_evidence(db, item.id, "Timed Session was cancelled.")
     _invalidate_session(db, item, replacement.id)
     db.commit()
     return serialize_session(item, now)
@@ -458,6 +462,13 @@ async def update_session(
         after_json=json.dumps(after, sort_keys=True, separators=(",", ":")),
     )
     db.add(correction)
+    db.flush()
+    replace_session_evidence(
+        db,
+        item,
+        source_role=f"correction:{correction.id}",
+        reason="Session evidence was replaced after correction.",
+    )
     _invalidate_session(db, item, correction.id)
     apply_session_promotion(db, item)
     db.commit()
@@ -500,6 +511,8 @@ async def delete_session(
         ),
     )
     db.add(correction)
+    db.flush()
+    retract_session_evidence(db, item.id, item.tombstone_reason)
     _invalidate_session(db, item, correction.id)
     db.commit()
     return {"deleted": True}

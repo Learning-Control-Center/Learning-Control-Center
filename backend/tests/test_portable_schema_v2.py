@@ -9,6 +9,7 @@ from app.compatibility.v1.portable import (
     UnsupportedV1PortableSchema,
     read_v1_portable_package,
     upgrade_v1_activity_session_tables,
+    upgrade_v1_evidence_tables,
     upgrade_v1_profile_competency_tables,
 )
 from app.models import Activity, CriterionIdentity
@@ -116,6 +117,53 @@ def test_v1_activity_upgrade_is_deterministic_and_idempotent() -> None:
     }
     assert len(first_report["legacySessionSourceHash"]) == 64
     assert len(first_report["legacySessionResultHash"]) == 64
+
+
+def test_v1_evidence_upgrade_is_deterministic_and_records_import_provenance() -> None:
+    tables = {
+        "verification_records": [],
+        "verification_evidence": [],
+        "learning_sessions": [
+            {
+                "id": "session",
+                "activity_id": "activity",
+                "competency_identity_id": "competency",
+                "activity_type": "coding",
+                "assistance_mode": "none",
+                "started_at": 10,
+                "duration_ms": 10,
+                "outcome": "completed",
+                "timed_state": None,
+                "tombstoned_at": None,
+                "created_at": 20,
+            }
+        ],
+        "session_contributions": [
+            {
+                "id": "contribution",
+                "session_id": "session",
+                "competency_identity_id": "competency",
+                "criterion_identity_id": None,
+                "relevance": "primary",
+                "created_at": 20,
+                "provenance": "deterministic_legacy_backfill",
+            }
+        ],
+        "contribution_retractions": [],
+        "migration_backfill_runs": [{"id": "unrelated"}],
+    }
+    first = upgrade_v1_evidence_tables(tables, import_package_id="package-a")
+    first_result = copy.deepcopy(tables)
+    second = upgrade_v1_evidence_tables(tables, import_package_id="package-a")
+    assert tables == first_result
+    assert first == second
+    assert len(tables["evidence"]) == 1
+    assert len(tables["evidence_links"]) == 1
+    provenance = json.loads(tables["evidence"][0]["provenance_json"])
+    assert provenance["origin_kind"] == "import"
+    assert provenance["import_package_id"] == "package-a"
+    assert tables["evidence"][0]["strength"] == "unknown"
+    assert tables["evidence"][0]["source_confidence"] == "unknown"
 
 
 async def test_runtime_dispatch_rejects_v2_tables_in_v1_package(

@@ -36,6 +36,12 @@ PORTABLE_V2_FOUNDATION_TABLES = frozenset(
         "session_contributions",
         "contribution_retractions",
         "session_corrections",
+        "evidence",
+        "evidence_links",
+        "evidence_retractions",
+        "evidence_invalidations",
+        "evidence_link_retractions",
+        "evidence_redactions",
     }
 )
 PORTABLE_V1_FORBIDDEN_TABLES = frozenset(
@@ -50,6 +56,8 @@ PORTABLE_V2_MANIFEST = {
         "legacy_criterion_assertions",
         "activities",
         "session_contributions",
+        "evidence",
+        "evidence_links",
     ],
     "includedImmutableHistory": [
         "analysis_runs",
@@ -59,6 +67,10 @@ PORTABLE_V2_MANIFEST = {
         "migration_backfill_runs",
         "contribution_retractions",
         "session_corrections",
+        "evidence_retractions",
+        "evidence_invalidations",
+        "evidence_link_retractions",
+        "evidence_redactions",
     ],
     "omittedRebuildableState": ["projection_invalidations"],
     "restoreActions": ["clear_projection_invalidations"],

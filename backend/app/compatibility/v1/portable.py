@@ -13,6 +13,16 @@ from app.compatibility.v1.activity_backfill import (
     activity_category_rows,
     build_activity_session_backfill,
 )
+from app.compatibility.v1.evidence_backfill import (
+    POLICY_KEY as EVIDENCE_POLICY_KEY,
+)
+from app.compatibility.v1.evidence_backfill import (
+    RECORDED_AT as EVIDENCE_RECORDED_AT,
+)
+from app.compatibility.v1.evidence_backfill import (
+    RUN_ID as EVIDENCE_RUN_ID,
+)
+from app.compatibility.v1.evidence_backfill import build_evidence_backfill
 from app.compatibility.v1.profile_competency_backfill import (
     POLICY_KEY,
     RUN_ID,
@@ -22,6 +32,42 @@ from app.compatibility.v1.profile_competency_backfill import (
 
 class UnsupportedV1PortableSchema(ValueError):
     pass
+
+
+def upgrade_v1_evidence_tables(
+    tables: dict[str, list[dict[str, Any]]], *, import_package_id: str
+) -> dict[str, Any]:
+    try:
+        backfill = build_evidence_backfill(tables, import_package_id=import_package_id)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise UnsupportedV1PortableSchema(str(exc)) from exc
+    tables["evidence"] = backfill.evidence
+    tables["evidence_links"] = backfill.links
+    tables["evidence_retractions"] = []
+    tables["evidence_invalidations"] = []
+    tables["evidence_link_retractions"] = []
+    tables["evidence_redactions"] = []
+    runs = tables.setdefault("migration_backfill_runs", [])
+    runs[:] = [row for row in runs if row.get("id") != EVIDENCE_RUN_ID]
+    runs.append(
+        {
+            "id": EVIDENCE_RUN_ID,
+            "policy_key": EVIDENCE_POLICY_KEY,
+            "source_kind": "v1_evidence_sources",
+            "source_row_count": backfill.source_row_count,
+            "result_row_count": len(backfill.evidence) + len(backfill.links),
+            "source_hash": backfill.source_hash,
+            "result_hash": backfill.result_hash,
+            "recorded_at": EVIDENCE_RECORDED_AT,
+        }
+    )
+    return {
+        "legacyEvidenceCreated": len(backfill.evidence),
+        "legacyEvidenceLinksCreated": len(backfill.links),
+        "legacyEvidenceSourceRowCount": backfill.source_row_count,
+        "legacyEvidenceSourceHash": backfill.source_hash,
+        "legacyEvidenceResultHash": backfill.result_hash,
+    }
 
 
 def upgrade_v1_activity_session_tables(tables: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:

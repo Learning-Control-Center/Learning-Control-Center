@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import defaultdict
 from typing import Any, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -18,6 +19,9 @@ from app.compatibility.v1.activity_backfill import (
 from app.compatibility.v1.activity_backfill import (
     activity_category_rows,
 )
+from app.compatibility.v1.evidence_backfill import POLICY_KEY as EVIDENCE_POLICY_KEY
+from app.compatibility.v1.evidence_backfill import RUN_ID as EVIDENCE_RUN_ID
+from app.compatibility.v1.evidence_backfill import result_rows_hash as evidence_rows_hash
 from app.compatibility.v1.profile_competency_backfill import (
     POLICY_KEY,
     RUN_ID,
@@ -46,6 +50,11 @@ from app.models import (
     CriterionDefinition,
     CriterionIdentity,
     DisciplineProfile,
+    Evidence,
+    EvidenceLink,
+    EvidenceLinkRetraction,
+    EvidenceRedaction,
+    EvidenceRetraction,
     ExitCriterionDefinition,
     ExitCriterionIdentity,
     ExportRecord,
@@ -77,8 +86,10 @@ from app.models import (
     TargetProfileActivationEvent,
     TargetProfileVersion,
     Track,
+    VerificationEvidence,
     VerificationRecord,
 )
+from app.schemas import validate_external_reference
 
 
 def validate_portable_row_types(
@@ -127,6 +138,9 @@ def _validate_json_columns(connection: Any) -> None:
         (AnalysisSnapshot, "unknown_markers_json"),
         (ReadinessGatePredicate, "subject_json"),
         (CriterionDefinition, "demonstration_rule_json"),
+        (Evidence, "provenance_json"),
+        (EvidenceLink, "provenance_json"),
+        (EvidenceRedaction, "redacted_fields_json"),
     )
     for model, column_name in json_columns:
         column = getattr(model, column_name)
@@ -1557,6 +1571,368 @@ def _validate_activity_sessions(connection: Any) -> None:
         )
 
 
+def _validate_evidence(connection: Any) -> None:
+    redaction_fields = {"description", "external_reference"}
+    redactions_by_evidence: dict[str, set[str]] = {}
+    for redaction in connection.execute(
+        select(EvidenceRedaction.evidence_id, EvidenceRedaction.redacted_fields_json)
+    ).all():
+        try:
+            fields = json.loads(redaction.redacted_fields_json)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise AppError(
+                422, "PORTABLE_EVIDENCE_REDACTION_INVALID", "A redaction is malformed."
+            ) from exc
+        if (
+            not isinstance(fields, list)
+            or not fields
+            or any(field not in redaction_fields for field in fields)
+        ):
+            raise AppError(
+                422, "PORTABLE_EVIDENCE_REDACTION_INVALID", "A redaction is inconsistent."
+            )
+        redactions_by_evidence[redaction.evidence_id] = set(fields)
+    evidence_rows = {
+        row.id: row
+        for row in connection.execute(
+            select(
+                Evidence.id,
+                Evidence.source_type,
+                Evidence.source_id,
+                Evidence.supersedes_evidence_id,
+                Evidence.strength_unknown_reason,
+                Evidence.independence_unknown_reason,
+                Evidence.source_confidence_unknown_reason,
+                Evidence.occurred_at_unknown_reason,
+                Evidence.provenance_json,
+                Evidence.policy_version,
+                Evidence.schema_version,
+                Evidence.description,
+                Evidence.external_reference,
+            )
+        ).all()
+    }
+    for item in evidence_rows.values():
+        try:
+            provenance = json.loads(item.provenance_json)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise AppError(
+                422, "PORTABLE_EVIDENCE_INVALID", "Evidence provenance is malformed."
+            ) from exc
+        if not isinstance(provenance, dict):
+            raise AppError(422, "PORTABLE_EVIDENCE_INVALID", "Evidence provenance is inconsistent.")
+        allowed_unknown_reasons = {
+            "legacy_unspecified",
+            "source_policy_unspecified",
+            "source_unspecified",
+            "user_unspecified",
+            "import_unspecified",
+        }
+        unknown_reasons = (
+            item.strength_unknown_reason,
+            item.independence_unknown_reason,
+            item.source_confidence_unknown_reason,
+            item.occurred_at_unknown_reason,
+        )
+        capture_method = provenance.get("capture_method")
+        expected_provenance_policy = (
+            EVIDENCE_POLICY_KEY
+            if capture_method == "deterministic_legacy_backfill"
+            else item.policy_version
+        )
+        origin_kind = provenance.get("origin_kind")
+        import_package_id = provenance.get("import_package_id")
+        current_description_hash = evidence_rows_hash([{"value": item.description}])
+        current_reference_hash = evidence_rows_hash([{"value": item.external_reference}])
+        redacted_fields_for_item = redactions_by_evidence.get(item.id, set())
+        try:
+            validate_external_reference(item.external_reference)
+        except ValueError as exc:
+            raise AppError(
+                422,
+                "PORTABLE_EVIDENCE_REFERENCE_UNSAFE",
+                "Evidence contains a credential-bearing external reference.",
+            ) from exc
+        if (
+            origin_kind not in {"local", "external", "import"}
+            or not isinstance(provenance.get("creator_kind"), str)
+            or not provenance.get("creator_kind")
+            or not isinstance(capture_method, str)
+            or provenance.get("policy_version") != expected_provenance_policy
+            or provenance.get("source_record_type") != item.source_type
+            or provenance.get("source_record_id") != item.source_id
+            or (origin_kind == "import" and not isinstance(import_package_id, str))
+            or (origin_kind == "import" and not import_package_id)
+            or (origin_kind != "import" and import_package_id not in {None, ""})
+            or (
+                item.source_type == "native_evidence_command"
+                and not re.fullmatch(r"[0-9a-f]{64}", str(provenance.get("command_hash", "")))
+            )
+            or (
+                capture_method == "deterministic_legacy_backfill"
+                and "description" not in redacted_fields_for_item
+                and provenance.get("description_hash") != current_description_hash
+            )
+            or (
+                capture_method == "deterministic_legacy_backfill"
+                and "external_reference" not in redacted_fields_for_item
+                and provenance.get("external_reference_hash") != current_reference_hash
+            )
+            or item.policy_version != "evidence-policy/v1"
+            or item.schema_version != 1
+            or any(
+                reason is not None and reason not in allowed_unknown_reasons
+                for reason in unknown_reasons
+            )
+            or (
+                item.supersedes_evidence_id is not None
+                and item.supersedes_evidence_id not in evidence_rows
+            )
+        ):
+            raise AppError(422, "PORTABLE_EVIDENCE_INVALID", "Evidence provenance is inconsistent.")
+    for item in evidence_rows.values():
+        seen: set[str] = set()
+        current = item
+        while current.supersedes_evidence_id is not None:
+            if current.id in seen:
+                raise AppError(
+                    422,
+                    "PORTABLE_EVIDENCE_INVALID",
+                    "Evidence supersession contains a cycle.",
+                )
+            seen.add(current.id)
+            current = evidence_rows[current.supersedes_evidence_id]
+
+    criterion_competencies = dict(
+        connection.execute(
+            select(CriterionIdentity.id, CriterionIdentity.competency_identity_id)
+        ).all()
+    )
+    for reference in connection.execute(select(VerificationEvidence.reference)).scalars():
+        try:
+            validate_external_reference(reference)
+        except ValueError as exc:
+            raise AppError(
+                422,
+                "PORTABLE_VERIFICATION_REFERENCE_UNSAFE",
+                "Verification Evidence contains a credential-bearing reference.",
+            ) from exc
+    criterion_definitions = {
+        row.id: row
+        for row in connection.execute(
+            select(
+                CriterionDefinition.id,
+                CriterionDefinition.criterion_identity_id,
+                CriterionDefinition.level_id,
+                CriterionDefinition.dimension_id,
+            )
+        ).all()
+    }
+    dimensions = dict(
+        connection.execute(
+            select(CapabilityScaleDimension.id, CapabilityScaleDimension.scale_version_id)
+        ).all()
+    )
+    levels = dict(
+        connection.execute(
+            select(CapabilityScaleLevel.id, CapabilityScaleLevel.scale_version_id)
+        ).all()
+    )
+    scales = set(connection.execute(select(CapabilityScaleVersion.id)).scalars())
+    contributions = {
+        row.id: row
+        for row in connection.execute(
+            select(
+                SessionContribution.id,
+                SessionContribution.session_id,
+                SessionContribution.competency_identity_id,
+                SessionContribution.criterion_identity_id,
+            )
+        ).all()
+    }
+    links = {
+        row.id: row
+        for row in connection.execute(
+            select(
+                EvidenceLink.id,
+                EvidenceLink.evidence_id,
+                EvidenceLink.source_contribution_id,
+                EvidenceLink.competency_identity_id,
+                EvidenceLink.criterion_identity_id,
+                EvidenceLink.criterion_definition_id,
+                EvidenceLink.scale_version_id,
+                EvidenceLink.dimension_id,
+                EvidenceLink.level_id,
+                EvidenceLink.provenance_json,
+            )
+        ).all()
+    }
+    for link in links.values():
+        contribution = contributions.get(link.source_contribution_id)
+        linked_evidence = evidence_rows.get(link.evidence_id)
+        definition = criterion_definitions.get(link.criterion_definition_id)
+        try:
+            link_provenance = json.loads(link.provenance_json)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise AppError(
+                422, "PORTABLE_EVIDENCE_LINK_INVALID", "EvidenceLink provenance is malformed."
+            ) from exc
+        expected_link_policy = (
+            EVIDENCE_POLICY_KEY
+            if isinstance(link_provenance, dict)
+            and link_provenance.get("capture_method") == "deterministic_legacy_backfill"
+            else "evidence-policy/v1"
+        )
+        if (
+            link.evidence_id not in evidence_rows
+            or not isinstance(link_provenance, dict)
+            or not isinstance(link_provenance.get("capture_method"), str)
+            or link_provenance.get("policy_version") != expected_link_policy
+            or link_provenance.get("evidence_id") != link.evidence_id
+            or (
+                link.source_contribution_id is not None
+                and link_provenance.get("session_contribution_id") != link.source_contribution_id
+            )
+            or (
+                link.source_contribution_id is None
+                and link_provenance.get("session_contribution_id") is not None
+            )
+            or (
+                link.criterion_identity_id is not None
+                and criterion_competencies.get(link.criterion_identity_id)
+                != link.competency_identity_id
+            )
+            or (
+                link.criterion_definition_id is not None
+                and (
+                    link.criterion_identity_id is None
+                    or definition is None
+                    or definition.criterion_identity_id != link.criterion_identity_id
+                    or definition.level_id != link.level_id
+                    or definition.dimension_id != link.dimension_id
+                    or levels.get(definition.level_id) != link.scale_version_id
+                )
+            )
+            or (link.scale_version_id is not None and link.scale_version_id not in scales)
+            or (
+                link.dimension_id is not None
+                and dimensions.get(link.dimension_id) != link.scale_version_id
+            )
+            or (link.level_id is not None and levels.get(link.level_id) != link.scale_version_id)
+            or (
+                link.source_contribution_id is not None
+                and (
+                    contribution is None
+                    or linked_evidence is None
+                    or linked_evidence.source_type != "learning_session"
+                    or linked_evidence.source_id != contribution.session_id
+                    or contribution.competency_identity_id != link.competency_identity_id
+                    or contribution.criterion_identity_id != link.criterion_identity_id
+                )
+            )
+        ):
+            raise AppError(
+                422, "PORTABLE_EVIDENCE_LINK_INVALID", "An EvidenceLink is inconsistent."
+            )
+
+    superseding_children: dict[str, list[str]] = defaultdict(list)
+    for item in evidence_rows.values():
+        if item.supersedes_evidence_id is not None:
+            superseding_children[item.supersedes_evidence_id].append(item.id)
+    if any(len(children) > 1 for children in superseding_children.values()):
+        raise AppError(
+            422,
+            "PORTABLE_EVIDENCE_LIFECYCLE_INVALID",
+            "Evidence supersession history contains a fork.",
+        )
+    retraction_replacements: dict[str, str | None] = {}
+    for item in connection.execute(
+        select(
+            EvidenceRetraction.evidence_id,
+            EvidenceRetraction.replacement_evidence_id,
+        )
+    ).all():
+        retraction_replacements[item.evidence_id] = item.replacement_evidence_id
+        replacement = evidence_rows.get(item.replacement_evidence_id)
+        if item.replacement_evidence_id == item.evidence_id or (
+            replacement is not None and replacement.supersedes_evidence_id != item.evidence_id
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_EVIDENCE_LIFECYCLE_INVALID",
+                "Evidence retraction replacement is inconsistent.",
+            )
+    if any(
+        retraction_replacements.get(parent_id) != children[0]
+        for parent_id, children in superseding_children.items()
+    ):
+        raise AppError(
+            422,
+            "PORTABLE_EVIDENCE_LIFECYCLE_INVALID",
+            "Evidence supersession is missing its matching retraction.",
+        )
+    for item in connection.execute(
+        select(
+            EvidenceLinkRetraction.evidence_link_id,
+            EvidenceLinkRetraction.replacement_link_id,
+        )
+    ).all():
+        original = links.get(item.evidence_link_id)
+        replacement = links.get(item.replacement_link_id)
+        if item.replacement_link_id == item.evidence_link_id or (
+            replacement is not None
+            and original is not None
+            and replacement.evidence_id != original.evidence_id
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_EVIDENCE_LIFECYCLE_INVALID",
+                "EvidenceLink retraction replacement is inconsistent.",
+            )
+    evidence_table = cast(Table, Evidence.__table__)
+    link_table = cast(Table, EvidenceLink.__table__)
+    backfill_evidence = []
+    for row in connection.execute(select(*evidence_table.columns)).all():
+        values = dict(row._mapping)
+        provenance = json.loads(values["provenance_json"])
+        if provenance.get("capture_method") == "deterministic_legacy_backfill":
+            backfill_evidence.append(values)
+    backfill_links = []
+    for row in connection.execute(select(*link_table.columns)).all():
+        values = dict(row._mapping)
+        provenance = json.loads(values["provenance_json"])
+        if provenance.get("capture_method") == "deterministic_legacy_backfill":
+            backfill_links.append(values)
+    result_rows = sorted(
+        backfill_evidence + backfill_links,
+        key=lambda row: (str(row["id"]), len(row)),
+    )
+    run = connection.execute(
+        select(
+            MigrationBackfillRun.policy_key,
+            MigrationBackfillRun.source_kind,
+            MigrationBackfillRun.source_row_count,
+            MigrationBackfillRun.result_row_count,
+            MigrationBackfillRun.source_hash,
+            MigrationBackfillRun.result_hash,
+        ).where(MigrationBackfillRun.id == EVIDENCE_RUN_ID)
+    ).one_or_none()
+    if (
+        run is None
+        or run.policy_key != EVIDENCE_POLICY_KEY
+        or run.source_kind != "v1_evidence_sources"
+        or run.source_row_count < 0
+        or len(run.source_hash) != 64
+        or run.result_row_count != len(result_rows)
+        or run.result_hash != evidence_rows_hash(result_rows)
+    ):
+        raise AppError(
+            422,
+            "PORTABLE_EVIDENCE_BACKFILL_INVALID",
+            "Evidence backfill lineage is inconsistent.",
+        )
+
+
 def validate_domain_integrity(connection: Any) -> None:
     violations = connection.execute(text("PRAGMA foreign_key_check")).all()
     if violations:
@@ -1574,6 +1950,7 @@ def validate_domain_integrity(connection: Any) -> None:
     _validate_competency_history(connection)
     _validate_v2_profile_competency(connection)
     _validate_activity_sessions(connection)
+    _validate_evidence(connection)
     for timezone_name in connection.execute(select(DisciplineProfile.timezone)).scalars():
         try:
             ZoneInfo(timezone_name)
@@ -1607,7 +1984,7 @@ def portable_state_presence(connection: Any, portable_models: list[Any]) -> dict
             count = len(ids - builtin_ids[model.__table__.name])
         elif model is MigrationBackfillRun:
             ids = set(connection.execute(select(MigrationBackfillRun.id)).scalars())
-            count = len(ids - {RUN_ID, ACTIVITY_RUN_ID})
+            count = len(ids - {RUN_ID, ACTIVITY_RUN_ID, EVIDENCE_RUN_ID})
         else:
             count = connection.scalar(select(func.count()).select_from(model)) or 0
         if count:

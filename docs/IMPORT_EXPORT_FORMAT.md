@@ -110,7 +110,7 @@ Competencies: Functions (programming.functions)
 
 Portable export uses purpose `portable_logical_backup`, format `json`, ignores selective scope, and emits the normal envelope with `packageType: "portable_logical_backup"` and payload `{"tables": {...}}`. Every table below is required, even when its value is an empty array:
 
-The required table set includes all application-produced keys in the representative package below. It includes immutable profile, semantic competency, criterion, activation, built-in capability-scale, Activity, SessionContribution, contribution-retraction, and Session-correction facts; `projection_invalidations` remains explicitly omitted because it is rebuildable. SessionContribution rows contain attribution only and never contain duration: the linked LearningSession remains the sole canonical owner of exact elapsed `duration_ms`.
+The required table set includes all application-produced keys in the representative package below. It includes immutable profile, semantic competency, criterion, activation, built-in capability-scale, Activity, SessionContribution, contribution-retraction, Session-correction, Evidence, EvidenceLink, Evidence lifecycle, and redaction facts; `projection_invalidations` remains explicitly omitted because it is rebuildable. SessionContribution rows contain attribution only and never contain duration: the linked LearningSession remains the sole canonical owner of exact elapsed `duration_ms`.
 
 Every row must contain exactly every database column for that table. Use an application-produced export as the template; portable rows use internal database IDs and are not intended for hand authoring. `users`, `auth_sessions`, and `operational_backups` are excluded, as are password hashes, session/CSRF tokens, and backup filesystem paths.
 
@@ -120,7 +120,7 @@ Import inspection validates exact table/column coverage, strict canonical scalar
 
 The restore inspection response includes `replacementDiff`, which compares current and incoming portable state by table and by portable domain. It reports existing and incoming row counts plus rows that will be added, modified, or removed, identifies every affected domain, and states that authentication is preserved and merge restore is unsupported.
 
-Current application-produced portable backups use `schemaVersion: 2` and include immutable analysis, profile, semantic competency, activation, legacy-criterion lineage, Activity, and Session attribution history. Their manifest names included history and explicitly omits rebuildable `projection_invalidations`; restore clears that queue before rebuilding from canonical facts in checkpoints that define projection consumers. Frozen V1 portable backups remain accepted through a dedicated schema-version dispatch: built-in Technical/CEFR scale facts are added deterministically, every legacy criterion receives one unknown-preserving assertion, every legacy Session receives one deterministic Activity, and a non-null legacy competency attribution receives one Primary SessionContribution. Other absent V2 tables are initialized empty, and legacy recommendation rows retain a null analysis link. The inspection summary reports row counts and source/result hashes for those conversions and confirms that no semantic definition or target profile was inferred. Older valid V1 backups that also lack `roadmap_scope_events` are identified with `portableCompatibility: "legacy_scope_baseline"`; restore creates at most one deterministic current-scope baseline from the current roadmap pointers and that roadmap row's `updated_at`. It never invents earlier phase changes. A current-format restore preserves imported history and records a `portable_restore` event only when it changes the local current scope.
+Current application-produced portable backups use `schemaVersion: 2` and include immutable analysis, profile, semantic competency, activation, legacy-criterion lineage, Activity, Session attribution, unified Evidence, EvidenceLink, lifecycle, and redaction history. Their manifest names included history and explicitly omits rebuildable `projection_invalidations`; restore clears that queue before rebuilding from canonical facts in checkpoints that define projection consumers. Frozen V1 portable backups remain accepted through a dedicated schema-version dispatch: built-in Technical/CEFR scale facts are added deterministically, every legacy criterion receives one unknown-preserving assertion, every legacy Session receives one deterministic Activity, a non-null legacy competency attribution receives one Primary SessionContribution, and qualifying legacy Session/Verification sources receive provenance-bearing Evidence without inferred strength, source confidence, criterion scope, or capability. Other absent V2 tables are initialized empty, and legacy recommendation rows retain a null analysis link. The inspection summary reports row counts and source/result hashes for those conversions and confirms that no semantic definition, target profile, or capability was inferred. Older valid V1 backups that also lack `roadmap_scope_events` are identified with `portableCompatibility: "legacy_scope_baseline"`; restore creates at most one deterministic current-scope baseline from the current roadmap pointers and that roadmap row's `updated_at`. It never invents earlier phase changes. A current-format restore preserves imported history and records a `portable_restore` event only when it changes the local current scope.
 
 ### Representative empty portable package
 
@@ -135,8 +135,8 @@ This valid package represents an empty portable learning state. Non-empty export
   "createdAt": "2026-09-04T18:30:00.000Z",
   "payload": {
     "manifest": {
-      "includedCanonicalDomains": ["learning_state", "target_profiles", "semantic_competency_definitions", "capability_scales", "legacy_criterion_assertions", "activities", "session_contributions"],
-      "includedImmutableHistory": ["analysis_runs", "analysis_snapshots", "target_profile_activation_events", "competency_definition_activation_events", "migration_backfill_runs", "contribution_retractions", "session_corrections"],
+      "includedCanonicalDomains": ["learning_state", "target_profiles", "semantic_competency_definitions", "capability_scales", "legacy_criterion_assertions", "activities", "session_contributions", "evidence", "evidence_links"],
+      "includedImmutableHistory": ["analysis_runs", "analysis_snapshots", "target_profile_activation_events", "competency_definition_activation_events", "migration_backfill_runs", "contribution_retractions", "session_corrections", "evidence_retractions", "evidence_invalidations", "evidence_link_retractions", "evidence_redactions"],
       "omittedRebuildableState": ["projection_invalidations"],
       "restoreActions": ["clear_projection_invalidations"]
     },
@@ -166,6 +166,12 @@ This valid package represents an empty portable learning state. Non-empty export
       "session_contributions": [],
       "contribution_retractions": [],
       "session_corrections": [],
+      "evidence": [],
+      "evidence_links": [],
+      "evidence_retractions": [],
+      "evidence_invalidations": [],
+      "evidence_link_retractions": [],
+      "evidence_redactions": [],
       "target_profiles": [],
       "target_profile_versions": [],
       "profile_domains": [],
@@ -187,7 +193,7 @@ This valid package represents an empty portable learning state. Non-empty export
       "active_competency_definition_states": [],
       "competency_definition_activation_events": [],
       "legacy_criterion_assertions": [],
-      "migration_backfill_runs": [{"id":"dd3eef0d-c7ee-5f65-9911-f27d07743d2d","policy_key":"legacy-backfill-policy/v1","source_kind":"v1_exit_criteria","source_row_count":0,"result_row_count":0,"source_hash":"4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945","result_hash":"4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945","recorded_at":1788912000000},{"id":"62bbb6ce-c7bf-517d-83c5-27b02b370af4","policy_key":"activity-legacy-backfill-policy/v1","source_kind":"v1_learning_sessions","source_row_count":0,"result_row_count":0,"source_hash":"4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945","result_hash":"4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945","recorded_at":1788912000000}],
+      "migration_backfill_runs": [{"id":"dd3eef0d-c7ee-5f65-9911-f27d07743d2d","policy_key":"legacy-backfill-policy/v1","source_kind":"v1_exit_criteria","source_row_count":0,"result_row_count":0,"source_hash":"4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945","result_hash":"4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945","recorded_at":1788912000000},{"id":"62bbb6ce-c7bf-517d-83c5-27b02b370af4","policy_key":"activity-legacy-backfill-policy/v1","source_kind":"v1_learning_sessions","source_row_count":0,"result_row_count":0,"source_hash":"4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945","result_hash":"4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945","recorded_at":1788912000000},{"id":"9e14f409-7920-5a86-b5c8-dc180085b933","policy_key":"unified-evidence-legacy-backfill/v1","source_kind":"v1_evidence_sources","source_row_count":0,"result_row_count":0,"source_hash":"4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945","result_hash":"4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945","recorded_at":1788912000000}],
       "daily_reflections": [],
       "generated_reports": [],
       "analysis_runs": [],

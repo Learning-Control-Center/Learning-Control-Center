@@ -18,6 +18,7 @@ from app import models as _models  # noqa: F401
 from app.analysis import v1_compat
 from app.analysis.v1_compat import build_v1_recommendation_envelope
 from app.compatibility.v1.activity_backfill import build_activity_session_backfill
+from app.compatibility.v1.evidence_backfill import build_evidence_backfill
 from app.config import get_settings
 from app.database import Base, create_database_engine
 from app.import_export import _validate_portable_payload
@@ -56,6 +57,76 @@ def _table_names(path: Path) -> set[str]:
                 "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             )
         }
+    finally:
+        connection.close()
+
+
+def test_unified_evidence_migration_is_deterministic_and_unknown_preserving(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "evidence-backfill.sqlite3"
+    shutil.copyfile(FIXTURES / "populated-0002.sqlite3", database_path)
+    config = _config(database_path)
+    command.upgrade(config, "0008_activity_session_constraint")
+    connection = sqlite3.connect(database_path)
+    connection.row_factory = sqlite3.Row
+    try:
+        source_tables = {
+            name: [dict(row) for row in connection.execute(f'SELECT * FROM "{name}"')]
+            for name in (
+                "verification_records",
+                "verification_evidence",
+                "learning_sessions",
+                "session_contributions",
+                "contribution_retractions",
+            )
+        }
+        expected = build_evidence_backfill(source_tables)
+    finally:
+        connection.close()
+    command.upgrade(config, "0009_unified_evidence_verification")
+    connection = sqlite3.connect(database_path)
+    connection.row_factory = sqlite3.Row
+    try:
+        evidence = [dict(row) for row in connection.execute("SELECT * FROM evidence")]
+        links = [dict(row) for row in connection.execute("SELECT * FROM evidence_links")]
+        assert sorted(evidence, key=lambda row: row["id"]) == sorted(
+            expected.evidence, key=lambda row: row["id"]
+        )
+        assert sorted(links, key=lambda row: row["id"]) == sorted(
+            expected.links, key=lambda row: row["id"]
+        )
+        assert all(row["strength"] == "unknown" for row in evidence)
+        assert all(row["source_confidence"] == "unknown" for row in evidence)
+        assert len(
+            {(row["source_type"], row["source_id"], row["source_role"]) for row in evidence}
+        ) == len(evidence)
+        run = connection.execute(
+            "SELECT source_row_count,result_row_count,source_hash,result_hash "
+            "FROM migration_backfill_runs WHERE source_kind='v1_evidence_sources'"
+        ).fetchone()
+        assert tuple(run) == (
+            expected.source_row_count,
+            len(expected.evidence) + len(expected.links),
+            expected.source_hash,
+            expected.result_hash,
+        )
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        connection.close()
+    command.downgrade(config, "0008_activity_session_constraint")
+    command.upgrade(config, "0009_unified_evidence_verification")
+    connection = sqlite3.connect(database_path)
+    connection.row_factory = sqlite3.Row
+    try:
+        assert sorted(
+            (dict(row) for row in connection.execute("SELECT * FROM evidence")),
+            key=lambda row: row["id"],
+        ) == sorted(expected.evidence, key=lambda row: row["id"])
+        assert sorted(
+            (dict(row) for row in connection.execute("SELECT * FROM evidence_links")),
+            key=lambda row: row["id"],
+        ) == sorted(expected.links, key=lambda row: row["id"])
     finally:
         connection.close()
 
@@ -280,7 +351,7 @@ def test_migration_creates_verified_backup_before_mutation(
     manifest = json.loads(manifest_path.read_text())
     assert manifest["checksumSha256"] == backup_digest
     assert manifest["sourceRevision"] == "0002_roadmap_scope_events"
-    assert manifest["targetRevision"] == "0008_activity_session_constraint"
+    assert manifest["targetRevision"] == "0009_unified_evidence_verification"
     assert os.stat(manifest_path).st_mode & 0o777 == 0o600
     original = sqlite3.connect(FIXTURES / "populated-0002.sqlite3")
     copied = sqlite3.connect(backup)
@@ -387,7 +458,7 @@ def test_partial_0003_is_refused_then_verified_v1_restore_can_upgrade(
     restored = sqlite3.connect(database_path)
     try:
         assert restored.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "0008_activity_session_constraint",
+            "0009_unified_evidence_verification",
         )
         assert restored.execute("SELECT credential_generation FROM users").fetchone() == (2,)
         assert restored.execute("SELECT revoked_at IS NOT NULL FROM auth_sessions").fetchone() == (
@@ -462,6 +533,31 @@ def test_partial_activity_session_migration_is_refused(
         database.run_migrations(f"sqlite:///{database_path}")
 
 
+@pytest.mark.parametrize(
+    "partial_sql",
+    [
+        "CREATE TABLE evidence (id TEXT PRIMARY KEY)",
+        "CREATE TABLE _alembic_tmp_evidence (id TEXT PRIMARY KEY)",
+        "INSERT INTO migration_backfill_runs "
+        "(id,policy_key,source_kind,source_row_count,result_row_count,source_hash,"
+        "result_hash,recorded_at) VALUES "
+        "('partial-evidence','policy','v1_evidence_sources',0,0,'source','result',0)",
+    ],
+)
+def test_partial_unified_evidence_migration_is_refused(tmp_path: Path, partial_sql: str) -> None:
+    database_path = tmp_path / "partial-evidence.sqlite3"
+    config = _config(database_path)
+    command.upgrade(config, "0008_activity_session_constraint")
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.execute(partial_sql)
+        connection.commit()
+    finally:
+        connection.close()
+    with pytest.raises(RuntimeError, match="ambiguously partial unified Evidence migration"):
+        database.run_migrations(f"sqlite:///{database_path}")
+
+
 def test_0003_downgrade_and_reupgrade_preserve_v1_rows(tmp_path: Path) -> None:
     database_path = tmp_path / "round-trip.sqlite3"
     shutil.copyfile(FIXTURES / "populated-0002.sqlite3", database_path)
@@ -499,6 +595,7 @@ def test_activity_session_migration_is_staged_and_reconciled(tmp_path: Path) -> 
         assert connection.execute("SELECT COUNT(*) FROM activities").fetchone() == (0,)
     finally:
         connection.close()
+
     command.upgrade(config, "0007_activity_session_backfill")
     connection = sqlite3.connect(database_path)
     try:

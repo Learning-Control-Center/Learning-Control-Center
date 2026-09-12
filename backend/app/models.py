@@ -1149,12 +1149,200 @@ class SessionCorrection(Base):
     after_json: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+class Evidence(Base):
+    __tablename__ = "evidence"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_type",
+            "source_id",
+            "source_role",
+            "policy_version",
+            name="uq_evidence_source_role_policy",
+        ),
+        UniqueConstraint("supersedes_evidence_id", name="uq_evidence_supersedes"),
+        CheckConstraint(
+            "evidence_type IN ('session','verification','project','code','assessment','manual',"
+            "'imported','review')",
+            name="ck_evidence_type",
+        ),
+        CheckConstraint(
+            "strength IN ('unknown','weak','moderate','strong')", name="ck_evidence_strength"
+        ),
+        CheckConstraint(
+            "independence IN ('unknown','guided','assisted','independent','not_applicable')",
+            name="ck_evidence_independence",
+        ),
+        CheckConstraint(
+            "source_confidence IN ('unknown','low','medium','high')",
+            name="ck_evidence_source_confidence",
+        ),
+        CheckConstraint(
+            "(occurred_at IS NULL) = (occurred_at_unknown_reason IS NOT NULL)",
+            name="ck_evidence_occurred_unknown_reason",
+        ),
+        CheckConstraint(
+            "(strength = 'unknown') = (strength_unknown_reason IS NOT NULL)",
+            name="ck_evidence_strength_unknown_reason",
+        ),
+        CheckConstraint(
+            "(independence = 'unknown') = (independence_unknown_reason IS NOT NULL)",
+            name="ck_evidence_independence_unknown_reason",
+        ),
+        CheckConstraint(
+            "(source_confidence = 'unknown') = (source_confidence_unknown_reason IS NOT NULL)",
+            name="ck_evidence_source_confidence_unknown_reason",
+        ),
+        Index("ix_evidence_source", "source_type", "source_id"),
+        Index("ix_evidence_created", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    evidence_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_role: Mapped[str] = mapped_column(String(64), nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    strength: Mapped[str] = mapped_column(String(16), nullable=False)
+    strength_unknown_reason: Mapped[str | None] = mapped_column(String(64))
+    independence: Mapped[str] = mapped_column(String(24), nullable=False)
+    independence_unknown_reason: Mapped[str | None] = mapped_column(String(64))
+    source_confidence: Mapped[str] = mapped_column(String(16), nullable=False)
+    source_confidence_unknown_reason: Mapped[str | None] = mapped_column(String(64))
+    occurred_at: Mapped[int | None] = mapped_column(Integer)
+    occurred_at_unknown_reason: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[int] = mapped_column(Integer, default=utc_now_ms, nullable=False)
+    provenance_json: Mapped[str] = mapped_column(Text, nullable=False)
+    policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    artifact_hash: Mapped[str | None] = mapped_column(String(64))
+    external_reference: Mapped[str | None] = mapped_column(Text)
+    supersedes_evidence_id: Mapped[str | None] = mapped_column(
+        ForeignKey("evidence.id", ondelete="RESTRICT")
+    )
+    authoritative_for_downgrade: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+
+
+class EvidenceLink(Base):
+    __tablename__ = "evidence_links"
+    __table_args__ = (
+        UniqueConstraint(
+            "evidence_id",
+            "source_contribution_id",
+            name="uq_evidence_link_source_contribution",
+        ),
+        UniqueConstraint("evidence_id", "idempotency_key", name="uq_evidence_link_idempotency"),
+        CheckConstraint(
+            "effect IN ('supports','contradicts','context_only')", name="ck_evidence_link_effect"
+        ),
+        CheckConstraint(
+            "relevance IN ('primary','secondary','supporting')", name="ck_evidence_link_relevance"
+        ),
+        Index("ix_evidence_link_competency", "competency_identity_id", "criterion_identity_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    evidence_id: Mapped[str] = mapped_column(
+        ForeignKey("evidence.id", ondelete="RESTRICT"), nullable=False
+    )
+    source_contribution_id: Mapped[str | None] = mapped_column(
+        ForeignKey("session_contributions.id", ondelete="RESTRICT")
+    )
+    idempotency_key: Mapped[str | None] = mapped_column(String(255))
+    competency_identity_id: Mapped[str] = mapped_column(
+        ForeignKey("competency_identities.id", ondelete="RESTRICT"), nullable=False
+    )
+    criterion_identity_id: Mapped[str | None] = mapped_column(
+        ForeignKey("criterion_identities.id", ondelete="RESTRICT")
+    )
+    criterion_definition_id: Mapped[str | None] = mapped_column(
+        ForeignKey("criterion_definitions.id", ondelete="RESTRICT")
+    )
+    scale_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("capability_scale_versions.id", ondelete="RESTRICT")
+    )
+    dimension_id: Mapped[str | None] = mapped_column(
+        ForeignKey("capability_scale_dimensions.id", ondelete="RESTRICT")
+    )
+    level_id: Mapped[str | None] = mapped_column(
+        ForeignKey("capability_scale_levels.id", ondelete="RESTRICT")
+    )
+    effect: Mapped[str] = mapped_column(String(16), nullable=False)
+    relevance: Mapped[str] = mapped_column(String(16), nullable=False)
+    provenance_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[int] = mapped_column(Integer, default=utc_now_ms, nullable=False)
+
+
+class EvidenceRetraction(Base):
+    __tablename__ = "evidence_retractions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    evidence_id: Mapped[str] = mapped_column(
+        ForeignKey("evidence.id", ondelete="RESTRICT"), nullable=False, unique=True
+    )
+    replacement_evidence_id: Mapped[str | None] = mapped_column(
+        ForeignKey("evidence.id", ondelete="RESTRICT")
+    )
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    actor_kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[int] = mapped_column(Integer, default=utc_now_ms, nullable=False)
+
+
+class EvidenceInvalidation(Base):
+    __tablename__ = "evidence_invalidations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    evidence_id: Mapped[str] = mapped_column(
+        ForeignKey("evidence.id", ondelete="RESTRICT"), nullable=False, unique=True
+    )
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    actor_kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[int] = mapped_column(Integer, default=utc_now_ms, nullable=False)
+
+
+class EvidenceLinkRetraction(Base):
+    __tablename__ = "evidence_link_retractions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    evidence_link_id: Mapped[str] = mapped_column(
+        ForeignKey("evidence_links.id", ondelete="RESTRICT"), nullable=False, unique=True
+    )
+    replacement_link_id: Mapped[str | None] = mapped_column(
+        ForeignKey("evidence_links.id", ondelete="RESTRICT")
+    )
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    actor_kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[int] = mapped_column(Integer, default=utc_now_ms, nullable=False)
+
+
+class EvidenceRedaction(Base):
+    __tablename__ = "evidence_redactions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    evidence_id: Mapped[str] = mapped_column(
+        ForeignKey("evidence.id", ondelete="RESTRICT"), nullable=False, unique=True
+    )
+    redacted_fields_json: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    actor_kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    effect: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[int] = mapped_column(Integer, default=utc_now_ms, nullable=False)
+
+
 for _immutable_activity_model in (
     ActivityCategoryVersion,
     Activity,
     SessionContribution,
     ContributionRetraction,
     SessionCorrection,
+    Evidence,
+    EvidenceLink,
+    EvidenceRetraction,
+    EvidenceInvalidation,
+    EvidenceLinkRetraction,
+    EvidenceRedaction,
 ):
     event.listen(_immutable_activity_model, "before_update", _reject_v2_semantic_history_mutation)
     event.listen(_immutable_activity_model, "before_delete", _reject_v2_semantic_history_mutation)
