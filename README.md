@@ -2,6 +2,12 @@
 
 Learning-Control-Center is a single-user, self-hosted system for competency-based roadmaps, daily learning recommendations, session tracking, verification, deterministic analytics, reports, and safe data transfer.
 
+## V2 Macro Phase 1 foundation
+
+The application preserves its V1 routes and user experience while introducing the durable V2 domain foundation. That foundation includes versioned Target Profiles and competency semantics, canonical Activities and exact-duration Learning Sessions, immutable provenance-bearing Evidence, deterministic capability and review projections, and immutable Analysis Snapshots behind the existing recommendation behavior. Portable package schema version 2 carries these canonical facts and the checkpoints required to validate rebuilt projections.
+
+Profile management UI, Projects, the native Learning Graph and Roadmap V2 projection, Analysis V3, Recommendation V2, Today V2, Curriculum, and authoritative LLM behavior remain deferred to later macro phases.
+
 ## Local development
 
 Prerequisites: Python 3.12 or newer and Node.js 20 or newer.
@@ -61,10 +67,16 @@ npm run test
 npm run build
 ```
 
+With Caddy and Chrome installed, run the production-like TLS, authentication, timer, backup, and restore flow from the repository root:
+
+```bash
+./scripts/run-production-e2e.sh
+```
+
 ## Data safety and production
 
 Canonical application data lives in the configured SQLite database; operational backups are written outside the public frontend. Portable logical backups intentionally exclude passwords and live authentication sessions, while replacement restore preserves the existing local authentication state.
 
-Production deployment must provide HTTPS/TLS, a strong bootstrap secret, restricted filesystem permissions, a persistent database volume, and a persistent backup directory. Complete the dedicated security-hardening and deployment review before exposing the application to a network.
+Production deployment must provide HTTPS/TLS, a strong bootstrap secret, restricted filesystem permissions, a persistent database volume, and a persistent backup directory. Complete a deployment-specific security review before exposing the application to the public internet.
 
 The canonical product and engineering specifications are maintained under `memory-bank/`.

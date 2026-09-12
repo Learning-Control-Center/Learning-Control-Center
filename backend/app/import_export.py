@@ -1216,9 +1216,7 @@ def _apply_portable_restore(
     db.flush()
     drain_projection_invalidations(db, atomic=True)
     for state in db.scalars(select(CompetencyCapabilityState)).all():
-        baseline = restored_capability_baseline.get(
-            (state.competency_identity_id, state.scope_key)
-        )
+        baseline = restored_capability_baseline.get((state.competency_identity_id, state.scope_key))
         rebuilt_run = db.get(CapabilityEvaluationRun, state.evaluation_run_id)
         if (
             baseline is not None

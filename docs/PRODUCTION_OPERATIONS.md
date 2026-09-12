@@ -23,3 +23,11 @@ To restore, stop the service and run `lcc-ops restore --from /absolute/path/to/b
 The command validates integrity, foreign keys, migration revision, and the single-user invariant;
 creates a pre-restore operational backup; installs the restored database atomically; and invalidates
 every restored session before restart. Never restore a portable JSON package as a SQLite file.
+
+Capability and review projections are rebuildable from canonical evidence and versioned policy.
+To recover pending work after an interrupted process, run `python -m app.capability_cli`. To request
+a complete rebuild first, run `python -m app.capability_cli --enqueue-full-rebuild`. The command
+recovers interrupted work, drains the durable invalidation queue, and emits JSON. Treat any entries
+in `permanentFailures` as an operator-visible failure: preserve the database and logs, correct the
+underlying canonical-data or software problem, and rerun the command rather than editing projection
+tables directly.

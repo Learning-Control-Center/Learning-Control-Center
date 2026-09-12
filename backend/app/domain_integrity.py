@@ -1992,8 +1992,7 @@ def _validate_capability_history(connection: Any) -> None:
         for item in connection.execute(select(*SemanticDefinitionDimension.__table__.c)).all()
     }
     criteria = {
-        item.id: item
-        for item in connection.execute(select(*CriterionDefinition.__table__.c)).all()
+        item.id: item for item in connection.execute(select(*CriterionDefinition.__table__.c)).all()
     }
     runs = {
         item.id: item
@@ -2072,15 +2071,13 @@ def _validate_capability_history(connection: Any) -> None:
                     or (run.semantic_definition_id, run.dimension_id) not in enabled_dimensions
                 )
             )
-            or run.scope_key
-            != (f"dimension:{run.dimension_id}" if run.dimension_id else "overall")
+            or run.scope_key != (f"dimension:{run.dimension_id}" if run.dimension_id else "overall")
             or (
                 selected_level is not None
                 and selected_level.scale_version_id != run.scale_version_id
             )
             or any(
-                level_id not in levels
-                or levels[level_id].scale_version_id != run.scale_version_id
+                level_id not in levels or levels[level_id].scale_version_id != run.scale_version_id
                 for level_id in passed_ids
             )
         ):
@@ -2188,8 +2185,7 @@ def _validate_capability_history(connection: Any) -> None:
                     event_invalid = event_invalid or (
                         not isinstance(review_reasons, list)
                         or event.freshness_policy_version != "freshness-policy/v1"
-                        or (event.current_through_days is None)
-                        != (event.stale_after_days is None)
+                        or (event.current_through_days is None) != (event.stale_after_days is None)
                         or (
                             event.current_through_days is not None
                             and event.stale_after_days is not None

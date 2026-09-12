@@ -713,8 +713,7 @@ def _create_native_evidence(
     if payload.authoritative_reassessment:
         declared_level = db.get(CapabilityScaleLevel, payload.maximum_supported_level_id)
         definitions = [
-            db.get(CriterionDefinition, link.criterion_definition_id)
-            for link in payload.links
+            db.get(CriterionDefinition, link.criterion_definition_id) for link in payload.links
         ]
         linked_levels = [
             db.get(CapabilityScaleLevel, definition.level_id)

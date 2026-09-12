@@ -539,14 +539,17 @@ async def test_explicit_authoritative_reassessment_downgrades_and_drains(
     assert response.status_code == 201, response.text
     state = db.get(CompetencyCapabilityState, (competency_id, "overall"))
     assert state is not None and state.capability_level_id == guided.id
-    assert db.scalar(
-        select(func.count())
-        .select_from(CapabilityStateEvent)
-        .where(
-            CapabilityStateEvent.competency_identity_id == competency_id,
-            CapabilityStateEvent.cause_code == "authoritative_reassessment",
+    assert (
+        db.scalar(
+            select(func.count())
+            .select_from(CapabilityStateEvent)
+            .where(
+                CapabilityStateEvent.competency_identity_id == competency_id,
+                CapabilityStateEvent.cause_code == "authoritative_reassessment",
+            )
         )
-    ) == 1
+        == 1
+    )
     assert not db.scalars(
         select(ProjectionInvalidation).where(
             ProjectionInvalidation.projection_kind.in_(
@@ -557,9 +560,9 @@ async def test_explicit_authoritative_reassessment_downgrades_and_drains(
     ).first()
     portable = _portable_payload(db)
     invalid_policy = copy.deepcopy(portable)
-    invalid_policy["tables"]["capability_evaluation_runs"][-1][
-        "capability_policy_version"
-    ] = "capability-policy/v999"
+    invalid_policy["tables"]["capability_evaluation_runs"][-1]["capability_policy_version"] = (
+        "capability-policy/v999"
+    )
     with pytest.raises(AppError, match="Capability evaluation hashes or facts"):
         _validate_portable_payload(invalid_policy, "capability-policy-tampered", schema_version=2)
     invalid_event = copy.deepcopy(portable)

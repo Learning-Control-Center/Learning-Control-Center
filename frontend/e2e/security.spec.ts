@@ -46,6 +46,25 @@ test('production authentication and forced-logout flow', async ({ browser, page 
   await expect(page.getByRole('heading', { name: 'Welcome back' })).toBeVisible()
 })
 
+test('production timer survives refresh and completes', async ({ page }) => {
+  await page.goto('/')
+  await page.getByLabel('Username').fill('learner')
+  await page.getByLabel('Password').fill(replacementPassword)
+  await page.getByRole('button', { name: 'Sign in' }).click()
+  await page.getByRole('link', { name: 'Sessions' }).click()
+  await expect(page.getByRole('heading', { name: 'Log & sessions' })).toBeVisible()
+  await page.getByRole('button', { name: 'Start timer' }).click()
+  await expect(page.getByRole('button', { name: 'Pause' })).toBeVisible()
+  await page.reload()
+  await expect(page.getByRole('button', { name: 'Pause' })).toBeVisible()
+  await page.getByRole('button', { name: 'Pause' }).click()
+  await expect(page.getByRole('button', { name: 'Resume' })).toBeVisible()
+  await page.getByRole('button', { name: 'Resume' }).click()
+  await expect(page.getByRole('button', { name: 'Complete' })).toBeVisible()
+  await page.getByRole('button', { name: 'Complete' }).click()
+  await expect(page.getByText('Unlinked learning session')).toBeVisible()
+})
+
 test('production host, origin, and docs boundaries fail closed', async () => {
   const baseURL = process.env.LCC_E2E_BASE_URL ?? 'https://localhost:8443'
   const api = await request.newContext({ baseURL, ignoreHTTPSErrors: true })

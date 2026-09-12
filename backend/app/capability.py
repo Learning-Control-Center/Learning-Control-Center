@@ -240,14 +240,12 @@ def _support_qualifies(
             and definition is not None
             and definition.verification_rubric is not None
             and (
-                json.loads(item.evidence.provenance_json).get("rubric_references", {}).get(
-                    definition.id
-                )
+                json.loads(item.evidence.provenance_json)
+                .get("rubric_references", {})
+                .get(definition.id)
                 == definition.verification_rubric
                 or (
-                    json.loads(item.evidence.provenance_json).get(
-                        "rubric_criterion_definition_id"
-                    )
+                    json.loads(item.evidence.provenance_json).get("rubric_criterion_definition_id")
                     == definition.id
                     and json.loads(item.evidence.provenance_json).get("rubric_reference")
                     == definition.verification_rubric
@@ -307,8 +305,7 @@ def _evaluate_criterion(
     decisive_link_ids = {
         item.link.id
         for item in relevant
-        if item.evidence.id in decisive
-        and item.link.effect in {"supports", "contradicts"}
+        if item.evidence.id in decisive and item.link.effect in {"supports", "contradicts"}
     }
     return CriterionResultValue(
         definition=definition,
@@ -348,8 +345,7 @@ def _high_confidence(
         moderate_contexts = {
             item.context_key
             for item in supports
-            if _STRENGTH[item.evidence.strength] >= 2
-            and item.context_key != "legacy_unknown"
+            if _STRENGTH[item.evidence.strength] >= 2 and item.context_key != "legacy_unknown"
         }
         if not strong and len(moderate_contexts) < 2:
             unmet.append(f"robust_support:{definition.id}")

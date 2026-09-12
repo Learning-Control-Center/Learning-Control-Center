@@ -67,10 +67,16 @@ grep -q "already open by LCC" "$run_directory/live-restore.log"
 cd "$repository_root/frontend"
 npm run test:e2e:production
 
+cd "$repository_root"
+"$repository_root/scripts/operational-backup.sh"
+post_e2e_backup="$(find "$LCC_BACKUP_DIRECTORY" -maxdepth 1 -name 'lcc-scheduled-*.sqlite3' -printf '%T@ %p\n' | sort -nr | sed -n '1s/^[^ ]* //p')"
+
 kill "$backend_pid"
 wait "$backend_pid" || true
 unset backend_pid
 cd "$repository_root"
+"$repository_root/.venv/bin/python" -m app.ops restore --from "$post_e2e_backup"
+"$repository_root/.venv/bin/python" -c 'import os, sqlite3; path=os.environ["LCC_DATABASE_URL"].removeprefix("sqlite:///"); connection=sqlite3.connect(path); assert connection.execute("SELECT COUNT(*) FROM auth_sessions WHERE revoked_at IS NULL").fetchone()[0] == 0; connection.close()'
 "$repository_root/.venv/bin/uvicorn" app.main:app --host 127.0.0.1 --port 8000 --workers 1 --no-proxy-headers >"$run_directory/rejected-restart.log" 2>&1 &
 rejected_pid=$!
 for _attempt in $(seq 1 100); do
