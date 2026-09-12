@@ -14,6 +14,8 @@ from starlette.responses import JSONResponse
 from app import models  # noqa: F401
 from app.analytics import router as analytics_router
 from app.auth import router as auth_router
+from app.capability import drain_projection_invalidations
+from app.capability import router as capability_router
 from app.config import get_settings, is_strong_operator_secret
 from app.database import SessionLocal, initialize_database, run_migrations
 from app.errors import install_error_handlers
@@ -43,6 +45,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             _validate_database_state(db)
             get_or_create_profile(db)
             backfill_reports(db)
+            drain_projection_invalidations(db, recover_running=True)
         stop_event = asyncio.Event()
         scheduler_task = asyncio.create_task(report_scheduler(stop_event))
         try:
@@ -148,3 +151,4 @@ for api_router in (
 app.include_router(v2_profile_router, prefix="/api/v2")
 app.include_router(v2_activity_router, prefix="/api/v2")
 app.include_router(evidence_router, prefix="/api/v2")
+app.include_router(capability_router, prefix="/api/v2")

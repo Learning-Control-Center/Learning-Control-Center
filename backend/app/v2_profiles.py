@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.auth import AuthContext, get_auth_context, require_csrf
+from app.capability import commit_source_and_drain
 from app.database import get_db
 from app.errors import AppError
 from app.models import (
@@ -29,6 +30,7 @@ from app.models import (
     ProfileMilestoneTarget,
     ProfileTarget,
     ProfileTargetIdentity,
+    ProjectionInvalidation,
     ReadinessGate,
     ReadinessGateIdentity,
     ReadinessGatePredicate,
@@ -51,6 +53,66 @@ from app.schemas import (
 from app.time_utils import datetime_to_epoch_ms, epoch_ms_to_rfc3339, utc_now_ms
 
 router = APIRouter(tags=["v2 profile and competency"])
+
+
+def _queue_definition_invalidations(
+    db: Session, *, competency_id: str, source_fact_id: str, requested_at: int
+) -> None:
+    for kind, policy in (
+        ("criterion_evaluation", "criterion-evaluation-policy/v1"),
+        ("capability", "capability-policy/v1"),
+        ("review", "freshness-policy/v1"),
+        ("analysis", "analysis-policy/v1"),
+    ):
+        db.add(
+            ProjectionInvalidation(
+                projection_kind=kind,
+                subject_type="competency",
+                subject_id=competency_id,
+                source_fact_id=source_fact_id,
+                target_policy_version=policy,
+                status="pending",
+                attempt_count=0,
+                requested_at=requested_at,
+            )
+        )
+
+
+def _queue_profile_analysis_invalidation(
+    db: Session, *, profile_version_id: str, source_fact_id: str, requested_at: int
+) -> None:
+    db.add(
+        ProjectionInvalidation(
+            projection_kind="analysis",
+            subject_type="target_profile_version",
+            subject_id=profile_version_id,
+            source_fact_id=source_fact_id,
+            target_policy_version="analysis-policy/v1",
+            status="pending",
+            attempt_count=0,
+            requested_at=requested_at,
+        )
+    )
+
+
+def _queue_profile_review_invalidations(
+    db: Session, *, source_fact_id: str, requested_at: int
+) -> None:
+    for competency_id in db.scalars(
+        select(ActiveCompetencyDefinitionState.competency_identity_id)
+    ).all():
+        db.add(
+            ProjectionInvalidation(
+                projection_kind="review",
+                subject_type="competency",
+                subject_id=competency_id,
+                source_fact_id=source_fact_id,
+                target_policy_version="freshness-policy/v1",
+                status="pending",
+                attempt_count=0,
+                requested_at=requested_at,
+            )
+        )
 
 
 def _unique(values: Iterable[object], label: str) -> None:
@@ -282,6 +344,8 @@ def _serialize_semantic_definition(
         "effectiveAt": epoch_ms_to_rfc3339(definition.effective_at),
         "creationSource": definition.creation_source,
         "supersedesDefinitionId": definition.supersedes_definition_id,
+        "freshnessCurrentThroughDays": definition.freshness_current_through_days,
+        "freshnessStaleAfterDays": definition.freshness_stale_after_days,
         "criteria": [
             {
                 "id": item.id,
@@ -355,6 +419,8 @@ async def create_semantic_definition(
         effective_at=datetime_to_epoch_ms(payload.effective_at),
         creation_source=payload.creation_source,
         supersedes_definition_id=previous.id if previous else None,
+        freshness_current_through_days=payload.freshness_current_through_days,
+        freshness_stale_after_days=payload.freshness_stale_after_days,
     )
     db.add(definition)
     db.flush()
@@ -492,22 +558,28 @@ async def activate_semantic_definition(
     else:
         state.semantic_definition_id = definition.id
         state.activated_at = now
-    db.add(
-        CompetencyDefinitionActivationEvent(
-            competency_identity_id=competency_identity_id,
-            from_definition_id=previous_id,
-            to_definition_id=definition.id,
-            activated_at=now,
-            source=payload.source,
-            reason=payload.reason,
-            event_sequence=(
-                db.scalar(select(func.max(CompetencyDefinitionActivationEvent.event_sequence))) or 0
-            )
-            + 1,
-            idempotency_key=payload.idempotency_key or f"generated:{new_id()}",
+    activation_event = CompetencyDefinitionActivationEvent(
+        competency_identity_id=competency_identity_id,
+        from_definition_id=previous_id,
+        to_definition_id=definition.id,
+        activated_at=now,
+        source=payload.source,
+        reason=payload.reason,
+        event_sequence=(
+            db.scalar(select(func.max(CompetencyDefinitionActivationEvent.event_sequence))) or 0
         )
+        + 1,
+        idempotency_key=payload.idempotency_key or f"generated:{new_id()}",
     )
-    db.commit()
+    db.add(activation_event)
+    db.flush()
+    _queue_definition_invalidations(
+        db,
+        competency_id=competency_identity_id,
+        source_fact_id=activation_event.id,
+        requested_at=now,
+    )
+    commit_source_and_drain(db)
     return {"competencyIdentityId": competency_identity_id, "activeDefinitionId": definition.id}
 
 
@@ -1048,19 +1120,26 @@ async def activate_target_profile_version(
         state.target_profile_id = profile_id
         state.target_profile_version_id = version.id
         state.activated_at = now
-    db.add(
-        TargetProfileActivationEvent(
-            from_profile_version_id=previous_id,
-            to_profile_version_id=version.id,
-            activated_at=now,
-            source=payload.source,
-            reason=payload.reason,
-            event_sequence=(
-                db.scalar(select(func.max(TargetProfileActivationEvent.event_sequence))) or 0
-            )
-            + 1,
-            idempotency_key=payload.idempotency_key or f"generated:{new_id()}",
+    activation_event = TargetProfileActivationEvent(
+        from_profile_version_id=previous_id,
+        to_profile_version_id=version.id,
+        activated_at=now,
+        source=payload.source,
+        reason=payload.reason,
+        event_sequence=(
+            db.scalar(select(func.max(TargetProfileActivationEvent.event_sequence))) or 0
         )
+        + 1,
+        idempotency_key=payload.idempotency_key or f"generated:{new_id()}",
     )
-    db.commit()
+    db.add(activation_event)
+    db.flush()
+    _queue_profile_analysis_invalidation(
+        db,
+        profile_version_id=version.id,
+        source_fact_id=activation_event.id,
+        requested_at=now,
+    )
+    _queue_profile_review_invalidations(db, source_fact_id=activation_event.id, requested_at=now)
+    commit_source_and_drain(db)
     return {"profileId": profile_id, "activeVersionId": version.id}

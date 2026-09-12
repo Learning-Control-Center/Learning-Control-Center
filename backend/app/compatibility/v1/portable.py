@@ -155,6 +155,10 @@ def upgrade_v1_profile_competency_tables(
         "criterion_definitions",
         "active_competency_definition_states",
         "competency_definition_activation_events",
+        "capability_evaluation_runs",
+        "criterion_evaluation_results",
+        "capability_state_events",
+        "review_events",
     ):
         tables[table_name] = []
 

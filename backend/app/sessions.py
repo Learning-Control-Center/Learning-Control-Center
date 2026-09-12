@@ -10,6 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.auth import AuthContext, get_auth_context, require_csrf
+from app.capability import commit_source_and_drain
 from app.database import get_db
 from app.domain import active_timed_session, apply_session_promotion
 from app.errors import AppError
@@ -178,7 +179,7 @@ async def create_manual_session(
     create_session_evidence(db, item)
     _invalidate_session(db, item, activity.id)
     apply_session_promotion(db, item)
-    db.commit()
+    commit_source_and_drain(db)
     return serialize_session(item)
 
 
@@ -219,7 +220,7 @@ async def start_timed_session(
     _add_primary_contribution(db, item, payload.competency_identity_id)
     _invalidate_session(db, item, activity.id)
     try:
-        db.commit()
+        commit_source_and_drain(db)
     except IntegrityError as exc:
         db.rollback()
         raise AppError(
@@ -249,7 +250,7 @@ async def pause_timed_session(
     item.accumulated_duration_ms += now - item.active_since
     item.active_since = None
     item.timed_state = "paused"
-    db.commit()
+    commit_source_and_drain(db)
     return serialize_session(item, now)
 
 
@@ -265,7 +266,7 @@ async def resume_timed_session(
     now = utc_now_ms()
     item.active_since = now
     item.timed_state = "running"
-    db.commit()
+    commit_source_and_drain(db)
     return serialize_session(item, now)
 
 
@@ -308,7 +309,7 @@ async def complete_timed_session(
     create_session_evidence(db, item)
     _invalidate_session(db, item, replacement.id)
     apply_session_promotion(db, item)
-    db.commit()
+    commit_source_and_drain(db)
     return serialize_session(item, now)
 
 
@@ -323,7 +324,7 @@ async def cancel_timed_session(
     replacement = _supersede_activity_from_session(db, item)
     retract_session_evidence(db, item.id, "Timed Session was cancelled.")
     _invalidate_session(db, item, replacement.id)
-    db.commit()
+    commit_source_and_drain(db)
     return serialize_session(item, now)
 
 
@@ -471,7 +472,7 @@ async def update_session(
     )
     _invalidate_session(db, item, correction.id)
     apply_session_promotion(db, item)
-    db.commit()
+    commit_source_and_drain(db)
     return serialize_session(item)
 
 
@@ -514,5 +515,5 @@ async def delete_session(
     db.flush()
     retract_session_evidence(db, item.id, item.tombstone_reason)
     _invalidate_session(db, item, correction.id)
-    db.commit()
+    commit_source_and_drain(db)
     return {"deleted": True}

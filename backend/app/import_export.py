@@ -21,6 +21,12 @@ from sqlalchemy.orm import Session
 from app.analytics import build_analytics
 from app.api_serialization import serialize_api_instants
 from app.auth import AuthContext, get_auth_context, require_csrf
+from app.capability import (
+    capability_evidence_set_hash,
+    drain_projection_invalidations,
+    enqueue_full_capability_rebuild,
+    seed_capability_projections_from_history,
+)
 from app.compatibility.v1.portable import (
     read_v1_portable_package,
     upgrade_v1_activity_session_tables,
@@ -46,19 +52,24 @@ from app.models import (
     AnalysisRun,
     AnalysisSnapshot,
     ApplicationSetting,
+    CapabilityEvaluationRun,
     CapabilityScaleDimension,
     CapabilityScaleLevel,
     CapabilityScaleVersion,
+    CapabilityStateEvent,
     CompetencyAbilityItem,
+    CompetencyCapabilityState,
     CompetencyDefinition,
     CompetencyDefinitionActivationEvent,
     CompetencyIdentity,
     CompetencyPrerequisite,
+    CompetencyReviewState,
     CompetencyState,
     CompetencyStatusEvent,
     CompetencyUnderstandingItem,
     ContributionRetraction,
     CriterionDefinition,
+    CriterionEvaluationResult,
     CriterionIdentity,
     DailyReflection,
     DisciplineProfile,
@@ -90,6 +101,7 @@ from app.models import (
     ReadinessGatePredicate,
     ReadinessGateTarget,
     RecommendationSnapshot,
+    ReviewEvent,
     Roadmap,
     RoadmapScopeEvent,
     RoadmapVersion,
@@ -186,6 +198,10 @@ PORTABLE_MODELS = [
     EvidenceInvalidation,
     EvidenceLinkRetraction,
     EvidenceRedaction,
+    CapabilityEvaluationRun,
+    CriterionEvaluationResult,
+    CapabilityStateEvent,
+    ReviewEvent,
     CompetencyStatusEvent,
     MigrationBackfillRun,
     DailyReflection,
@@ -236,6 +252,28 @@ def _row_dict(item: Any) -> dict[str, Any]:
     return {column.name: getattr(item, column.name) for column in _table(type(item)).columns}
 
 
+def _capability_projection_checkpoints(db: Session) -> list[dict[str, str]]:
+    checkpoints: list[dict[str, str]] = []
+    for state in db.scalars(select(CompetencyCapabilityState)).all():
+        run = db.get(CapabilityEvaluationRun, state.evaluation_run_id)
+        if run is None:
+            raise AppError(
+                500,
+                "CAPABILITY_PROJECTION_INVALID",
+                "Capability projection references missing immutable history.",
+            )
+        checkpoints.append(
+            {
+                "competencyIdentityId": state.competency_identity_id,
+                "scopeKey": state.scope_key,
+                "evaluationRunId": state.evaluation_run_id,
+                "evidenceSetHash": state.evidence_set_hash,
+                "outputHash": run.output_hash,
+            }
+        )
+    return checkpoints
+
+
 def _portable_payload(db: Session) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "manifest": PORTABLE_V2_MANIFEST,
@@ -278,7 +316,44 @@ def _portable_payload(db: Session) -> dict[str, Any]:
                     source["description"] = ""
                 if "external_reference" in fields:
                     source["reference"] = "[redacted]"
+    payload["capabilityProjectionCheckpoints"] = _capability_projection_checkpoints(db)
     return payload
+
+
+def _validate_capability_checkpoints(
+    payload: dict[str, Any], tables: dict[str, list[dict[str, Any]]]
+) -> None:
+    checkpoints = payload.get("capabilityProjectionCheckpoints", [])
+    if not isinstance(checkpoints, list):
+        raise AppError(422, "PORTABLE_SCHEMA_INVALID", "Capability checkpoints are invalid.")
+    runs = {row["id"]: row for row in tables.get("capability_evaluation_runs", [])}
+    seen: set[tuple[str, str]] = set()
+    expected_keys = {
+        "competencyIdentityId",
+        "scopeKey",
+        "evaluationRunId",
+        "evidenceSetHash",
+        "outputHash",
+    }
+    for checkpoint in checkpoints:
+        if not isinstance(checkpoint, dict) or set(checkpoint) != expected_keys:
+            raise AppError(422, "PORTABLE_SCHEMA_INVALID", "Capability checkpoints are invalid.")
+        key = (checkpoint["competencyIdentityId"], checkpoint["scopeKey"])
+        run = runs.get(checkpoint["evaluationRunId"])
+        if (
+            key in seen
+            or run is None
+            or run["competency_identity_id"] != key[0]
+            or run["scope_key"] != key[1]
+            or run["evidence_set_hash"] != checkpoint["evidenceSetHash"]
+            or run["output_hash"] != checkpoint["outputHash"]
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_CAPABILITY_CHECKPOINT_INVALID",
+                "Capability projection checkpoint is disconnected from immutable history.",
+            )
+        seen.add(key)
 
 
 def _resolve_export_scope(db: Session, request: ExportRequest) -> ResolvedExportScope:
@@ -785,6 +860,7 @@ def _validate_portable_payload(
     tables, legacy_without_scope_history = _normalize_portable_tables(
         payload, package_id, schema_version
     )
+    _validate_capability_checkpoints(payload, tables)
     for table_name, rows in tables.items():
         if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
             raise AppError(422, "PORTABLE_SCHEMA_INVALID", f"Table {table_name} has invalid rows.")
@@ -1051,6 +1127,8 @@ def _delete_portable_state(db: Session) -> None:
         roadmap.is_current = False
     db.flush()
     db.execute(_table(ProjectionInvalidation).delete())
+    db.execute(_table(CompetencyReviewState).delete())
+    db.execute(_table(CompetencyCapabilityState).delete())
     db.execute(_table(Activity).update().values(supersedes_activity_id=None))
     db.execute(_table(Evidence).update().values(supersedes_evidence_id=None))
     db.execute(_table(EvidenceRetraction).update().values(replacement_evidence_id=None))
@@ -1079,6 +1157,10 @@ def _apply_portable_restore(
     package_id: str = "direct-restore",
     schema_version: int = 1,
 ) -> None:
+    expected_checkpoints = {
+        (item["competencyIdentityId"], item["scopeKey"]): item["outputHash"]
+        for item in payload.get("capabilityProjectionCheckpoints", [])
+    }
     tables, legacy_without_scope_history = _normalize_portable_tables(
         payload, package_id, schema_version
     )
@@ -1093,6 +1175,24 @@ def _apply_portable_restore(
         )
     _delete_portable_state(db)
     _insert_portable_tables(db.connection(), tables)
+    restored_capability_baseline: dict[tuple[str, str], tuple[str, str]] = {}
+    for run in db.scalars(
+        select(CapabilityEvaluationRun).order_by(
+            CapabilityEvaluationRun.generated_at, CapabilityEvaluationRun.id
+        )
+    ).all():
+        if run.evidence_set_hash != capability_evidence_set_hash(
+            db, run.competency_identity_id, run.dimension_id, run.cutoff_at
+        ):
+            raise AppError(
+                422,
+                "RESTORE_CAPABILITY_LINEAGE_INVALID",
+                "Capability history does not match the restored authoritative Evidence facts.",
+            )
+        restored_capability_baseline[(run.competency_identity_id, run.scope_key)] = (
+            run.evidence_set_hash,
+            run.output_hash,
+        )
     restored_scope = _current_scope(db)
     if (
         not legacy_without_scope_history
@@ -1109,6 +1209,47 @@ def _apply_portable_restore(
             source="portable_restore",
             reason="Current scope activated by portable restore",
         )
+    validate_domain_integrity(db)
+    seed_capability_projections_from_history(db)
+    db.flush()
+    enqueue_full_capability_rebuild(db, source_fact_id=f"restore:{package_id}")
+    db.flush()
+    drain_projection_invalidations(db, atomic=True)
+    for state in db.scalars(select(CompetencyCapabilityState)).all():
+        baseline = restored_capability_baseline.get(
+            (state.competency_identity_id, state.scope_key)
+        )
+        rebuilt_run = db.get(CapabilityEvaluationRun, state.evaluation_run_id)
+        if (
+            baseline is not None
+            and rebuilt_run is not None
+            and baseline[0] == rebuilt_run.evidence_set_hash
+            and baseline[1] != rebuilt_run.output_hash
+        ):
+            raise AppError(
+                422,
+                "RESTORE_CAPABILITY_PARITY_FAILED",
+                "Capability projection rebuild did not match retained immutable history.",
+                {
+                    "competencyIdentityId": state.competency_identity_id,
+                    "scopeKey": state.scope_key,
+                },
+            )
+        expected_output_hash = expected_checkpoints.get(
+            (state.competency_identity_id, state.scope_key)
+        )
+        if expected_output_hash is not None and (
+            rebuilt_run is None or rebuilt_run.output_hash != expected_output_hash
+        ):
+            raise AppError(
+                422,
+                "RESTORE_CAPABILITY_PARITY_FAILED",
+                "Capability projection rebuild did not match the exported projection checkpoint.",
+                {
+                    "competencyIdentityId": state.competency_identity_id,
+                    "scopeKey": state.scope_key,
+                },
+            )
     validate_domain_integrity(db)
 
 
@@ -1285,6 +1426,8 @@ async def apply_import(
         db.rollback()
         logger.warning("Import apply rejected: type=%s", payload.package.packageType)
         raise
+    if payload.package.packageType in {"verification_update", "state_update"}:
+        drain_projection_invalidations(db)
     _previews.pop(payload.package.packageId, None)
     logger.info("Import applied successfully: type=%s", payload.package.packageType)
     return {

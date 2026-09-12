@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from typing import cast
 
 from sqlalchemy import (
     Boolean,
@@ -13,6 +14,8 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     event,
+    func,
+    select,
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -563,6 +566,14 @@ class SemanticCompetencyDefinition(Base):
             "competency_identity_id", "definition_version", name="uq_semantic_definition_version"
         ),
         CheckConstraint("definition_version > 0", name="ck_semantic_definition_version"),
+        CheckConstraint(
+            "(freshness_current_through_days IS NULL) = "
+            "(freshness_stale_after_days IS NULL) AND "
+            "(freshness_current_through_days IS NULL OR "
+            "(freshness_current_through_days >= 0 AND "
+            "freshness_stale_after_days >= freshness_current_through_days))",
+            name="ck_semantic_definition_freshness_override",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -582,6 +593,8 @@ class SemanticCompetencyDefinition(Base):
     supersedes_definition_id: Mapped[str | None] = mapped_column(
         ForeignKey("semantic_competency_definitions.id", ondelete="RESTRICT")
     )
+    freshness_current_through_days: Mapped[int | None] = mapped_column(Integer)
+    freshness_stale_after_days: Mapped[int | None] = mapped_column(Integer)
 
 
 class SemanticDefinitionDimension(Base):
@@ -1331,6 +1344,227 @@ class EvidenceRedaction(Base):
     created_at: Mapped[int] = mapped_column(Integer, default=utc_now_ms, nullable=False)
 
 
+class CapabilityEvaluationRun(Base):
+    __tablename__ = "capability_evaluation_runs"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_capability_run_idempotency"),
+        CheckConstraint("assessment_status IN ('unknown','evaluated')", name="ck_run_assessment"),
+        CheckConstraint(
+            "aggregate_confidence IN ('unknown','low','medium','high')",
+            name="ck_run_confidence",
+        ),
+        Index("ix_capability_run_subject", "competency_identity_id", "scope_key", "generated_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    competency_identity_id: Mapped[str] = mapped_column(
+        ForeignKey("competency_identities.id", ondelete="RESTRICT"), nullable=False
+    )
+    semantic_definition_id: Mapped[str] = mapped_column(
+        ForeignKey("semantic_competency_definitions.id", ondelete="RESTRICT"), nullable=False
+    )
+    scale_version_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_scale_versions.id", ondelete="RESTRICT"), nullable=False
+    )
+    dimension_id: Mapped[str | None] = mapped_column(
+        ForeignKey("capability_scale_dimensions.id", ondelete="RESTRICT")
+    )
+    scope_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    cutoff_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    generated_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    criterion_policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    capability_policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    evidence_policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    downgrade_policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    evidence_set_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    input_payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    input_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    selected_level_id: Mapped[str | None] = mapped_column(
+        ForeignKey("capability_scale_levels.id", ondelete="RESTRICT")
+    )
+    assessment_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    aggregate_confidence: Mapped[str] = mapped_column(String(16), nullable=False)
+    confidence_facts_json: Mapped[str] = mapped_column(Text, nullable=False)
+    downgrade_cause: Mapped[str | None] = mapped_column(String(64))
+    decisive_evidence_ids_json: Mapped[str] = mapped_column(Text, nullable=False)
+    passed_level_ids_json: Mapped[str] = mapped_column(Text, nullable=False)
+    reasons_json: Mapped[str] = mapped_column(Text, nullable=False)
+    output_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class CriterionEvaluationResult(Base):
+    __tablename__ = "criterion_evaluation_results"
+    __table_args__ = (
+        UniqueConstraint("run_id", "criterion_definition_id", name="uq_criterion_result_run"),
+        CheckConstraint(
+            "state IN ('unknown','not_demonstrated','partially_demonstrated','demonstrated',"
+            "'contradicted')",
+            name="ck_criterion_result_state",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_evaluation_runs.id", ondelete="RESTRICT"), nullable=False
+    )
+    criterion_definition_id: Mapped[str] = mapped_column(
+        ForeignKey("criterion_definitions.id", ondelete="RESTRICT"), nullable=False
+    )
+    state: Mapped[str] = mapped_column(String(32), nullable=False)
+    evidence_set_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    decisive_evidence_ids_json: Mapped[str] = mapped_column(Text, nullable=False)
+    facts_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class CompetencyCapabilityState(Base):
+    __tablename__ = "competency_capability_states"
+    __table_args__ = (
+        CheckConstraint("assessment_status IN ('unknown','evaluated')", name="ck_state_assessment"),
+        CheckConstraint(
+            "aggregate_confidence IN ('unknown','low','medium','high')",
+            name="ck_state_confidence",
+        ),
+    )
+
+    competency_identity_id: Mapped[str] = mapped_column(
+        ForeignKey("competency_identities.id", ondelete="RESTRICT"), primary_key=True
+    )
+    scope_key: Mapped[str] = mapped_column(String(255), primary_key=True)
+    semantic_definition_id: Mapped[str] = mapped_column(
+        ForeignKey("semantic_competency_definitions.id", ondelete="RESTRICT"), nullable=False
+    )
+    scale_version_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_scale_versions.id", ondelete="RESTRICT"), nullable=False
+    )
+    dimension_id: Mapped[str | None] = mapped_column(
+        ForeignKey("capability_scale_dimensions.id", ondelete="RESTRICT")
+    )
+    capability_level_id: Mapped[str | None] = mapped_column(
+        ForeignKey("capability_scale_levels.id", ondelete="RESTRICT")
+    )
+    assessment_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    aggregate_confidence: Mapped[str] = mapped_column(String(16), nullable=False)
+    evaluation_run_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_evaluation_runs.id", ondelete="RESTRICT"), nullable=False
+    )
+    capability_policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    criterion_policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    evidence_policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    evidence_set_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    last_evaluated_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    last_meaningful_evidence_at: Mapped[int | None] = mapped_column(Integer)
+    state_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    confidence_facts_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class CapabilityStateEvent(Base):
+    __tablename__ = "capability_state_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "competency_identity_id", "scope_key", "event_sequence", name="uq_capability_event_seq"
+        ),
+        CheckConstraint("event_sequence > 0", name="ck_capability_event_sequence"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    competency_identity_id: Mapped[str] = mapped_column(
+        ForeignKey("competency_identities.id", ondelete="RESTRICT"), nullable=False
+    )
+    semantic_definition_id: Mapped[str] = mapped_column(
+        ForeignKey("semantic_competency_definitions.id", ondelete="RESTRICT"), nullable=False
+    )
+    dimension_id: Mapped[str | None] = mapped_column(
+        ForeignKey("capability_scale_dimensions.id", ondelete="RESTRICT")
+    )
+    scope_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    event_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    previous_level_id: Mapped[str | None] = mapped_column(
+        ForeignKey("capability_scale_levels.id", ondelete="RESTRICT")
+    )
+    new_level_id: Mapped[str | None] = mapped_column(
+        ForeignKey("capability_scale_levels.id", ondelete="RESTRICT")
+    )
+    previous_assessment_status: Mapped[str | None] = mapped_column(String(16))
+    new_assessment_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    previous_confidence: Mapped[str | None] = mapped_column(String(16))
+    new_confidence: Mapped[str] = mapped_column(String(16), nullable=False)
+    cause_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    decisive_evidence_ids_json: Mapped[str] = mapped_column(Text, nullable=False)
+    evaluation_run_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_evaluation_runs.id", ondelete="RESTRICT"), nullable=False
+    )
+    created_at: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class CompetencyReviewState(Base):
+    __tablename__ = "competency_review_states"
+
+    competency_identity_id: Mapped[str] = mapped_column(
+        ForeignKey("competency_identities.id", ondelete="RESTRICT"), primary_key=True
+    )
+    scope_key: Mapped[str] = mapped_column(String(255), primary_key=True)
+    semantic_definition_id: Mapped[str] = mapped_column(
+        ForeignKey("semantic_competency_definitions.id", ondelete="RESTRICT"), nullable=False
+    )
+    scale_version_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_scale_versions.id", ondelete="RESTRICT"), nullable=False
+    )
+    dimension_id: Mapped[str | None] = mapped_column(
+        ForeignKey("capability_scale_dimensions.id", ondelete="RESTRICT")
+    )
+    freshness: Mapped[str] = mapped_column(String(16), nullable=False)
+    review_due: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    reason_codes_json: Mapped[str] = mapped_column(Text, nullable=False)
+    last_meaningful_evidence_at: Mapped[int | None] = mapped_column(Integer)
+    current_through_days: Mapped[int | None] = mapped_column(Integer)
+    stale_after_days: Mapped[int | None] = mapped_column(Integer)
+    threshold_source: Mapped[str] = mapped_column(String(64), nullable=False)
+    freshness_policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    evaluated_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    evaluation_run_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_evaluation_runs.id", ondelete="RESTRICT"), nullable=False
+    )
+    state_version: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class ReviewEvent(Base):
+    __tablename__ = "review_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "competency_identity_id", "scope_key", "event_sequence", name="uq_review_event_seq"
+        ),
+        CheckConstraint("event_sequence > 0", name="ck_review_event_sequence"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    competency_identity_id: Mapped[str] = mapped_column(
+        ForeignKey("competency_identities.id", ondelete="RESTRICT"), nullable=False
+    )
+    semantic_definition_id: Mapped[str] = mapped_column(
+        ForeignKey("semantic_competency_definitions.id", ondelete="RESTRICT"), nullable=False
+    )
+    dimension_id: Mapped[str | None] = mapped_column(
+        ForeignKey("capability_scale_dimensions.id", ondelete="RESTRICT")
+    )
+    scope_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    event_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    previous_freshness: Mapped[str | None] = mapped_column(String(16))
+    new_freshness: Mapped[str] = mapped_column(String(16), nullable=False)
+    previous_review_due: Mapped[bool | None] = mapped_column(Boolean)
+    new_review_due: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    reason_codes_json: Mapped[str] = mapped_column(Text, nullable=False)
+    last_meaningful_evidence_at: Mapped[int | None] = mapped_column(Integer)
+    current_through_days: Mapped[int | None] = mapped_column(Integer)
+    stale_after_days: Mapped[int | None] = mapped_column(Integer)
+    threshold_source: Mapped[str] = mapped_column(String(64), nullable=False)
+    freshness_policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    evaluation_run_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_evaluation_runs.id", ondelete="RESTRICT"), nullable=False
+    )
+    created_at: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
 for _immutable_activity_model in (
     ActivityCategoryVersion,
     Activity,
@@ -1343,6 +1577,10 @@ for _immutable_activity_model in (
     EvidenceInvalidation,
     EvidenceLinkRetraction,
     EvidenceRedaction,
+    CapabilityEvaluationRun,
+    CriterionEvaluationResult,
+    CapabilityStateEvent,
+    ReviewEvent,
 ):
     event.listen(_immutable_activity_model, "before_update", _reject_v2_semantic_history_mutation)
     event.listen(_immutable_activity_model, "before_delete", _reject_v2_semantic_history_mutation)
@@ -1464,7 +1702,15 @@ class ProjectionInvalidation(Base):
             "target_policy_version",
             name="uq_projection_invalidation_source_target",
         ),
+        UniqueConstraint(
+            "projection_kind",
+            "subject_type",
+            "subject_id",
+            "subject_sequence",
+            name="uq_projection_invalidation_subject_sequence",
+        ),
         CheckConstraint("attempt_count >= 0", name="ck_projection_attempt_count"),
+        CheckConstraint("subject_sequence > 0", name="ck_projection_subject_sequence"),
         CheckConstraint(
             "status IN ('pending','running','completed','permanent_failure')",
             name="ck_projection_invalidation_status",
@@ -1478,13 +1724,33 @@ class ProjectionInvalidation(Base):
     subject_id: Mapped[str] = mapped_column(String(255), nullable=False)
     source_fact_id: Mapped[str] = mapped_column(String(255), nullable=False)
     target_policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    subject_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String(24), nullable=False)
     attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     requested_at: Mapped[int] = mapped_column(Integer, default=utc_now_ms, nullable=False)
     started_at: Mapped[int | None] = mapped_column(Integer)
     completed_at: Mapped[int | None] = mapped_column(Integer)
+    attempt_run_id: Mapped[str | None] = mapped_column(String(36))
     result_run_id: Mapped[str | None] = mapped_column(String(36))
     error_json: Mapped[str | None] = mapped_column(Text)
+
+
+@event.listens_for(ProjectionInvalidation, "before_insert")
+def _assign_projection_subject_sequence(
+    _mapper: object, connection: object, target: object
+) -> None:
+    item = cast(ProjectionInvalidation, target)
+    if item.subject_sequence:
+        return
+    table = ProjectionInvalidation.__table__
+    current = connection.scalar(  # type: ignore[attr-defined]
+        select(func.max(table.c.subject_sequence)).where(
+            table.c.projection_kind == item.projection_kind,
+            table.c.subject_type == item.subject_type,
+            table.c.subject_id == item.subject_id,
+        )
+    )
+    item.subject_sequence = int(current or 0) + 1
 
 
 class RecommendationSnapshot(Base):

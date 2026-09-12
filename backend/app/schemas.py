@@ -190,7 +190,21 @@ class SemanticCompetencyDefinitionCreate(StrictModel):
     dimension_keys: list[str] = Field(default_factory=list)
     effective_at: datetime
     creation_source: str = Field(min_length=1, max_length=64)
+    freshness_current_through_days: int | None = Field(default=None, ge=0)
+    freshness_stale_after_days: int | None = Field(default=None, ge=0)
     criteria: list[CriterionDefinitionInput] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def freshness_override_is_complete(self) -> SemanticCompetencyDefinitionCreate:
+        current = self.freshness_current_through_days
+        stale = self.freshness_stale_after_days
+        if (current is None) != (stale is None) or (
+            current is not None and stale is not None and stale < current
+        ):
+            raise ValueError(
+                "Freshness overrides require an ordered current-through and stale-after pair"
+            )
+        return self
 
     @field_validator("effective_at")
     @classmethod
@@ -478,6 +492,8 @@ class EvidenceCreate(StrictModel):
     capture_method: str = Field(min_length=1, max_length=128)
     artifact_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     external_reference: str | None = None
+    authoritative_reassessment: bool = False
+    maximum_supported_level_id: str | None = None
     links: list[EvidenceLinkCreate] = Field(min_length=1)
 
     _external_reference_is_safe = field_validator("external_reference")(validate_external_reference)
@@ -494,6 +510,10 @@ class EvidenceCreate(StrictModel):
             self.occurred_at.tzinfo is None or self.occurred_at.utcoffset() is None
         ):
             raise ValueError("occurred_at must include a timezone offset")
+        if self.authoritative_reassessment != (self.maximum_supported_level_id is not None):
+            raise ValueError(
+                "Authoritative reassessment requires exactly one maximum supported level."
+            )
         return self
 
 
@@ -604,6 +624,7 @@ class StateUpdatePayload(StrictModel):
 class PortablePackagePayload(StrictModel):
     tables: dict[str, list[dict[str, Any]]]
     manifest: dict[str, Any] | None = None
+    capabilityProjectionCheckpoints: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ImportInspectRequest(StrictModel):

@@ -208,6 +208,20 @@ def _assert_known_migration_source(
         "evidence_link_retractions",
         "evidence_redactions",
     }
+    capability_tables = {
+        "capability_evaluation_runs",
+        "criterion_evaluation_results",
+        "competency_capability_states",
+        "capability_state_events",
+        "competency_review_states",
+        "review_events",
+    }
+    projection_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(projection_invalidations)")
+    }
+    semantic_definition_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(semantic_competency_definitions)")
+    }
     activity_backfill_present = bool(
         any(
             connection.execute(f'SELECT 1 FROM "{table}" LIMIT 1').fetchone()
@@ -291,6 +305,19 @@ def _assert_known_migration_source(
         raise RuntimeError(
             "Database has an ambiguously partial unified Evidence migration; restore its "
             "verified pre-migration backup before retrying."
+        )
+    if revision == "0009_unified_evidence_verification" and (
+        bool(capability_tables & tables)
+        or {"subject_sequence", "attempt_run_id"} & projection_columns
+        or {
+            "freshness_current_through_days",
+            "freshness_stale_after_days",
+        }
+        & semantic_definition_columns
+    ):
+        raise RuntimeError(
+            "Database has an ambiguously partial capability migration; restore its verified "
+            "pre-migration backup before retrying."
         )
 
 

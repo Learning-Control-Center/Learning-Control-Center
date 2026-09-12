@@ -42,6 +42,10 @@ PORTABLE_V2_FOUNDATION_TABLES = frozenset(
         "evidence_invalidations",
         "evidence_link_retractions",
         "evidence_redactions",
+        "capability_evaluation_runs",
+        "criterion_evaluation_results",
+        "capability_state_events",
+        "review_events",
     }
 )
 PORTABLE_V1_FORBIDDEN_TABLES = frozenset(
@@ -71,9 +75,22 @@ PORTABLE_V2_MANIFEST = {
         "evidence_invalidations",
         "evidence_link_retractions",
         "evidence_redactions",
+        "capability_evaluation_runs",
+        "criterion_evaluation_results",
+        "capability_state_events",
+        "review_events",
     ],
-    "omittedRebuildableState": ["projection_invalidations"],
-    "restoreActions": ["clear_projection_invalidations"],
+    "omittedRebuildableState": [
+        "competency_capability_states",
+        "competency_review_states",
+        "projection_invalidations",
+    ],
+    "restoreActions": [
+        "clear_projection_invalidations",
+        "rebuild_capability_states",
+        "rebuild_review_states",
+        "verify_projection_hash_parity",
+    ],
 }
 
 

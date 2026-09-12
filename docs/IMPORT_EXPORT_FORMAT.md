@@ -120,7 +120,7 @@ Import inspection validates exact table/column coverage, strict canonical scalar
 
 The restore inspection response includes `replacementDiff`, which compares current and incoming portable state by table and by portable domain. It reports existing and incoming row counts plus rows that will be added, modified, or removed, identifies every affected domain, and states that authentication is preserved and merge restore is unsupported.
 
-Current application-produced portable backups use `schemaVersion: 2` and include immutable analysis, profile, semantic competency, activation, legacy-criterion lineage, Activity, Session attribution, unified Evidence, EvidenceLink, lifecycle, and redaction history. Their manifest names included history and explicitly omits rebuildable `projection_invalidations`; restore clears that queue before rebuilding from canonical facts in checkpoints that define projection consumers. Frozen V1 portable backups remain accepted through a dedicated schema-version dispatch: built-in Technical/CEFR scale facts are added deterministically, every legacy criterion receives one unknown-preserving assertion, every legacy Session receives one deterministic Activity, a non-null legacy competency attribution receives one Primary SessionContribution, and qualifying legacy Session/Verification sources receive provenance-bearing Evidence without inferred strength, source confidence, criterion scope, or capability. Other absent V2 tables are initialized empty, and legacy recommendation rows retain a null analysis link. The inspection summary reports row counts and source/result hashes for those conversions and confirms that no semantic definition, target profile, or capability was inferred. Older valid V1 backups that also lack `roadmap_scope_events` are identified with `portableCompatibility: "legacy_scope_baseline"`; restore creates at most one deterministic current-scope baseline from the current roadmap pointers and that roadmap row's `updated_at`. It never invents earlier phase changes. A current-format restore preserves imported history and records a `portable_restore` event only when it changes the local current scope.
+Current application-produced portable backups use `schemaVersion: 2` and include immutable analysis, profile, semantic competency, activation, legacy-criterion lineage, Activity, Session attribution, unified Evidence, EvidenceLink, lifecycle, redaction, capability-evaluation, criterion-result, capability-event, and review-event history. Capability runs retain their canonical input payload and hashes. The payload also carries `capabilityProjectionCheckpoints`, which bind each exported current subject/scope projection to its immutable run, Evidence-set hash, and expected output hash. Their manifest explicitly omits current capability/review projections and `projection_invalidations`; restore clears the queue, validates retained run lineage against canonical Evidence at each cutoff, deterministically rebuilds the projections, and requires checkpoint output parity before commit. Frozen V1 portable backups remain accepted through a dedicated schema-version dispatch: built-in Technical/CEFR scale facts are added deterministically, every legacy criterion receives one unknown-preserving assertion, every legacy Session receives one deterministic Activity, a non-null legacy competency attribution receives one Primary SessionContribution, and qualifying legacy Session/Verification sources receive provenance-bearing Evidence without inferred strength, source confidence, criterion scope, or capability. Other absent V2 tables are initialized empty, and legacy recommendation rows retain a null analysis link. The inspection summary reports row counts and source/result hashes for those conversions and confirms that no semantic definition, target profile, or capability was inferred. Older valid V1 backups that also lack `roadmap_scope_events` are identified with `portableCompatibility: "legacy_scope_baseline"`; restore creates at most one deterministic current-scope baseline from the current roadmap pointers and that roadmap row's `updated_at`. It never invents earlier phase changes. A current-format restore preserves imported history and records a `portable_restore` event only when it changes the local current scope.
 
 ### Representative empty portable package
 
@@ -136,10 +136,11 @@ This valid package represents an empty portable learning state. Non-empty export
   "payload": {
     "manifest": {
       "includedCanonicalDomains": ["learning_state", "target_profiles", "semantic_competency_definitions", "capability_scales", "legacy_criterion_assertions", "activities", "session_contributions", "evidence", "evidence_links"],
-      "includedImmutableHistory": ["analysis_runs", "analysis_snapshots", "target_profile_activation_events", "competency_definition_activation_events", "migration_backfill_runs", "contribution_retractions", "session_corrections", "evidence_retractions", "evidence_invalidations", "evidence_link_retractions", "evidence_redactions"],
-      "omittedRebuildableState": ["projection_invalidations"],
-      "restoreActions": ["clear_projection_invalidations"]
+      "includedImmutableHistory": ["analysis_runs", "analysis_snapshots", "target_profile_activation_events", "competency_definition_activation_events", "migration_backfill_runs", "contribution_retractions", "session_corrections", "evidence_retractions", "evidence_invalidations", "evidence_link_retractions", "evidence_redactions", "capability_evaluation_runs", "criterion_evaluation_results", "capability_state_events", "review_events"],
+      "omittedRebuildableState": ["competency_capability_states", "competency_review_states", "projection_invalidations"],
+      "restoreActions": ["clear_projection_invalidations", "rebuild_capability_states", "rebuild_review_states", "verify_projection_hash_parity"]
     },
+    "capabilityProjectionCheckpoints": [],
     "tables": {
       "roadmaps": [],
       "roadmap_versions": [],
@@ -172,6 +173,10 @@ This valid package represents an empty portable learning state. Non-empty export
       "evidence_invalidations": [],
       "evidence_link_retractions": [],
       "evidence_redactions": [],
+      "capability_evaluation_runs": [],
+      "criterion_evaluation_results": [],
+      "capability_state_events": [],
+      "review_events": [],
       "target_profiles": [],
       "target_profile_versions": [],
       "profile_domains": [],

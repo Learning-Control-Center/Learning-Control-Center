@@ -37,17 +37,22 @@ from app.models import (
     AnalysisRun,
     AnalysisSnapshot,
     ApplicationSetting,
+    CapabilityEvaluationRun,
     CapabilityScaleDimension,
     CapabilityScaleLevel,
     CapabilityScaleVersion,
+    CapabilityStateEvent,
+    CompetencyCapabilityState,
     CompetencyDefinition,
     CompetencyDefinitionActivationEvent,
     CompetencyIdentity,
     CompetencyPrerequisite,
+    CompetencyReviewState,
     CompetencyState,
     CompetencyStatusEvent,
     ContributionRetraction,
     CriterionDefinition,
+    CriterionEvaluationResult,
     CriterionIdentity,
     DisciplineProfile,
     Evidence,
@@ -75,6 +80,7 @@ from app.models import (
     ReadinessGatePredicate,
     ReadinessGateTarget,
     RecommendationSnapshot,
+    ReviewEvent,
     Roadmap,
     RoadmapScopeEvent,
     RoadmapVersion,
@@ -141,6 +147,7 @@ def _validate_json_columns(connection: Any) -> None:
         (Evidence, "provenance_json"),
         (EvidenceLink, "provenance_json"),
         (EvidenceRedaction, "redacted_fields_json"),
+        (CapabilityEvaluationRun, "input_payload_json"),
     )
     for model, column_name in json_columns:
         column = getattr(model, column_name)
@@ -1951,6 +1958,7 @@ def validate_domain_integrity(connection: Any) -> None:
     _validate_v2_profile_competency(connection)
     _validate_activity_sessions(connection)
     _validate_evidence(connection)
+    _validate_capability_history(connection)
     for timezone_name in connection.execute(select(DisciplineProfile.timezone)).scalars():
         try:
             ZoneInfo(timezone_name)
@@ -1960,6 +1968,285 @@ def validate_domain_integrity(connection: Any) -> None:
                 "PORTABLE_TIMEZONE_INVALID",
                 "The discipline timezone is not a valid IANA timezone.",
             ) from exc
+
+
+def _validate_capability_history(connection: Any) -> None:
+    definitions = {
+        item.id: item
+        for item in connection.execute(select(*SemanticCompetencyDefinition.__table__.c)).all()
+    }
+    scales = {
+        item.id: item
+        for item in connection.execute(select(*CapabilityScaleVersion.__table__.c)).all()
+    }
+    levels = {
+        item.id: item
+        for item in connection.execute(select(*CapabilityScaleLevel.__table__.c)).all()
+    }
+    dimensions = {
+        item.id: item
+        for item in connection.execute(select(*CapabilityScaleDimension.__table__.c)).all()
+    }
+    enabled_dimensions = {
+        (item.semantic_definition_id, item.scale_dimension_id)
+        for item in connection.execute(select(*SemanticDefinitionDimension.__table__.c)).all()
+    }
+    criteria = {
+        item.id: item
+        for item in connection.execute(select(*CriterionDefinition.__table__.c)).all()
+    }
+    runs = {
+        item.id: item
+        for item in connection.execute(select(*CapabilityEvaluationRun.__table__.c)).all()
+    }
+    input_payloads: dict[str, dict[str, Any]] = {}
+    for run in runs.values():
+        try:
+            input_payload = json.loads(run.input_payload_json)
+            confidence_facts = json.loads(run.confidence_facts_json)
+            decisive_ids = json.loads(run.decisive_evidence_ids_json)
+            passed_ids = json.loads(run.passed_level_ids_json)
+            reasons = json.loads(run.reasons_json)
+        except (TypeError, ValueError) as exc:
+            raise AppError(
+                422,
+                "PORTABLE_CAPABILITY_HISTORY_INVALID",
+                "Capability evaluation history contains invalid JSON.",
+            ) from exc
+        if not isinstance(input_payload, dict):
+            raise AppError(
+                422,
+                "PORTABLE_CAPABILITY_HISTORY_INVALID",
+                "Capability evaluation input lineage is malformed.",
+            )
+        input_payloads[run.id] = input_payload
+        input_evidence = input_payload.get("evidence")
+        input_criteria = input_payload.get("criteria")
+        output = {
+            "selectedLevelId": run.selected_level_id,
+            "assessmentStatus": run.assessment_status,
+            "aggregateConfidence": run.aggregate_confidence,
+            "confidenceFacts": confidence_facts,
+            "downgradeCause": run.downgrade_cause,
+            "decisiveEvidenceIds": decisive_ids,
+            "passedLevelIds": passed_ids,
+            "reasons": reasons,
+        }
+        definition = definitions.get(run.semantic_definition_id)
+        selected_level = levels.get(run.selected_level_id) if run.selected_level_id else None
+        dimension = dimensions.get(run.dimension_id) if run.dimension_id else None
+        if (
+            not all(len(value) == 64 for value in (run.evidence_set_hash, run.input_hash))
+            or content_hash(input_payload) != run.input_hash
+            or not isinstance(input_evidence, list)
+            or content_hash(input_evidence) != run.evidence_set_hash
+            or not isinstance(input_criteria, list)
+            or input_payload.get("competencyIdentityId") != run.competency_identity_id
+            or input_payload.get("semanticDefinitionId") != run.semantic_definition_id
+            or input_payload.get("scaleVersionId") != run.scale_version_id
+            or input_payload.get("scopeKey") != run.scope_key
+            or input_payload.get("cutoffAt") != run.cutoff_at
+            or input_payload.get("policies")
+            != [
+                "criterion-evaluation-policy/v1",
+                "capability-policy/v1",
+                "evidence-policy/v1",
+                "capability-downgrade-policy/v1",
+            ]
+            or content_hash(output) != run.output_hash
+            or not isinstance(confidence_facts, dict)
+            or not all(isinstance(value, list) for value in (decisive_ids, passed_ids, reasons))
+            or run.criterion_policy_version != "criterion-evaluation-policy/v1"
+            or run.capability_policy_version != "capability-policy/v1"
+            or run.evidence_policy_version != "evidence-policy/v1"
+            or run.downgrade_policy_version != "capability-downgrade-policy/v1"
+            or definition is None
+            or definition.competency_identity_id != run.competency_identity_id
+            or definition.scale_version_id != run.scale_version_id
+            or run.scale_version_id not in scales
+            or (
+                run.dimension_id is not None
+                and (
+                    dimension is None
+                    or dimension.scale_version_id != run.scale_version_id
+                    or (run.semantic_definition_id, run.dimension_id) not in enabled_dimensions
+                )
+            )
+            or run.scope_key
+            != (f"dimension:{run.dimension_id}" if run.dimension_id else "overall")
+            or (
+                selected_level is not None
+                and selected_level.scale_version_id != run.scale_version_id
+            )
+            or any(
+                level_id not in levels
+                or levels[level_id].scale_version_id != run.scale_version_id
+                for level_id in passed_ids
+            )
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_CAPABILITY_HISTORY_INVALID",
+                "Capability evaluation hashes or facts are inconsistent.",
+            )
+    for result in connection.execute(select(*CriterionEvaluationResult.__table__.c)):
+        run = runs.get(result.run_id)
+        criterion = criteria.get(result.criterion_definition_id)
+        try:
+            decisive = json.loads(result.decisive_evidence_ids_json)
+            facts = json.loads(result.facts_json)
+        except (TypeError, ValueError) as exc:
+            raise AppError(
+                422,
+                "PORTABLE_CAPABILITY_HISTORY_INVALID",
+                "Criterion evaluation history contains invalid JSON.",
+            ) from exc
+        input_criteria = input_payloads.get(result.run_id, {}).get("criteria", [])
+        matching_input = [
+            item
+            for item in input_criteria
+            if isinstance(item, dict) and item.get("id") == result.criterion_definition_id
+        ]
+        if (
+            run is None
+            or result.evidence_set_hash != run.evidence_set_hash
+            or not isinstance(decisive, list)
+            or not isinstance(facts, dict)
+            or criterion is None
+            or criterion.semantic_definition_id != run.semantic_definition_id
+            or criterion.dimension_id != run.dimension_id
+            or criterion.level_id not in levels
+            or levels[criterion.level_id].scale_version_id != run.scale_version_id
+            or len(matching_input) != 1
+            or matching_input[0].get("state") != result.state
+            or matching_input[0].get("decisiveEvidenceIds") != decisive
+            or matching_input[0].get("facts") != facts
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_CAPABILITY_HISTORY_INVALID",
+                "Criterion evaluation history is inconsistent with its run.",
+            )
+    result_counts = dict(
+        connection.execute(
+            select(CriterionEvaluationResult.run_id, func.count()).group_by(
+                CriterionEvaluationResult.run_id
+            )
+        ).all()
+    )
+    if any(
+        result_counts.get(run_id, 0) != len(payload.get("criteria", []))
+        for run_id, payload in input_payloads.items()
+    ):
+        raise AppError(
+            422,
+            "PORTABLE_CAPABILITY_HISTORY_INVALID",
+            "Criterion evaluation history is incomplete for its run.",
+        )
+    for model in (CapabilityStateEvent, ReviewEvent):
+        sequences: dict[tuple[str, str], int] = defaultdict(int)
+        events = connection.execute(
+            select(*model.__table__.c).order_by(
+                model.competency_identity_id, model.scope_key, model.event_sequence
+            )
+        )
+        for event in events:
+            key = (event.competency_identity_id, event.scope_key)
+            sequences[key] += 1
+            run = runs.get(event.evaluation_run_id)
+            if run is None:
+                raise AppError(
+                    422,
+                    "PORTABLE_CAPABILITY_HISTORY_INVALID",
+                    "Capability or review event history is disconnected.",
+                )
+            event_invalid = (
+                event.event_sequence != sequences[key]
+                or run.competency_identity_id != event.competency_identity_id
+                or run.scope_key != event.scope_key
+                or run.semantic_definition_id != event.semantic_definition_id
+                or run.dimension_id != event.dimension_id
+            )
+            if model is CapabilityStateEvent:
+                try:
+                    event_decisive = json.loads(event.decisive_evidence_ids_json)
+                except (TypeError, ValueError):
+                    event_invalid = True
+                else:
+                    event_invalid = event_invalid or (
+                        event.new_level_id != run.selected_level_id
+                        or event.new_assessment_status != run.assessment_status
+                        or event.new_confidence != run.aggregate_confidence
+                        or event_decisive != json.loads(run.decisive_evidence_ids_json)
+                    )
+            else:
+                try:
+                    review_reasons = json.loads(event.reason_codes_json)
+                except (TypeError, ValueError):
+                    event_invalid = True
+                else:
+                    event_invalid = event_invalid or (
+                        not isinstance(review_reasons, list)
+                        or event.freshness_policy_version != "freshness-policy/v1"
+                        or (event.current_through_days is None)
+                        != (event.stale_after_days is None)
+                        or (
+                            event.current_through_days is not None
+                            and event.stale_after_days is not None
+                            and event.stale_after_days < event.current_through_days
+                        )
+                    )
+            if event_invalid:
+                raise AppError(
+                    422,
+                    "PORTABLE_CAPABILITY_HISTORY_INVALID",
+                    "Capability or review event history is disconnected.",
+                )
+    for state in connection.execute(select(*CompetencyCapabilityState.__table__.c)):
+        run = runs.get(state.evaluation_run_id)
+        if (
+            run is None
+            or run.competency_identity_id != state.competency_identity_id
+            or run.scope_key != state.scope_key
+            or run.semantic_definition_id != state.semantic_definition_id
+            or run.scale_version_id != state.scale_version_id
+            or run.dimension_id != state.dimension_id
+            or run.selected_level_id != state.capability_level_id
+            or run.assessment_status != state.assessment_status
+            or run.aggregate_confidence != state.aggregate_confidence
+            or run.capability_policy_version != state.capability_policy_version
+            or run.criterion_policy_version != state.criterion_policy_version
+            or run.evidence_policy_version != state.evidence_policy_version
+            or run.evidence_set_hash != state.evidence_set_hash
+            or run.confidence_facts_json != state.confidence_facts_json
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_CAPABILITY_PROJECTION_INVALID",
+                "The current capability projection is disconnected from history.",
+            )
+    for state in connection.execute(select(*CompetencyReviewState.__table__.c)):
+        run = runs.get(state.evaluation_run_id)
+        if (
+            run is None
+            or run.competency_identity_id != state.competency_identity_id
+            or run.scope_key != state.scope_key
+            or run.semantic_definition_id != state.semantic_definition_id
+            or run.scale_version_id != state.scale_version_id
+            or run.dimension_id != state.dimension_id
+            or state.freshness_policy_version != "freshness-policy/v1"
+            or (state.current_through_days is None) != (state.stale_after_days is None)
+            or (
+                state.current_through_days is not None
+                and state.stale_after_days is not None
+                and state.stale_after_days < state.current_through_days
+            )
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_CAPABILITY_PROJECTION_INVALID",
+                "The current review projection is disconnected from history.",
+            )
 
 
 def portable_state_presence(connection: Any, portable_models: list[Any]) -> dict[str, int]:

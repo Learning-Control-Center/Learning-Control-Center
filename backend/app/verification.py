@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth import AuthContext, get_auth_context, require_csrf
+from app.capability import commit_source_and_drain
 from app.database import get_db
 from app.errors import AppError
 from app.evidence import create_verification_with_evidence
@@ -31,7 +32,7 @@ async def create_verification(
         origin_kind="local",
         lifecycle_source="verification",
     )
-    db.commit()
+    commit_source_and_drain(db)
     return {"id": record.id, "result": record.result, "status": status}
 
 

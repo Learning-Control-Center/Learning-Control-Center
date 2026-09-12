@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth import AuthContext, get_auth_context, require_csrf
+from app.capability import commit_source_and_drain
 from app.database import get_db
 from app.domain import transition_status
 from app.errors import AppError
@@ -708,6 +709,50 @@ def _create_native_evidence(
         return existing
     for link in payload.links:
         _validate_link(db, link)
+    rubric_references: dict[str, str] = {}
+    if payload.authoritative_reassessment:
+        declared_level = db.get(CapabilityScaleLevel, payload.maximum_supported_level_id)
+        definitions = [
+            db.get(CriterionDefinition, link.criterion_definition_id)
+            for link in payload.links
+        ]
+        linked_levels = [
+            db.get(CapabilityScaleLevel, definition.level_id)
+            for definition in definitions
+            if definition is not None
+        ]
+        valid_authoritative = (
+            payload.evidence_type == "assessment"
+            and payload.strength == "strong"
+            and payload.independence == "independent"
+            and payload.capture_method == "explicit_authoritative_reassessment"
+            and declared_level is not None
+            and len(definitions) == len(payload.links)
+            and len(linked_levels) == len(payload.links)
+            and all(link.effect == "contradicts" for link in payload.links)
+            and all(
+                definition is not None and definition.verification_rubric is not None
+                for definition in definitions
+            )
+            and all(
+                level is not None
+                and level.scale_version_id == declared_level.scale_version_id
+                and level.ordinal_rank > declared_level.ordinal_rank
+                for level in linked_levels
+            )
+        )
+        if not valid_authoritative:
+            raise AppError(
+                422,
+                "AUTHORITATIVE_REASSESSMENT_INVALID",
+                "Authoritative reassessment requires a strong independent assessment, "
+                "rubric-bound contradiction links, and a lower maximum supported level.",
+            )
+        rubric_references = {
+            definition.id: definition.verification_rubric
+            for definition in definitions
+            if definition is not None and definition.verification_rubric is not None
+        }
     evidence = Evidence(
         evidence_type=payload.evidence_type,
         source_type="native_evidence_command",
@@ -719,7 +764,7 @@ def _create_native_evidence(
         strength_unknown_reason=payload.strength_unknown_reason,
         independence=payload.independence,
         independence_unknown_reason=payload.independence_unknown_reason,
-        source_confidence="low",
+        source_confidence="high" if payload.authoritative_reassessment else "low",
         occurred_at=(
             datetime_to_epoch_ms(payload.occurred_at) if payload.occurred_at is not None else None
         ),
@@ -732,7 +777,16 @@ def _create_native_evidence(
                 "source_record_id": payload.idempotency_key,
                 "capture_method": payload.capture_method,
                 "policy_version": EVIDENCE_POLICY,
-                "source_confidence_assignment": "user_evidence_defaults_low",
+                "source_confidence_assignment": (
+                    "explicit_authoritative_reassessment_high"
+                    if payload.authoritative_reassessment
+                    else "user_evidence_defaults_low"
+                ),
+                "downgrade_authority": (
+                    "local_user_confirmed" if payload.authoritative_reassessment else None
+                ),
+                "maximum_supported_level_id": payload.maximum_supported_level_id,
+                "rubric_references": rubric_references,
                 "command_hash": _command_hash(payload),
             }
         ),
@@ -741,7 +795,7 @@ def _create_native_evidence(
         artifact_hash=payload.artifact_hash,
         external_reference=payload.external_reference,
         supersedes_evidence_id=supersedes_evidence_id,
-        authoritative_for_downgrade=False,
+        authoritative_for_downgrade=payload.authoritative_reassessment,
     )
     db.add(evidence)
     db.flush()
@@ -782,7 +836,7 @@ async def create_verification_attempt(
         )
     )
     assert result_evidence is not None
-    db.commit()
+    commit_source_and_drain(db)
     return {
         "id": record.id,
         "result": record.result,
@@ -798,7 +852,7 @@ async def create_evidence(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     evidence = _create_native_evidence(db, payload)
-    db.commit()
+    commit_source_and_drain(db)
     return _serialize_evidence(db, evidence)
 
 
@@ -883,7 +937,7 @@ async def supersede_evidence(
         db.flush()
         links = db.scalars(select(EvidenceLink).where(EvidenceLink.evidence_id == old.id)).all()
         _queue_evidence_invalidations(db, source_fact_id=retraction.id, links=links)
-    db.commit()
+    commit_source_and_drain(db)
     return _serialize_evidence(db, replacement)
 
 
@@ -910,7 +964,7 @@ async def retract_evidence(
             select(EvidenceLink).where(EvidenceLink.evidence_id == evidence_id)
         ).all()
         _queue_evidence_invalidations(db, source_fact_id=fact.id, links=links)
-        db.commit()
+        commit_source_and_drain(db)
     return {"retracted": True}
 
 
@@ -939,7 +993,7 @@ async def invalidate_evidence(
             select(EvidenceLink).where(EvidenceLink.evidence_id == evidence_id)
         ).all()
         _queue_evidence_invalidations(db, source_fact_id=fact.id, links=links)
-        db.commit()
+        commit_source_and_drain(db)
     return {"invalidated": True}
 
 
@@ -988,7 +1042,7 @@ async def link_evidence(
         provenance={"capture_method": "explicit_user_link", "policy_version": EVIDENCE_POLICY},
     )
     _queue_evidence_invalidations(db, source_fact_id=link.id, links=[link])
-    db.commit()
+    commit_source_and_drain(db)
     return {"id": link.id}
 
 
@@ -1016,7 +1070,7 @@ async def retract_evidence_link(
         db.add(fact)
         db.flush()
         _queue_evidence_invalidations(db, source_fact_id=fact.id, links=[link])
-        db.commit()
+        commit_source_and_drain(db)
     return {"retracted": True}
 
 
@@ -1043,5 +1097,5 @@ async def redact_evidence(
     db.flush()
     links = db.scalars(select(EvidenceLink).where(EvidenceLink.evidence_id == evidence_id)).all()
     _queue_evidence_invalidations(db, source_fact_id=fact.id, links=links)
-    db.commit()
+    commit_source_and_drain(db)
     return {"redacted": True}
