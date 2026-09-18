@@ -98,6 +98,15 @@ class EvidenceQualificationPublicDTO:
 
 
 @dataclass(frozen=True)
+class ActualContributionAttributionPublicDTO:
+    session_id: str
+    competency_identity_id: str
+    dimension_id: str | None
+    criterion_definition_id: str
+    relevance: str
+
+
+@dataclass(frozen=True)
 class EvidenceCoveragePublicDTO:
     competency_identity_id: str
     evidence_ids: tuple[str, ...]
@@ -189,9 +198,7 @@ def _target_criterion_rules(
         )
         .order_by(CapabilityScaleLevel.ordinal_rank, CriterionDefinition.id)
     ).all()
-    return {
-        item.id: str(json.loads(item.demonstration_rule_json)["rule"]) for item in rows
-    }
+    return {item.id: str(json.loads(item.demonstration_rule_json)["rule"]) for item in rows}
 
 
 def evidence_qualification_matches_target(
@@ -207,9 +214,7 @@ def evidence_qualification_matches_target(
         return False
     if qualification.dimension_id != target.dimension_id:
         return False
-    criterion_rules = _target_criterion_rules(
-        db, target=target, active_semantics=active_semantics
-    )
+    criterion_rules = _target_criterion_rules(db, target=target, active_semantics=active_semantics)
     if qualification.criterion_definition_id:
         rule = criterion_rules.get(qualification.criterion_definition_id)
         rules = (rule,) if rule is not None else ()
@@ -397,6 +402,58 @@ def actual_session_summaries_as_of(
                 produced_active_evidence=bool(active_evidence_ids),
                 active_evidence_competency_ids=active_evidence_competency_ids,
                 active_evidence_qualifications=ordered_qualifications,
+            )
+        )
+    return tuple(result)
+
+
+def actual_contribution_attributions_as_of(
+    db: Session, *, exclusive_cutoff_at: int
+) -> tuple[ActualContributionAttributionPublicDTO, ...]:
+    """Resolve cutoff-visible SessionContribution criteria to exact active definitions."""
+    active_semantics = active_semantic_definition_ids_as_of(
+        db, exclusive_cutoff_at=exclusive_cutoff_at
+    )
+    result: list[ActualContributionAttributionPublicDTO] = []
+    contributions = db.scalars(
+        select(SessionContribution)
+        .where(
+            SessionContribution.criterion_identity_id.is_not(None),
+            SessionContribution.created_at < exclusive_cutoff_at,
+        )
+        .order_by(SessionContribution.created_at, SessionContribution.id)
+    ).all()
+    for contribution in contributions:
+        if db.scalar(
+            select(ContributionRetraction.id).where(
+                ContributionRetraction.contribution_id == contribution.id,
+                ContributionRetraction.retracted_at < exclusive_cutoff_at,
+            )
+        ) is not None:
+            continue
+        semantic_definition_id = active_semantics.get(contribution.competency_identity_id)
+        if semantic_definition_id is None or contribution.criterion_identity_id is None:
+            continue
+        definition = db.scalar(
+            select(CriterionDefinition)
+            .where(
+                CriterionDefinition.criterion_identity_id
+                == contribution.criterion_identity_id,
+                CriterionDefinition.semantic_definition_id == semantic_definition_id,
+                CriterionDefinition.created_at < exclusive_cutoff_at,
+            )
+            .order_by(CriterionDefinition.created_at.desc(), CriterionDefinition.id.desc())
+            .limit(1)
+        )
+        if definition is None:
+            continue
+        result.append(
+            ActualContributionAttributionPublicDTO(
+                contribution.session_id,
+                contribution.competency_identity_id,
+                definition.dimension_id,
+                definition.id,
+                contribution.relevance,
             )
         )
     return tuple(result)

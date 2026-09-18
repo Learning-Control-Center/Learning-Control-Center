@@ -74,7 +74,7 @@ from app.models import (
 from app.portability.registry import (
     PORTABLE_SCHEMA_CURRENT,
     PORTABLE_V6_ANALYSIS_TABLES,
-    PORTABLE_V6_MANIFEST,
+    PORTABLE_V7_MANIFEST,
     upgrade_v5_to_v6_tables,
 )
 from app.profile_views import (
@@ -1185,7 +1185,7 @@ async def test_analysis_v3_reconstructs_profile_capability_and_late_evidence_at_
         )
         tampered_row[field] = value
         with pytest.raises(Exception, match="Analysis V3|analysis"):
-            _validate_portable_payload(tampered_package, f"analysis-envelope-{field}", 6)
+            _validate_portable_payload(tampered_package, f"analysis-envelope-{field}", 7)
     for field in (
         "semantic_definition_references_json",
         "capability_scale_version_references_json",
@@ -1199,7 +1199,7 @@ async def test_analysis_v3_reconstructs_profile_capability_and_late_evidence_at_
         references = json.loads(snapshot_row[field])
         tampered_row[field] = json.dumps(references + references)
         with pytest.raises(Exception, match="Analysis V3|analysis"):
-            _validate_portable_payload(tampered_package, f"analysis-envelope-duplicate-{field}", 6)
+            _validate_portable_payload(tampered_package, f"analysis-envelope-duplicate-{field}", 7)
 
     contradiction = Evidence(
         evidence_type="assessment",
@@ -1272,9 +1272,7 @@ async def test_analysis_v3_reconstructs_profile_capability_and_late_evidence_at_
     )
     assert after_retraction_target["comparisonStatus"] == "at_target"
     assert after_retraction_target["readinessGates"][0]["state"] == "met"
-    retraction_lineage = json.loads(
-        db.get(AnalysisRun, after_retraction.run_id).input_lineage_json
-    )
+    retraction_lineage = json.loads(db.get(AnalysisRun, after_retraction.run_id).input_lineage_json)
     retraction_history = retraction_lineage["capabilityInputs"][0]["inputPayload"]
     assert retraction_history["evidenceCorrectionHistory"]["linkRetractions"]
 
@@ -1513,8 +1511,7 @@ async def test_analysis_v3_reconstructs_profile_capability_and_late_evidence_at_
     prior_input = after_prior_lineage["capabilityInputs"][0]["inputPayload"]
     assert any(item["id"] == prior_run.id for item in prior_input["capabilityEvaluationRunHistory"])
     assert any(
-        item["run_id"] == prior_run.id
-        for item in prior_input["criterionEvaluationResultHistory"]
+        item["run_id"] == prior_run.id for item in prior_input["criterionEvaluationResultHistory"]
     )
     assert any(
         item["evaluation_run_id"] == prior_run.id
@@ -1573,14 +1570,14 @@ def test_analysis_v3_cutoff_replay_hash_and_portable_integrity(db: Session) -> N
     validate_domain_integrity(db.connection())
 
     package = _portable_payload(db)
-    assert PORTABLE_SCHEMA_CURRENT == 6
-    assert package["manifest"] == PORTABLE_V6_MANIFEST
-    tables, _summary = _validate_portable_payload(package, "analysis-v3-portable", 6)
+    assert PORTABLE_SCHEMA_CURRENT == 7
+    assert package["manifest"] == PORTABLE_V7_MANIFEST
+    tables, _summary = _validate_portable_payload(package, "analysis-v3-portable", 7)
     assert len(tables["analysis_v3_run_lineages"]) == 4
     tampered = copy.deepcopy(package)
     tampered["tables"]["analysis_v3_run_lineages"][0]["policy_bundle_hash"] = "0" * 64
     with pytest.raises(Exception, match="Analysis V3|analysis"):
-        _validate_portable_payload(tampered, "analysis-v3-tampered", 6)
+        _validate_portable_payload(tampered, "analysis-v3-tampered", 7)
 
     relabeled_policy = copy.deepcopy(package)
     relabeled_lineage = relabeled_policy["tables"]["analysis_v3_run_lineages"][0]
@@ -1661,7 +1658,7 @@ def test_analysis_v3_cutoff_replay_hash_and_portable_integrity(db: Session) -> N
         }
     )
     with pytest.raises(Exception, match="Analysis V3|analysis"):
-        _validate_portable_payload(relabeled_policy, "analysis-v3-policy-relabel", 6)
+        _validate_portable_payload(relabeled_policy, "analysis-v3-policy-relabel", 7)
 
     # Make stored facts and every public hash internally self-consistent. Restore must
     # still reject them because the pinned analyzer cannot reproduce the alteration.
@@ -1766,7 +1763,7 @@ def test_analysis_v3_cutoff_replay_hash_and_portable_integrity(db: Session) -> N
         }
     )
     with pytest.raises(Exception, match="Analysis V3|analysis"):
-        _validate_portable_payload(coherent_tamper, "analysis-v3-coherent-tamper", 6)
+        _validate_portable_payload(coherent_tamper, "analysis-v3-coherent-tamper", 7)
     for field, value in (
         ("scopeKey", "other-scope"),
         ("purpose", "candidate_readiness"),
@@ -1781,19 +1778,19 @@ def test_analysis_v3_cutoff_replay_hash_and_portable_integrity(db: Session) -> N
             {key: item for key, item in checkpoint.items() if key != "checkpointHash"}
         )
         with pytest.raises(Exception, match="Analysis V3|analysis"):
-            _validate_portable_payload(bad_checkpoint, f"analysis-checkpoint-{field}", 6)
+            _validate_portable_payload(bad_checkpoint, f"analysis-checkpoint-{field}", 7)
 
     bad_signal_cutoff = copy.deepcopy(package)
     bad_signal_cutoff["tables"]["analysis_v3_signals"][0]["generated_cutoff_at"] = 1
     with pytest.raises(Exception, match="Analysis V3|analysis"):
-        _validate_portable_payload(bad_signal_cutoff, "analysis-signal-cutoff", 6)
+        _validate_portable_payload(bad_signal_cutoff, "analysis-signal-cutoff", 7)
 
     missing_lineage = copy.deepcopy(package)
     missing_lineage["tables"]["analysis_v3_run_lineages"] = missing_lineage["tables"][
         "analysis_v3_run_lineages"
     ][1:]
     with pytest.raises(Exception, match="Analysis V3|analysis"):
-        _validate_portable_payload(missing_lineage, "analysis-missing-lineage", 6)
+        _validate_portable_payload(missing_lineage, "analysis-missing-lineage", 7)
 
     expected_current_output = live_current.output_hash
     run_count = db.scalar(select(func.count()).select_from(AnalysisRun))
@@ -1802,7 +1799,7 @@ def test_analysis_v3_cutoff_replay_hash_and_portable_integrity(db: Session) -> N
         package,
         True,
         package_id="analysis-v3-restore-parity",
-        schema_version=6,
+        schema_version=7,
     )
     db.commit()
     assert db.scalar(select(func.count()).select_from(AnalysisRun)) == run_count
@@ -1835,7 +1832,7 @@ def test_analysis_v3_cutoff_replay_hash_and_portable_integrity(db: Session) -> N
         stale_package,
         True,
         package_id="analysis-v3-restore-stale",
-        schema_version=6,
+        schema_version=7,
     )
     db.commit()
     assert db.scalar(select(func.count()).select_from(AnalysisRun)) == run_count
@@ -2024,9 +2021,7 @@ def test_analysis_v3_failed_run_rejects_coherent_policy_relabel(db: Session) -> 
     missing_lineage = copy.deepcopy(package)
     missing_lineage["tables"]["analysis_v3_run_lineages"] = []
     with pytest.raises(Exception, match="Analysis V3|analysis"):
-        _validate_portable_payload(
-            missing_lineage, "analysis-failed-missing-lineage", 6
-        )
+        _validate_portable_payload(missing_lineage, "analysis-failed-missing-lineage", 7)
     lineage = package["tables"]["analysis_v3_run_lineages"][0]
     bundle = json.loads(lineage["analyzer_bundle_json"])
     bundle.update(
@@ -2042,13 +2037,11 @@ def test_analysis_v3_failed_run_rejects_coherent_policy_relabel(db: Session) -> 
     lineage["analyzer_bundle_json"] = json.dumps(bundle, sort_keys=True, separators=(",", ":"))
     lineage["policy_bundle_hash"] = content_hash(bundle)
     run = next(
-        item
-        for item in package["tables"]["analysis_runs"]
-        if item["id"] == lineage["run_id"]
+        item for item in package["tables"]["analysis_runs"] if item["id"] == lineage["run_id"]
     )
     run["algorithm_version"] = bundle["algorithm"]
     with pytest.raises(Exception, match="Analysis V3|analysis"):
-        _validate_portable_payload(package, "analysis-failed-policy-relabel", 6)
+        _validate_portable_payload(package, "analysis-failed-policy-relabel", 7)
 
 
 def test_analysis_v3_initialization_supersedes_v1_once(db: Session) -> None:
@@ -2243,7 +2236,6 @@ def test_0015_populated_upgrade_preserves_rows_and_builds_exact_config(
         connection.close()
 
     command.upgrade(config, "0015_analysis_v3")
-    command.check(config)
     connection = sqlite3.connect(path)
     try:
         after = connection.execute("SELECT * FROM projection_invalidations ORDER BY id").fetchall()
@@ -2268,6 +2260,9 @@ def test_0015_populated_upgrade_preserves_rows_and_builds_exact_config(
         )
     finally:
         connection.close()
+
+    command.upgrade(config, "head")
+    command.check(config)
 
 
 @pytest.mark.parametrize(

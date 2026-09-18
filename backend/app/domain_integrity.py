@@ -170,6 +170,17 @@ from app.projects.models import (
     SessionProjectContributionRetraction,
 )
 from app.projects.service import PROJECT_CRITERION_POLICY, evaluate_project_criterion_evidence
+from app.recommendation.v2.models import (
+    RecommendationV2Candidate,
+    RecommendationV2EligibilityDecision,
+    RecommendationV2EligibilityRuleResult,
+    RecommendationV2ExpectedValue,
+    RecommendationV2Reason,
+    RecommendationV2Recommendation,
+    RecommendationV2Run,
+    RecommendationV2ScoreComponent,
+    RecommendationV2SelectionDecision,
+)
 from app.roadmap_projection.models import (
     LegacyRoadmapActiveState,
     RoadmapNodePositionOverride,
@@ -888,9 +899,7 @@ def _validate_analysis_v3(connection: Any) -> None:
                     reconstructed_facts,
                     reconstructed_unknowns,
                     reconstructed_lineage,
-                ) = build_analysis_inputs(
-                    validation_db, snapshot.cutoff_at, snapshot.purpose
-                )
+                ) = build_analysis_inputs(validation_db, snapshot.cutoff_at, snapshot.purpose)
         frozen_lineage = json.loads(run.input_lineage_json)
         if content_hash(frozen_lineage) != content_hash(reconstructed_lineage):
             raise AppError(
@@ -2465,6 +2474,553 @@ def _validate_evidence(connection: Any) -> None:
         )
 
 
+def _validate_recommendation_v2(connection: Any) -> None:
+    from app.analysis.v3.public import load_public_analysis_snapshot
+    from app.curriculum.service import unit_availability_as_of
+    from app.recommendation.v2.contracts import candidate_from_payload
+    from app.recommendation.v2.input_replay import regenerate_candidates_from_frozen_input
+    from app.recommendation.v2.policy import (
+        evaluate_registered,
+        registered_policy_bundle,
+    )
+
+    public_session = connection if isinstance(connection, Session) else Session(bind=connection)
+
+    def expected_curriculum_availability(
+        frozen_input: dict[str, Any], snapshot_row: Any
+    ) -> list[dict[str, Any]]:
+        curriculum = frozen_input.get("curriculum")
+        units = curriculum.get("units") if isinstance(curriculum, dict) else None
+        if not isinstance(units, list):
+            raise AppError(
+                422,
+                "PORTABLE_RECOMMENDATION_V2_INVALID",
+                "Recommendation V2 Curriculum availability lineage is invalid.",
+            )
+        return cast(
+            list[dict[str, Any]],
+            json.loads(
+                canonical_json(
+                    [
+                        asdict(
+                            unit_availability_as_of(
+                                public_session,
+                                learning_unit_definition_id=str(unit["unit_definition_id"]),
+                                exclusive_cutoff_at=snapshot_row.cutoff_at,
+                            )
+                        )
+                        for unit in units
+                    ]
+                )
+            ),
+        )
+
+    runs = {
+        row.id: row for row in connection.execute(select(*RecommendationV2Run.__table__.c)).all()
+    }
+    snapshots = {
+        row.id: row for row in connection.execute(select(*AnalysisSnapshot.__table__.c)).all()
+    }
+    candidates = list(connection.execute(select(*RecommendationV2Candidate.__table__.c)).all())
+    candidate_by_id = {row.id: row for row in candidates}
+    eligibility = {
+        row.candidate_id: row
+        for row in connection.execute(
+            select(*RecommendationV2EligibilityDecision.__table__.c)
+        ).all()
+    }
+    expected_values = {
+        row.candidate_id: row
+        for row in connection.execute(select(*RecommendationV2ExpectedValue.__table__.c)).all()
+    }
+    selections = {
+        row.candidate_id: row
+        for row in connection.execute(select(*RecommendationV2SelectionDecision.__table__.c)).all()
+    }
+    components: dict[str, list[Any]] = defaultdict(list)
+    for row in connection.execute(select(*RecommendationV2ScoreComponent.__table__.c)).all():
+        components[row.candidate_id].append(row)
+    rules: dict[str, list[Any]] = defaultdict(list)
+    for row in connection.execute(select(*RecommendationV2EligibilityRuleResult.__table__.c)).all():
+        rules[row.candidate_id].append(row)
+    reasons: dict[str, list[Any]] = defaultdict(list)
+    for row in connection.execute(select(*RecommendationV2Reason.__table__.c)).all():
+        reasons[row.candidate_id].append(row)
+    recommendations = list(
+        connection.execute(select(*RecommendationV2Recommendation.__table__.c)).all()
+    )
+    for run in runs.values():
+        replay_of = run.replay_of_run_id
+        if replay_of is None:
+            continue
+        original = runs.get(replay_of)
+        if (
+            original is None
+            or replay_of == run.id
+            or original.status != "completed"
+            or run.analysis_snapshot_id != original.analysis_snapshot_id
+            or run.available_time_ms != original.available_time_ms
+            or run.policy_registry_version != original.policy_registry_version
+            or run.policy_bundle_hash != original.policy_bundle_hash
+            or (
+                run.status == "completed"
+                and (
+                    run.input_hash != original.input_hash
+                    or run.output_hash != original.output_hash
+                )
+            )
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_RECOMMENDATION_V2_INVALID",
+                "Recommendation V2 replay lineage is invalid.",
+            )
+        seen = {run.id}
+        cursor = original
+        while cursor.replay_of_run_id is not None:
+            cursor_id = cursor.replay_of_run_id
+            if cursor_id in seen or cursor_id not in runs:
+                raise AppError(
+                    422,
+                    "PORTABLE_RECOMMENDATION_V2_INVALID",
+                    "Recommendation V2 replay lineage contains a cycle.",
+                )
+            seen.add(cursor_id)
+            cursor = runs[cursor_id]
+    for run_id, run in runs.items():
+        frozen = json.loads(run.frozen_input_json)
+        bundle = json.loads(run.policy_bundle_json)
+        try:
+            expected_bundle = registered_policy_bundle(run.policy_registry_version)
+        except KeyError as exc:
+            raise AppError(
+                422,
+                "PORTABLE_RECOMMENDATION_V2_INVALID",
+                "Recommendation V2 policy registry is unavailable.",
+            ) from exc
+        run_candidates = sorted(
+            (row for row in candidates if row.run_id == run_id), key=lambda row: row.ordinal
+        )
+        ordinals = [row.ordinal for row in run_candidates]
+        run_selections = [selections.get(row.id) for row in run_candidates]
+        selected = [row for row in run_selections if row is not None and row.decision == "selected"]
+        roles = [row.portfolio_role for row in selected]
+        useful_eligible = any(
+            bool(json.loads(row.candidate_json).get("usefulness"))
+            and eligibility.get(row.id) is not None
+            and bool(eligibility[row.id].eligible)
+            for row in run_candidates
+        )
+        snapshot = snapshots.get(run.analysis_snapshot_id)
+        if (
+            snapshot is None
+            or run.local_date
+            != datetime.fromtimestamp(run.generated_at / 1000, tz=ZoneInfo(snapshot.timezone))
+            .date()
+            .isoformat()
+            or run.cutoff_at != snapshot.cutoff_at
+            or run.target_profile_version_id != snapshot.target_profile_version_id
+            or run.learning_graph_version_id != snapshot.learning_graph_reference
+            or run.curriculum_reference != snapshot.curriculum_reference
+            or run.completeness != snapshot.completeness
+            or json.loads(run.semantic_definition_references_json)
+            != json.loads(snapshot.semantic_definition_references_json)
+            or json.loads(run.capability_scale_version_references_json)
+            != json.loads(snapshot.capability_scale_version_references_json)
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_RECOMMENDATION_V2_INVALID",
+                "Recommendation V2 run metadata is inconsistent with Analysis.",
+            )
+        if run.status == "failed":
+            assert snapshot is not None
+            analysis_reference = frozen.get("analysisSnapshot", {})
+            minimal_keys = {
+                "analysisSnapshot",
+                "availableTimeMs",
+                "userConstraints",
+                "replayOfRunId",
+            }
+            upstream_keys = {
+                "analysisSnapshot",
+                "analysisPublicSnapshot",
+                "targetProfileVersion",
+                "learningGraph",
+                "curriculum",
+                "curriculumAvailability",
+                "projects",
+                "userConstraints",
+                "availableTimeMs",
+            }
+            full_keys = upstream_keys | {"candidates"}
+            frozen_keys = frozenset(frozen)
+            complete_inputs = frozen_keys in {frozenset(upstream_keys), frozenset(full_keys)}
+            original = runs.get(run.replay_of_run_id) if run.replay_of_run_id else None
+            if (
+                frozen_keys
+                not in {frozenset(minimal_keys), frozenset(upstream_keys), frozenset(full_keys)}
+                or analysis_reference.get("id") != snapshot.id
+                or analysis_reference.get("inputHash") != snapshot.input_hash
+                or analysis_reference.get("outputHash") != snapshot.output_hash
+                or analysis_reference.get("cutoffAt") != snapshot.cutoff_at
+                or run.cutoff_at != snapshot.cutoff_at
+                or run.input_hash != content_hash(frozen)
+                or run.policy_bundle_hash != content_hash(bundle)
+                or bundle != expected_bundle
+                or run.algorithm_version != expected_bundle["algorithm"]
+                or run.application_version != expected_bundle["application"]
+                or run.output_hash is not None
+                or run.failure_metadata_json is None
+                or run_candidates
+                or any(row.run_id == run_id for row in recommendations)
+                or run.user_constraints_hash != content_hash(frozen.get("userConstraints", {}))
+                or run.available_time_ms != frozen.get("availableTimeMs")
+                or (
+                    original is not None
+                    and (
+                        (
+                            frozen_keys == frozenset(minimal_keys)
+                            and frozen.get("replayOfRunId") != run.replay_of_run_id
+                        )
+                        or (complete_inputs and run.input_hash != original.input_hash)
+                    )
+                )
+                or (
+                    complete_inputs
+                    and (
+                        frozen["analysisPublicSnapshot"]
+                        != json.loads(
+                            canonical_json(
+                                asdict(load_public_analysis_snapshot(public_session, snapshot.id))
+                            )
+                        )
+                        or frozen["targetProfileVersion"]
+                        != json.loads(snapshot.input_lineage_json).get("profile")
+                        or frozen["learningGraph"]
+                        != json.loads(snapshot.input_lineage_json).get("graph")
+                        or frozen["curriculum"]
+                        != json.loads(snapshot.input_lineage_json).get("curriculumCatalog")
+                        or frozen["projects"]
+                        != json.loads(snapshot.input_lineage_json).get("projectCatalog")
+                        or frozen["curriculumAvailability"]
+                        != expected_curriculum_availability(frozen, snapshot)
+                    )
+                )
+            ):
+                raise AppError(
+                    422,
+                    "PORTABLE_RECOMMENDATION_V2_INVALID",
+                    "Failed Recommendation V2 run lineage is inconsistent.",
+                )
+            if frozen_keys == frozenset(full_keys):
+                try:
+                    regenerate_candidates_from_frozen_input(
+                        frozen, run.policy_registry_version
+                    )
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise AppError(
+                        422,
+                        "PORTABLE_RECOMMENDATION_V2_INVALID",
+                        "Failed Recommendation V2 candidate lineage cannot replay.",
+                    ) from exc
+            continue
+        if (
+            run.status != "completed"
+            or run.analysis_snapshot_id not in snapshots
+            or run.input_hash != content_hash(frozen)
+            or run.policy_bundle_hash != content_hash(bundle)
+            or bundle != expected_bundle
+            or run.algorithm_version != expected_bundle["algorithm"]
+            or run.application_version != expected_bundle["application"]
+            or run.output_hash is None
+            or ordinals != list(range(len(ordinals)))
+            or any(row.id not in eligibility for row in run_candidates)
+            or any(row.id not in expected_values for row in run_candidates)
+            or any(row.id not in selections for row in run_candidates)
+            or len(selected) > 3
+            or len(roles) != len(set(roles))
+            or (useful_eligible and roles.count("primary") != 1)
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_RECOMMENDATION_V2_INVALID",
+                "Recommendation V2 immutable run lineage or portfolio is inconsistent.",
+            )
+        snapshot = snapshots[run.analysis_snapshot_id]
+        analysis_reference = frozen.get("analysisSnapshot", {})
+        analysis_lineage = json.loads(snapshot.input_lineage_json)
+        frozen_projects = frozen.get("projects", {})
+        if (
+            analysis_reference.get("id") != snapshot.id
+            or analysis_reference.get("inputHash") != snapshot.input_hash
+            or analysis_reference.get("outputHash") != snapshot.output_hash
+            or analysis_reference.get("cutoffAt") != snapshot.cutoff_at
+            or run.cutoff_at != snapshot.cutoff_at
+            or run.target_profile_version_id != snapshot.target_profile_version_id
+            or run.learning_graph_version_id != snapshot.learning_graph_reference
+            or run.curriculum_reference != snapshot.curriculum_reference
+            or json.loads(run.semantic_definition_references_json)
+            != json.loads(snapshot.semantic_definition_references_json)
+            or json.loads(run.capability_scale_version_references_json)
+            != json.loads(snapshot.capability_scale_version_references_json)
+            or run.available_time_ms != frozen.get("availableTimeMs")
+            or run.user_constraints_hash != content_hash(frozen.get("userConstraints", {}))
+            or run.project_reference
+            != (frozen_projects.get("input_hash") if isinstance(frozen_projects, dict) else None)
+            or frozen.get("analysisPublicSnapshot")
+            != json.loads(
+                canonical_json(asdict(load_public_analysis_snapshot(public_session, snapshot.id)))
+            )
+            or frozen.get("targetProfileVersion") != analysis_lineage.get("profile")
+            or frozen.get("learningGraph") != analysis_lineage.get("graph")
+            or frozen.get("curriculum") != analysis_lineage.get("curriculumCatalog")
+            or frozen.get("projects") != analysis_lineage.get("projectCatalog")
+            or frozen.get("curriculumAvailability")
+            != expected_curriculum_availability(frozen, snapshot)
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_RECOMMENDATION_V2_INVALID",
+                "Recommendation V2 frozen Analysis lineage is inconsistent.",
+            )
+        try:
+            frozen_candidates = regenerate_candidates_from_frozen_input(
+                frozen, run.policy_registry_version
+            )
+            persisted_candidate_payloads = [
+                json.loads(row.candidate_json) for row in run_candidates
+            ]
+            if frozen["candidates"] != persisted_candidate_payloads or frozen[
+                "candidates"
+            ] != json.loads(canonical_json([asdict(item) for item in frozen_candidates])):
+                raise ValueError("candidate generation mismatch")
+            expected_output = evaluate_registered(
+                run.policy_registry_version, frozen_candidates, run.available_time_ms
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise AppError(
+                422,
+                "PORTABLE_RECOMMENDATION_V2_INVALID",
+                "Recommendation V2 candidate replay failed.",
+            ) from exc
+        if expected_output.output_hash != run.output_hash:
+            raise AppError(
+                422,
+                "PORTABLE_RECOMMENDATION_V2_INVALID",
+                "Recommendation V2 output does not replay under its registered policy.",
+            )
+        expected_by_id = {item.candidate.stable_id: item for item in expected_output.candidates}
+        expected_decisions = {item.candidate_stable_id: item for item in expected_output.decisions}
+        expected_reasons: dict[str, list[Any]] = defaultdict(list)
+        for row in expected_output.reasons:
+            expected_reasons[row.candidate_stable_id].append(row)
+        expected_recommendations = {
+            item.candidate_stable_id: item for item in expected_output.recommendations
+        }
+        for candidate_row in run_candidates:
+            candidate = candidate_from_payload(json.loads(candidate_row.candidate_json))
+            expected = expected_by_id.get(candidate.stable_id)
+            eligibility_row = eligibility.get(candidate_row.id)
+            expected_value = expected_values.get(candidate_row.id)
+            selection = selections.get(candidate_row.id)
+            if (
+                expected is None
+                or candidate_row.stable_id != candidate.stable_id
+                or candidate_row.candidate_key != candidate.candidate_key
+                or candidate_row.stable_tie_key != candidate.stable_tie_key
+                or candidate_row.candidate_type != candidate.candidate_type
+                or candidate_row.source_type != candidate.source_type
+                or candidate_row.source_entity_id != candidate.source_entity_id
+                or candidate_row.source_version_id != candidate.source_version_id
+                or candidate_row.title != candidate.title
+                or candidate_row.description != candidate.description
+                or candidate_row.target_identity_id != candidate.target_identity_id
+                or json.loads(candidate_row.served_target_identity_ids_json)
+                != list(candidate.served_target_identity_ids)
+                or candidate_row.primary_need_kind != candidate.primary_need_kind
+                or candidate_row.primary_need_identity != candidate.primary_need_identity
+                or candidate_row.competency_identity_id != candidate.competency_identity_id
+                or candidate_row.criterion_definition_id != candidate.criterion_definition_id
+                or candidate_row.project_id != candidate.project_id
+                or candidate_row.duration_minimum_ms
+                != (candidate.duration_range_ms[0] if candidate.duration_range_ms else None)
+                or candidate_row.duration_preferred_ms
+                != (candidate.duration_range_ms[1] if candidate.duration_range_ms else None)
+                or candidate_row.duration_maximum_ms
+                != (candidate.duration_range_ms[2] if candidate.duration_range_ms else None)
+                or eligibility_row is None
+                or bool(eligibility_row.eligible) != expected.eligible
+                or eligibility_row.reason_code != expected.eligibility_reason
+                or eligibility_row.policy_version != expected_bundle["eligibility"]
+                or expected_value is None
+                or expected_value.value != expected.expected_learning_value
+                or json.loads(expected_value.reason_codes_json)
+                != list(expected.expected_learning_value_reasons)
+                or json.loads(expected_value.matched_facts_json)
+                != [list(item) for item in expected.expected_learning_value_facts]
+                or expected_value.deciding_rule_code
+                != (
+                    expected.expected_learning_value_reasons[0]
+                    if expected.expected_learning_value_reasons
+                    else "DECISIVE_LEARNING_VALUE_FACTS_MISSING"
+                )
+                or expected_value.policy_version != expected_bundle["expectedLearningValue"]
+                or selection is None
+            ):
+                raise AppError(
+                    422,
+                    "PORTABLE_RECOMMENDATION_V2_INVALID",
+                    "Recommendation V2 candidate audit is inconsistent.",
+                )
+            expected_rules = expected.eligibility_rules
+            actual_rules = sorted(rules[candidate_row.id], key=lambda item: item.ordinal)
+            if len(actual_rules) != len(expected_rules) or any(
+                actual.rule_code != rule.code
+                or actual.outcome != rule.outcome
+                or bool(actual.decisive) != rule.decisive
+                or json.loads(actual.facts_json) != [list(item) for item in rule.facts]
+                or json.loads(actual.subject_ids_json) != list(rule.subject_ids)
+                or actual.policy_version != expected_bundle["eligibility"]
+                for actual, rule in zip(actual_rules, expected_rules, strict=True)
+            ):
+                raise AppError(
+                    422,
+                    "PORTABLE_RECOMMENDATION_V2_INVALID",
+                    "Recommendation V2 eligibility audit is inconsistent.",
+                )
+            expected_components = {item.code: item for item in expected.score_components}
+            actual_components = {item.component_code: item for item in components[candidate_row.id]}
+            if set(actual_components) != set(expected_components) or any(
+                actual_components[code].value != component.value
+                or actual_components[code].allowed_minimum != component.allowed_minimum
+                or actual_components[code].allowed_maximum != component.allowed_maximum
+                or json.loads(actual_components[code].decisive_facts_json)
+                != [list(item) for item in component.decisive_facts]
+                or json.loads(actual_components[code].source_ids_json) != list(component.source_ids)
+                or actual_components[code].policy_version != expected_bundle["score"]
+                for code, component in expected_components.items()
+            ):
+                raise AppError(
+                    422,
+                    "PORTABLE_RECOMMENDATION_V2_INVALID",
+                    "Recommendation V2 score audit is inconsistent.",
+                )
+            expected_selection = expected_decisions[candidate.stable_id]
+            if (
+                selection.decision != expected_selection.decision
+                or selection.portfolio_role != expected_selection.portfolio_role
+                or selection.reason_code != expected_selection.reason_code
+                or selection.rank_ordinal != expected.rank_ordinal
+                or selection.score_total != expected.score_total
+                or selection.advisory_duration_ms != expected_selection.advisory_duration_ms
+                or selection.duration_reason_code != expected_selection.duration_reason_code
+                or selection.admission_ordinal != expected_selection.admission_ordinal
+                or selection.displaced_by_candidate_stable_id
+                != expected_selection.displaced_by_candidate_stable_id
+                or json.loads(selection.decisive_facts_json)
+                != [list(item) for item in expected_selection.decisive_facts]
+                or selection.policy_version != expected_bundle["portfolio"]
+            ):
+                raise AppError(
+                    422,
+                    "PORTABLE_RECOMMENDATION_V2_INVALID",
+                    "Recommendation V2 selection audit is inconsistent.",
+                )
+            actual_reasons = sorted(reasons[candidate_row.id], key=lambda item: item.ordinal)
+            if len(actual_reasons) != len(expected_reasons[candidate.stable_id]) or any(
+                actual.reason_code != reason.reason_code
+                or actual.title != reason.title
+                or actual.score_contribution != reason.score_contribution
+                or actual.template_key != reason.template_key
+                or actual.template_version != reason.template_version
+                or actual.rendered_text != reason.rendered_text
+                or json.loads(actual.explanation_facts_json)
+                != [list(item) for item in reason.facts]
+                or json.loads(actual.source_ids_json) != list(reason.source_ids)
+                or actual.policy_version != expected_bundle["reason"]
+                for actual, reason in zip(
+                    actual_reasons,
+                    expected_reasons[candidate.stable_id],
+                    strict=True,
+                )
+            ):
+                raise AppError(
+                    422,
+                    "PORTABLE_RECOMMENDATION_V2_INVALID",
+                    "Recommendation V2 reason audit is inconsistent.",
+                )
+        actual_selected = {
+            candidate_by_id[row.candidate_id].stable_id: row
+            for row in recommendations
+            if row.run_id == run_id
+        }
+        if set(actual_selected) != set(expected_recommendations) or any(
+            actual_selected[stable_id].portfolio_role != expected.portfolio_role
+            or actual_selected[stable_id].advisory_duration_ms != expected.advisory_duration_ms
+            or actual_selected[stable_id].rank_ordinal != expected.rank_ordinal
+            or actual_selected[stable_id].score_total != expected.score_total
+            or actual_selected[stable_id].score_breakdown_hash != expected.score_breakdown_hash
+            or actual_selected[stable_id].selection_reason_code != expected.selection_reason_code
+            or actual_selected[stable_id].duration_minimum_ms
+            != (expected.duration_range_ms[0] if expected.duration_range_ms else None)
+            or actual_selected[stable_id].duration_preferred_ms
+            != (expected.duration_range_ms[1] if expected.duration_range_ms else None)
+            or actual_selected[stable_id].duration_maximum_ms
+            != (expected.duration_range_ms[2] if expected.duration_range_ms else None)
+            or actual_selected[stable_id].algorithm_version != expected_bundle["algorithm"]
+            or actual_selected[stable_id].analysis_snapshot_id != run.analysis_snapshot_id
+            or actual_selected[stable_id].presentation_version != "recommendation-presentation/v1"
+            or actual_selected[stable_id].reason_summary
+            != (
+                f"{expected_by_id[stable_id].candidate.title}: "
+                f"{expected_by_id[stable_id].expected_learning_value} expected learning value; "
+                f"score {expected_by_id[stable_id].score_total}."
+            )
+            for stable_id, expected in expected_recommendations.items()
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_RECOMMENDATION_V2_INVALID",
+                "Recommendation V2 selected output is inconsistent.",
+            )
+        selected_candidate_ids = {
+            row.candidate_id for row in recommendations if row.run_id == run_id
+        }
+        if selected_candidate_ids != {
+            row.id for row in run_candidates if selections[row.id].decision == "selected"
+        }:
+            raise AppError(
+                422,
+                "PORTABLE_RECOMMENDATION_V2_INVALID",
+                "Recommendation V2 selected rows are disconnected from the decision audit.",
+            )
+    for candidate_id, _candidate in candidate_by_id.items():
+        decision = eligibility.get(candidate_id)
+        selection = selections.get(candidate_id)
+        values = components.get(candidate_id, [])
+        if decision is None or selection is None:
+            continue
+        if decision.eligible:
+            if (
+                len(values) != 7
+                or len({row.component_code for row in values}) != 7
+                or selection.score_total != sum(row.value for row in values)
+                or not -10 <= selection.score_total <= 86
+            ):
+                raise AppError(
+                    422,
+                    "PORTABLE_RECOMMENDATION_V2_INVALID",
+                    "Recommendation V2 score components are incomplete or inconsistent.",
+                )
+        elif values or selection.score_total is not None or selection.rank_ordinal is not None:
+            raise AppError(
+                422,
+                "PORTABLE_RECOMMENDATION_V2_INVALID",
+                "An ineligible Recommendation candidate was scored or ranked.",
+            )
+
+
 def validate_domain_integrity(connection: Any) -> None:
     violations = connection.execute(text("PRAGMA foreign_key_check")).all()
     if violations:
@@ -2477,6 +3033,7 @@ def validate_domain_integrity(connection: Any) -> None:
     _validate_json_columns(connection)
     _validate_analysis_history(connection)
     _validate_analysis_v3(connection)
+    _validate_recommendation_v2(connection)
     _validate_roadmap_scope(connection)
     _validate_roadmap_scope_history(connection)
     _validate_versioned_roadmap(connection)

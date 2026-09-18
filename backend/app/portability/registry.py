@@ -3,8 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 
-PORTABLE_SCHEMA_CURRENT = 6
-PORTABLE_SCHEMA_READABLE = frozenset({1, 2, 3, 4, 5, 6})
+PORTABLE_SCHEMA_CURRENT = 7
+PORTABLE_SCHEMA_READABLE = frozenset({1, 2, 3, 4, 5, 6, 7})
 PORTABLE_V2_FOUNDATION_TABLES = frozenset(
     {
         "analysis_runs",
@@ -301,6 +301,51 @@ PORTABLE_V6_MANIFEST = {
     ],
 }
 
+PORTABLE_V7_RECOMMENDATION_TABLES = frozenset(
+    {
+        "recommendation_v2_runs",
+        "recommendation_v2_candidates",
+        "recommendation_v2_eligibility_decisions",
+        "recommendation_v2_eligibility_rule_results",
+        "recommendation_v2_expected_values",
+        "recommendation_v2_score_components",
+        "recommendation_v2_selection_decisions",
+        "recommendation_v2_recommendations",
+        "recommendation_v2_reasons",
+    }
+)
+PORTABLE_V1_FORBIDDEN_TABLES = frozenset(
+    set(PORTABLE_V1_FORBIDDEN_TABLES) | set(PORTABLE_V7_RECOMMENDATION_TABLES)
+)
+PORTABLE_V2_FORBIDDEN_TABLES = frozenset(
+    set(PORTABLE_V2_FORBIDDEN_TABLES) | set(PORTABLE_V7_RECOMMENDATION_TABLES)
+)
+PORTABLE_V3_FORBIDDEN_TABLES = frozenset(
+    set(PORTABLE_V3_FORBIDDEN_TABLES) | set(PORTABLE_V7_RECOMMENDATION_TABLES)
+)
+PORTABLE_V4_FORBIDDEN_TABLES = frozenset(
+    set(PORTABLE_V4_FORBIDDEN_TABLES) | set(PORTABLE_V7_RECOMMENDATION_TABLES)
+)
+PORTABLE_V5_FORBIDDEN_TABLES = frozenset(
+    set(PORTABLE_V5_FORBIDDEN_TABLES) | set(PORTABLE_V7_RECOMMENDATION_TABLES)
+)
+PORTABLE_V6_FORBIDDEN_TABLES = PORTABLE_V7_RECOMMENDATION_TABLES
+PORTABLE_V7_MANIFEST = {
+    "includedCanonicalDomains": [
+        *PORTABLE_V6_MANIFEST["includedCanonicalDomains"],
+        "recommendation_v2_decision_history",
+    ],
+    "includedImmutableHistory": [
+        *PORTABLE_V6_MANIFEST["includedImmutableHistory"],
+        "recommendation_v2_runs_candidates_eligibility_scores_decisions_reasons",
+    ],
+    "omittedRebuildableState": [*PORTABLE_V6_MANIFEST["omittedRebuildableState"]],
+    "restoreActions": [
+        *PORTABLE_V6_MANIFEST["restoreActions"],
+        "verify_recommendation_v2_history_hash_parity",
+    ],
+}
+
 
 def upgrade_v2_to_v3_tables(tables: dict[str, list[dict[str, object]]]) -> dict[str, int]:
     """Apply the lossless v2-to-v3 empty Curriculum-domain adapter in place."""
@@ -395,6 +440,16 @@ def upgrade_v5_to_v6_tables(tables: dict[str, list[dict[str, object]]]) -> dict[
                 tables[table_name] = []
             created += 1
     return {"initializedAnalysisV3Tables": created}
+
+
+def upgrade_v6_to_v7_tables(tables: dict[str, list[dict[str, object]]]) -> dict[str, int]:
+    """Add empty Recommendation V2 history without inventing V1/V2 decisions."""
+    created = 0
+    for table_name in sorted(PORTABLE_V7_RECOMMENDATION_TABLES):
+        if table_name not in tables:
+            tables[table_name] = []
+            created += 1
+    return {"initializedRecommendationV2Tables": created}
 
 
 def supports_portable_schema(version: int) -> bool:

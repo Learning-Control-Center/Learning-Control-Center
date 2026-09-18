@@ -284,6 +284,17 @@ def _assert_known_migration_source(
         "analysis_v3_unknown_markers",
         "analysis_v3_current_states",
     }
+    recommendation_v2_tables = {
+        "recommendation_v2_runs",
+        "recommendation_v2_candidates",
+        "recommendation_v2_eligibility_decisions",
+        "recommendation_v2_eligibility_rule_results",
+        "recommendation_v2_expected_values",
+        "recommendation_v2_score_components",
+        "recommendation_v2_selection_decisions",
+        "recommendation_v2_recommendations",
+        "recommendation_v2_reasons",
+    }
     if revision in {"0013_learning_graph", "0014_roadmap_projection_state"} and not (
         learning_graph_tables <= tables
     ):
@@ -478,6 +489,22 @@ def _assert_known_migration_source(
         raise RuntimeError(
             "Database has an ambiguously partial Analysis V3 migration; restore its verified "
             "pre-migration backup before retrying."
+        )
+    if (
+        revision == "0015_analysis_v3"
+        and (
+            bool(recommendation_v2_tables & tables)
+            or any(name.startswith("_alembic_tmp_") for name in tables)
+        )
+        or revision == "0016_recommendation_v2"
+        and (
+            not recommendation_v2_tables <= tables
+            or any(name.startswith("_alembic_tmp_") for name in tables)
+        )
+    ):
+        raise RuntimeError(
+            "Database has an ambiguously partial Recommendation V2 migration; restore its "
+            "verified pre-migration backup before retrying."
         )
 
 

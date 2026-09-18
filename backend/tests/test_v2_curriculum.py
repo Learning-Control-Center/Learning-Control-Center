@@ -36,6 +36,7 @@ from app.portability.registry import (
     PORTABLE_V4_PROJECT_TABLES,
     PORTABLE_V5_GRAPH_PROJECTION_TABLES,
     PORTABLE_V6_ANALYSIS_TABLES,
+    PORTABLE_V7_RECOMMENDATION_TABLES,
 )
 from httpx import AsyncClient
 from pydantic import ValidationError
@@ -575,7 +576,7 @@ async def test_learning_unit_completion_is_bitemporal_cutoff_exclusive_and_porta
     )
     assert exported.status_code == 200, exported.text
     package = exported.json()["content"]
-    assert package["schemaVersion"] == 6
+    assert package["schemaVersion"] == 7
     assert len(package["payload"]["tables"]["curricula"]) == 1
     assert len(package["payload"]["tables"]["activity_curriculum_link_corrections"]) == 0
     checkpoint = package["payload"]["curriculumCatalogCheckpoint"]
@@ -591,7 +592,7 @@ async def test_learning_unit_completion_is_bitemporal_cutoff_exclusive_and_porta
     )
     with pytest.raises(AppError, match="rebuilt Curriculum catalog"):
         _validate_portable_payload(
-            tampered_checkpoint, "curriculum-checkpoint-tampered", schema_version=6
+            tampered_checkpoint, "curriculum-checkpoint-tampered", schema_version=7
         )
     tables_before_failed_restore = deepcopy(_portable_payload(db)["tables"])
     with pytest.raises(AppError, match="rebuilt Curriculum catalog"):
@@ -600,7 +601,7 @@ async def test_learning_unit_completion_is_bitemporal_cutoff_exclusive_and_porta
             tampered_checkpoint,
             True,
             package_id="curriculum-checkpoint-tampered",
-            schema_version=6,
+            schema_version=7,
         )
     db.rollback()
     db.expire_all()
@@ -609,7 +610,7 @@ async def test_learning_unit_completion_is_bitemporal_cutoff_exclusive_and_porta
     broken_lineage = deepcopy(package["payload"])
     broken_lineage["tables"]["curriculum_versions"][0]["version"] = 2
     with pytest.raises(AppError, match="versions must be contiguous"):
-        _validate_portable_payload(broken_lineage, "curriculum-lineage-tampered", schema_version=6)
+        _validate_portable_payload(broken_lineage, "curriculum-lineage-tampered", schema_version=7)
 
     unsafe_resource = deepcopy(package["payload"])
     unit_row = unsafe_resource["tables"]["learning_unit_definitions"][0]
@@ -629,14 +630,14 @@ async def test_learning_unit_completion_is_bitemporal_cutoff_exclusive_and_porta
     )
     version_row["content_hash"] = content_hash(envelope)
     with pytest.raises(AppError, match="definition envelope is malformed"):
-        _validate_portable_payload(unsafe_resource, "unsafe-resource", schema_version=6)
+        _validate_portable_payload(unsafe_resource, "unsafe-resource", schema_version=7)
 
     future_activation = deepcopy(package["payload"])
     activation_row = future_activation["tables"]["curriculum_activation_events"][0]
     activation_row["activated_at"] = 1
     future_activation["tables"]["active_curriculum_version_states"][0]["activated_at"] = 1
     with pytest.raises(AppError, match="activation history is inconsistent"):
-        _validate_portable_payload(future_activation, "future-activation", schema_version=6)
+        _validate_portable_payload(future_activation, "future-activation", schema_version=7)
 
     early_link = deepcopy(package["payload"])
     link_row = early_link["tables"]["activity_curriculum_unit_links"][0]
@@ -645,7 +646,7 @@ async def test_learning_unit_completion_is_bitemporal_cutoff_exclusive_and_porta
     )
     link_row["created_at"] = activity_row["created_at"] - 1
     with pytest.raises(AppError, match="invalid provenance or chronology"):
-        _validate_portable_payload(early_link, "early-activity-link", schema_version=6)
+        _validate_portable_payload(early_link, "early-activity-link", schema_version=7)
     preview = await client.post(
         "/api/v1/import-export/import/inspect",
         json={"filename": "curriculum-v3.json", "package": package},
@@ -705,6 +706,7 @@ def test_portable_v2_to_v3_adapter_is_empty_and_deterministic(db: Session) -> No
     payload.pop("projectCatalogCheckpoint")
     payload.pop("roadmapProjectionCheckpoint")
     payload.pop("analysisV3CurrentCheckpoint")
+    payload.pop("recommendationV2HistoryCheckpoint")
     payload.pop("portableScope")
     for table_name in PORTABLE_V3_CURRICULUM_TABLES:
         payload["tables"].pop(table_name)
@@ -713,6 +715,8 @@ def test_portable_v2_to_v3_adapter_is_empty_and_deterministic(db: Session) -> No
     for table_name in PORTABLE_V5_GRAPH_PROJECTION_TABLES:
         payload["tables"].pop(table_name)
     for table_name in PORTABLE_V6_ANALYSIS_TABLES:
+        payload["tables"].pop(table_name)
+    for table_name in PORTABLE_V7_RECOMMENDATION_TABLES:
         payload["tables"].pop(table_name)
     first, _summary = _validate_portable_payload(payload, "v2-adapter", schema_version=2)
     second, _summary = _validate_portable_payload(payload, "v2-adapter", schema_version=2)

@@ -193,6 +193,34 @@ class PublicTargetStateFactDTO:
     critical_gate_due: bool
     input_lineage: FrozenJson
     payload: FrozenJson
+    dimension_id: str | None = None
+    scale_stable_key: str | None = None
+    scale_version: str | None = None
+
+
+@dataclass(frozen=True)
+class PublicActivityEvidenceQualificationDTO:
+    competency_identity_id: str
+    dimension_id: str | None
+    criterion_definition_id: str | None
+
+
+@dataclass(frozen=True)
+class PublicActivityContributionAttributionDTO:
+    competency_identity_id: str
+    dimension_id: str | None
+    criterion_definition_id: str
+    relevance: Literal["primary", "secondary", "supporting"]
+
+
+@dataclass(frozen=True)
+class PublicActualActivitySummaryDTO:
+    activity_id: str
+    ended_at: int
+    primary_competency_identity_id: str | None
+    competency_identity_ids: tuple[str, ...]
+    active_evidence_qualifications: tuple[PublicActivityEvidenceQualificationDTO, ...]
+    active_contribution_attributions: tuple[PublicActivityContributionAttributionDTO, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -410,3 +438,4 @@ class PublicAnalysisSnapshotDTO:
     gaps: tuple[PublicAnalysisGapDTO, ...]
     signals: tuple[PublicAnalysisSignalDTO, ...]
     unknown_markers: tuple[UnknownMarkerDTO, ...]
+    actual_activity_summaries: tuple[PublicActualActivitySummaryDTO, ...] = ()

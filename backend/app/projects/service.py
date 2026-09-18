@@ -31,6 +31,7 @@ from app.projects.contracts import (
     ProjectBlockerFactPublicDTO,
     ProjectCandidatePublicDTO,
     ProjectCatalogPublicDTO,
+    ProjectEvidenceOpportunityPublicDTO,
     ProjectTargetFactPublicDTO,
     ProjectVersionInput,
 )
@@ -1090,6 +1091,38 @@ def build_task_candidate(
         )
         for item in target_rows
     )
+    opportunity_rows = db.scalars(
+        select(ProjectEvidenceOpportunity)
+        .where(
+            ProjectEvidenceOpportunity.project_version_id == version.id,
+            ProjectEvidenceOpportunity.task_definition_id == task.id,
+        )
+        .order_by(ProjectEvidenceOpportunity.order_index, ProjectEvidenceOpportunity.id)
+    ).all()
+    opportunity_modes = tuple(
+        sorted(
+            {
+                str(mode)
+                for opportunity in opportunity_rows
+                for mode in json.loads(opportunity.intended_characteristics_json).get(
+                    "intended_independence_modes", ()
+                )
+            }
+        )
+    )
+    opportunity_facts = tuple(
+        ProjectEvidenceOpportunityPublicDTO(
+            item.id,
+            item.task_definition_id,
+            item.project_criterion_definition_id,
+            tuple(
+                json.loads(item.intended_characteristics_json).get(
+                    "intended_independence_modes", ()
+                )
+            ),
+        )
+        for item in opportunity_rows
+    )
     blocker_facts = tuple(
         ProjectBlockerFactPublicDTO(
             event_id=event.id,
@@ -1124,6 +1157,13 @@ def build_task_candidate(
         "blockerFacts": [asdict(item) for item in blocker_facts],
         "requirements": [asdict(item) for item in evaluations],
         "targets": [asdict(item) for item in target_facts],
+        "evidenceOpportunities": [
+            {
+                "id": item.id,
+                "intendedCharacteristics": json.loads(item.intended_characteristics_json),
+            }
+            for item in opportunity_rows
+        ],
     }
     return ProjectCandidatePublicDTO(
         "project_task",
@@ -1147,6 +1187,9 @@ def build_task_candidate(
         targets,
         target_facts,
         content_hash(base),
+        tuple(item.id for item in opportunity_rows),
+        opportunity_modes,
+        opportunity_facts,
     )
 
 

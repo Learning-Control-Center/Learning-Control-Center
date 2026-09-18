@@ -656,9 +656,7 @@ def evaluate_capability_as_of(
             else []
         ),
         "capabilityStateEventHistory": [row_payload(item) for item in state_event_history],
-        "capabilityEvaluationRunHistory": [
-            row_payload(item) for item in evaluation_run_history
-        ],
+        "capabilityEvaluationRunHistory": [row_payload(item) for item in evaluation_run_history],
         "criterionEvaluationResultHistory": [
             row_payload(item) for item in criterion_result_history
         ],

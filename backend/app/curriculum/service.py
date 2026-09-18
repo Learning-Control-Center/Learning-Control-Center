@@ -1247,6 +1247,16 @@ def build_unit_availability(
     )
 
 
+def unit_availability_as_of(
+    db: Session, *, learning_unit_definition_id: str, exclusive_cutoff_at: int
+) -> CurriculumAvailabilityPublicDTO:
+    """Load the public availability contract without exposing Curriculum persistence."""
+    unit = db.get(LearningUnitDefinition, learning_unit_definition_id)
+    if unit is None:
+        raise AppError(404, "CURRICULUM_UNIT_NOT_FOUND", "The learning unit does not exist.")
+    return build_unit_availability(db, unit, exclusive_cutoff_at)
+
+
 def serialize_availability(dto: CurriculumAvailabilityPublicDTO) -> dict[str, Any]:
     return {
         "learningUnitDefinitionId": dto.learning_unit_definition_id,

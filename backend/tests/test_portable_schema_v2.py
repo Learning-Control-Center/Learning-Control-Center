@@ -13,7 +13,7 @@ from app.compatibility.v1.portable import (
     upgrade_v1_profile_competency_tables,
 )
 from app.models import Activity, CriterionIdentity
-from app.portability.registry import PORTABLE_V6_MANIFEST
+from app.portability.registry import PORTABLE_V7_MANIFEST
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -196,8 +196,8 @@ async def test_portable_v6_manifest_and_tampered_analysis_hash_rejection(
     )
     assert exported.status_code == 200
     package = exported.json()["content"]
-    assert package["schemaVersion"] == 6
-    assert package["payload"]["manifest"] == PORTABLE_V6_MANIFEST
+    assert package["schemaVersion"] == 7
+    assert package["payload"]["manifest"] == PORTABLE_V7_MANIFEST
     assert "projection_invalidations" not in package["payload"]["tables"]
     package["packageId"] = "tampered-analysis-history"
     package["payload"]["tables"]["analysis_snapshots"][0]["input_hash"] = "0" * 64

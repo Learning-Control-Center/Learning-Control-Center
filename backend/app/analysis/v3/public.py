@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Any, cast
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.analysis.v3.contracts import (
+    PublicActivityContributionAttributionDTO,
+    PublicActivityEvidenceQualificationDTO,
+    PublicActualActivitySummaryDTO,
     PublicAllocationFactDTO,
     PublicAnalysisFactDTO,
     PublicAnalysisGapDTO,
@@ -33,8 +37,10 @@ from app.analysis.v3.models import (
     AnalysisV3SnapshotDetail,
     AnalysisV3UnknownMarker,
 )
+from app.analysis_sources import actual_contribution_attributions_as_of
+from app.determinism import content_hash
 from app.errors import AppError
-from app.models import AnalysisSnapshot
+from app.models import AnalysisSnapshot, CapabilityScaleVersion
 
 
 def _readiness_gate(payload: dict[str, Any]) -> PublicReadinessGateFactDTO:
@@ -67,21 +73,15 @@ def _prerequisite(payload: dict[str, Any]) -> PublicPrerequisiteFactDTO:
     )
 
 
-def _typed_signal_facts(
-    signal_type: str, payload: dict[str, Any]
-) -> PublicAnalysisSignalFactsDTO:
+def _typed_signal_facts(signal_type: str, payload: dict[str, Any]) -> PublicAnalysisSignalFactsDTO:
     return PublicAnalysisSignalFactsDTO(
         signal_type=cast(Any, signal_type),
         gap_key=payload.get("gapKey"),
         comparison_status=payload.get("comparisonStatus"),
         deadline_status=payload.get("deadlineStatus"),
         deadline_date=payload.get("deadlineDate"),
-        readiness_gate=(
-            _readiness_gate(payload) if signal_type == "READINESS_BLOCK" else None
-        ),
-        prerequisite=(
-            _prerequisite(payload) if signal_type == "PREREQUISITE_BLOCK" else None
-        ),
+        readiness_gate=(_readiness_gate(payload) if signal_type == "READINESS_BLOCK" else None),
+        prerequisite=(_prerequisite(payload) if signal_type == "PREREQUISITE_BLOCK" else None),
         days=payload.get("days"),
         priority=payload.get("priority"),
         freshness=payload.get("freshness"),
@@ -92,12 +92,8 @@ def _typed_signal_facts(
         contradicted_important_criterion_ids=tuple(
             payload.get("contradictedImportantCriterionIds", ())
         ),
-        missing_required_criterion_ids=tuple(
-            payload.get("missingRequiredCriterionIds", ())
-        ),
-        missing_independent_criterion_ids=tuple(
-            payload.get("missingIndependentCriterionIds", ())
-        ),
+        missing_required_criterion_ids=tuple(payload.get("missingRequiredCriterionIds", ())),
+        missing_independent_criterion_ids=tuple(payload.get("missingIndependentCriterionIds", ())),
         important_supporting_missing_criterion_ids=tuple(
             payload.get("importantSupportingMissingCriterionIds", ())
         ),
@@ -129,31 +125,23 @@ def _typed_signal_facts(
             else ()
         ),
         discipline_target_active_days=(
-            payload.get("targetActiveDays")
-            if signal_type == "DISCIPLINE_VARIANCE"
-            else None
+            payload.get("targetActiveDays") if signal_type == "DISCIPLINE_VARIANCE" else None
         ),
         workload_reason_code=(
             payload.get("reasonCode") if signal_type == "WORKLOAD_RISK" else None
         ),
-        workload_severity=(
-            payload.get("severity") if signal_type == "WORKLOAD_RISK" else None
-        ),
+        workload_severity=(payload.get("severity") if signal_type == "WORKLOAD_RISK" else None),
         workload_target_duration_ms=(
             payload.get("targetDurationMs") if signal_type == "WORKLOAD_RISK" else None
         ),
         workload_active_day_durations_ms=(
-            tuple(payload.get("activeDayDurationsMs", ()))
-            if signal_type == "WORKLOAD_RISK"
-            else ()
+            tuple(payload.get("activeDayDurationsMs", ())) if signal_type == "WORKLOAD_RISK" else ()
         ),
         workload_median_duration_ms=(
             payload.get("medianDurationMs") if signal_type == "WORKLOAD_RISK" else None
         ),
         workload_median_basis_points_of_target=(
-            payload.get("medianBasisPointsOfTarget")
-            if signal_type == "WORKLOAD_RISK"
-            else None
+            payload.get("medianBasisPointsOfTarget") if signal_type == "WORKLOAD_RISK" else None
         ),
         workload_current_seven_day_total_duration_ms=(
             payload.get("currentSevenDayTotalDurationMs")
@@ -345,6 +333,91 @@ def load_public_analysis_snapshot(db: Session, snapshot_id: str) -> PublicAnalys
         .where(AnalysisV3UnknownMarker.snapshot_id == snapshot_id)
         .order_by(AnalysisV3UnknownMarker.ordinal)
     ).all()
+    lineage_payload = json.loads(snapshot.input_lineage_json)
+    profile_payload = lineage_payload.get("profile")
+    target_dimensions = {
+        str(item["target_identity_id"]): item.get("dimension_id")
+        for item in (
+            profile_payload.get("targets", []) if isinstance(profile_payload, dict) else []
+        )
+    }
+    typed_facts = tuple(_typed_fact(item) for item in facts)
+    scale_rows = {
+        item.id: item
+        for item in db.scalars(
+            select(CapabilityScaleVersion).where(
+                CapabilityScaleVersion.id.in_(
+                    {
+                        item.scale_version_id
+                        for item in typed_facts
+                        if isinstance(item, PublicTargetStateFactDTO)
+                    }
+                )
+            )
+        ).all()
+    }
+    typed_facts = tuple(
+        replace(
+            item,
+            dimension_id=target_dimensions.get(item.target_identity_id),
+            scale_stable_key=(
+                scale_rows[item.scale_version_id].scale_stable_key
+                if item.scale_version_id in scale_rows
+                else None
+            ),
+            scale_version=(
+                scale_rows[item.scale_version_id].scale_version
+                if item.scale_version_id in scale_rows
+                else None
+            ),
+        )
+        if isinstance(item, PublicTargetStateFactDTO)
+        else item
+        for item in typed_facts
+    )
+    contribution_attributions: dict[str, list[Any]] = {}
+    for attribution in actual_contribution_attributions_as_of(
+        db, exclusive_cutoff_at=snapshot.cutoff_at
+    ):
+        contribution_attributions.setdefault(attribution.session_id, []).append(attribution)
+    activity_summaries = tuple(
+        PublicActualActivitySummaryDTO(
+            activity_id=str(item["activity_id"]),
+            ended_at=int(item["ended_at"]),
+            primary_competency_identity_id=(
+                str(item["primary_competency_identity_id"])
+                if item.get("primary_competency_identity_id") is not None
+                else None
+            ),
+            competency_identity_ids=tuple(item.get("competency_identity_ids", ())),
+            active_evidence_qualifications=tuple(
+                PublicActivityEvidenceQualificationDTO(
+                    competency_identity_id=str(qualification["competency_identity_id"]),
+                    dimension_id=(
+                        str(qualification["dimension_id"])
+                        if qualification.get("dimension_id") is not None
+                        else None
+                    ),
+                    criterion_definition_id=(
+                        str(qualification["criterion_definition_id"])
+                        if qualification.get("criterion_definition_id") is not None
+                        else None
+                    ),
+                )
+                for qualification in item.get("active_evidence_qualifications", ())
+            ),
+            active_contribution_attributions=tuple(
+                PublicActivityContributionAttributionDTO(
+                    competency_identity_id=attribution.competency_identity_id,
+                    dimension_id=attribution.dimension_id,
+                    criterion_definition_id=attribution.criterion_definition_id,
+                    relevance=cast(Any, attribution.relevance),
+                )
+                for attribution in contribution_attributions.get(str(item["session_id"]), ())
+            ),
+        )
+        for item in lineage_payload.get("sessionSummaries", ())
+    )
     return PublicAnalysisSnapshotDTO(
         snapshot.id,
         snapshot.run_id,
@@ -369,7 +442,7 @@ def load_public_analysis_snapshot(db: Session, snapshot_id: str) -> PublicAnalys
         snapshot.configuration_hash,
         snapshot.application_version,
         freeze_json(json.loads(snapshot.input_lineage_json)),
-        tuple(_typed_fact(item) for item in facts),
+        typed_facts,
         tuple(
             PublicAnalysisGapDTO(
                 item.stable_key,
@@ -398,9 +471,7 @@ def load_public_analysis_snapshot(db: Session, snapshot_id: str) -> PublicAnalys
                 cast(Any, item.severity),
                 tuple(json.loads(item.reason_codes_json)),
                 tuple(sorted(json.loads(item.decisive_facts_json))),
-                _typed_signal_facts(
-                    item.signal_type, json.loads(item.decisive_facts_json)
-                ),
+                _typed_signal_facts(item.signal_type, json.loads(item.decisive_facts_json)),
                 freeze_json(json.loads(item.decisive_facts_json)),
                 item.analyzer_policy_version,
                 item.generated_cutoff_at,
@@ -416,4 +487,103 @@ def load_public_analysis_snapshot(db: Session, snapshot_id: str) -> PublicAnalys
             )
             for item in unknowns
         ),
+        activity_summaries,
     )
+
+
+def load_public_analysis_input_lineage_json(db: Session, snapshot_id: str) -> str:
+    """Return the exact canonical Analysis input envelope without lossy thawing."""
+    snapshot = db.get(AnalysisSnapshot, snapshot_id)
+    if snapshot is None or db.get(AnalysisV3SnapshotDetail, snapshot_id) is None:
+        raise AppError(404, "ANALYSIS_V3_SNAPSHOT_NOT_FOUND", "The snapshot does not exist.")
+    return snapshot.input_lineage_json
+
+
+def validate_public_analysis_envelope(
+    db: Session, snapshot_id: str
+) -> tuple[PublicAnalysisSnapshotDTO, dict[str, Any]]:
+    """Load and prove the public snapshot's exact immutable input envelope."""
+    snapshot = load_public_analysis_snapshot(db, snapshot_id)
+    lineage = json.loads(load_public_analysis_input_lineage_json(db, snapshot_id))
+    snapshot_row = db.get(AnalysisSnapshot, snapshot_id)
+    if snapshot_row is None:
+        raise AppError(404, "ANALYSIS_V3_SNAPSHOT_NOT_FOUND", "The snapshot does not exist.")
+    profile = lineage.get("profile")
+    graph = lineage.get("graph")
+    normalized_facts = json.loads(snapshot_row.normalized_facts_json)
+    semantic_references = sorted(
+        {
+            item["payload"]["semanticDefinitionId"]
+            for item in normalized_facts
+            if item.get("fact_type") == "target_state"
+            and item["payload"].get("semanticDefinitionId") is not None
+        }
+    )
+    scale_references = sorted(
+        {
+            item["payload"]["scaleVersionId"]
+            for item in normalized_facts
+            if item.get("fact_type") == "target_state"
+        }
+    )
+    configuration = lineage.get("disciplineConfiguration")
+    configuration_reference = (
+        configuration.get("event_id") if isinstance(configuration, dict) else "missing"
+    )
+    configuration_hash = (
+        configuration.get("configuration_hash")
+        if isinstance(configuration, dict)
+        else content_hash({"missing": True})
+    )
+    expected = {
+        "cutoffAt": snapshot.cutoff_at,
+        "cutoffSemantics": snapshot.cutoff_semantics,
+        "timezone": snapshot.timezone,
+        "completedThroughDate": snapshot.completed_through_date,
+        "purpose": snapshot.purpose,
+    }
+    actual = {key: lineage.get(key) for key in expected}
+    references_match = (
+        snapshot.target_profile_id
+        == (profile.get("profile_id") if isinstance(profile, dict) else None)
+        and snapshot.target_profile_version_id
+        == (profile.get("profile_version_id") if isinstance(profile, dict) else None)
+        and snapshot.learning_graph_reference
+        == (
+            graph.get("learning_graph_version_id") if isinstance(graph, dict) else None
+        )
+        and snapshot.curriculum_reference
+        == content_hash(lineage.get("curriculumCatalog"))
+        and list(snapshot.semantic_definition_references) == semantic_references
+        and list(snapshot.capability_scale_version_references) == scale_references
+        and snapshot.discipline_configuration_reference == configuration_reference
+        and snapshot.configuration_hash == configuration_hash
+    )
+    if snapshot.input_hash != content_hash(lineage) or actual != expected or not references_match:
+        raise AppError(
+            409,
+            "ANALYSIS_PUBLIC_ENVELOPE_INVALID",
+            "The immutable Analysis input envelope does not match its public snapshot.",
+        )
+    return snapshot, lineage
+
+
+def load_current_public_analysis_snapshot(
+    db: Session, snapshot_id: str, *, purpose: str
+) -> PublicAnalysisSnapshotDTO:
+    """Require the purpose-scoped live Analysis authority for new downstream work."""
+    from app.analysis.v3.service import current_analysis
+
+    current = current_analysis(db, purpose=purpose)
+    current_snapshot = current.get("snapshot")
+    if (
+        current.get("status") != "current"
+        or not isinstance(current_snapshot, dict)
+        or current_snapshot.get("id") != snapshot_id
+    ):
+        raise AppError(
+            409,
+            "RECOMMENDATION_ANALYSIS_NOT_CURRENT",
+            "Live Recommendation generation requires the current valid Analysis snapshot.",
+        )
+    return load_public_analysis_snapshot(db, snapshot_id)

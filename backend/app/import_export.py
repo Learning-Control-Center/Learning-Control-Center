@@ -7,6 +7,7 @@ import os
 import sqlite3
 import tempfile
 import uuid
+from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -72,7 +73,7 @@ from app.curriculum.service import (
     serialize_catalog,
 )
 from app.database import create_database_engine, get_db, run_migrations
-from app.determinism import content_hash
+from app.determinism import canonical_json, content_hash
 from app.domain import transition_status
 from app.domain_integrity import (
     portable_state_presence,
@@ -179,12 +180,16 @@ from app.portability.registry import (
     PORTABLE_V5_GRAPH_PROJECTION_TABLES,
     PORTABLE_V5_MANIFEST,
     PORTABLE_V6_ANALYSIS_TABLES,
+    PORTABLE_V6_FORBIDDEN_TABLES,
     PORTABLE_V6_MANIFEST,
+    PORTABLE_V7_MANIFEST,
+    PORTABLE_V7_RECOMMENDATION_TABLES,
     supports_portable_schema,
     upgrade_v2_to_v3_tables,
     upgrade_v3_to_v4_tables,
     upgrade_v4_to_v5_tables,
     upgrade_v5_to_v6_tables,
+    upgrade_v6_to_v7_tables,
 )
 from app.projects.contracts import ProjectCatalogPublicDTO
 from app.projects.models import (
@@ -214,6 +219,17 @@ from app.projects.models import (
 )
 from app.projects.service import PROJECT_AVAILABILITY_POLICY
 from app.projects.service import build_catalog as build_project_catalog
+from app.recommendation.v2.models import (
+    RecommendationV2Candidate,
+    RecommendationV2EligibilityDecision,
+    RecommendationV2EligibilityRuleResult,
+    RecommendationV2ExpectedValue,
+    RecommendationV2Reason,
+    RecommendationV2Recommendation,
+    RecommendationV2Run,
+    RecommendationV2ScoreComponent,
+    RecommendationV2SelectionDecision,
+)
 from app.roadmap_projection.models import (
     LegacyRoadmapActiveState,
     RoadmapNodePositionOverride,
@@ -365,6 +381,15 @@ PORTABLE_MODELS = [
     AnalysisV3CompetencyGap,
     AnalysisV3Signal,
     AnalysisV3UnknownMarker,
+    RecommendationV2Run,
+    RecommendationV2Candidate,
+    RecommendationV2EligibilityDecision,
+    RecommendationV2EligibilityRuleResult,
+    RecommendationV2ExpectedValue,
+    RecommendationV2ScoreComponent,
+    RecommendationV2SelectionDecision,
+    RecommendationV2Recommendation,
+    RecommendationV2Reason,
     RecommendationSnapshot,
     DisciplineProfile,
     DisciplineConfigurationEvent,
@@ -434,7 +459,7 @@ def _capability_projection_checkpoints(db: Session) -> list[dict[str, str]]:
 
 def _portable_payload(db: Session, project_ids: set[str] | None = None) -> dict[str, Any]:
     payload: dict[str, Any] = {
-        "manifest": PORTABLE_V6_MANIFEST,
+        "manifest": PORTABLE_V7_MANIFEST,
         "tables": {
             _table(model).name: [_row_dict(item) for item in db.scalars(select(model)).all()]
             for model in PORTABLE_MODELS
@@ -470,6 +495,21 @@ def _portable_payload(db: Session, project_ids: set[str] | None = None) -> dict[
         closure_project_ids.update(
             str(item["project_id"]) for item in project_catalog.get("candidates", [])
         )
+    for run in tables["recommendation_v2_runs"]:
+        frozen_inputs = json.loads(run["frozen_input_json"])
+        project_catalog = frozen_inputs.get(
+            "projects", frozen_inputs.get("projectAndUserConstraints", {})
+        )
+        closure_project_ids.update(
+            str(item["project_id"])
+            for item in project_catalog.get("candidates", [])
+            if item.get("project_id")
+        )
+    closure_project_ids.update(
+        str(row["project_id"])
+        for row in tables["recommendation_v2_candidates"]
+        if row.get("project_id")
+    )
     for row in tables["evidence"]:
         if row["source_type"] != "activity_project_task_link":
             continue
@@ -747,6 +787,25 @@ def _portable_payload(db: Session, project_ids: set[str] | None = None) -> dict[
     }
     analysis_checkpoint["checkpointHash"] = content_hash(analysis_checkpoint)
     payload["analysisV3CurrentCheckpoint"] = analysis_checkpoint
+    recommendation_history = {
+        table_name: sorted(tables[table_name], key=canonical_json)
+        for table_name in sorted(PORTABLE_V7_RECOMMENDATION_TABLES)
+    }
+    recommendation_checkpoint = {
+        "runHashes": [
+            {
+                "runId": row["id"],
+                "analysisSnapshotId": row["analysis_snapshot_id"],
+                "inputHash": row["input_hash"],
+                "outputHash": row["output_hash"],
+                "policyBundleHash": row["policy_bundle_hash"],
+            }
+            for row in sorted(tables["recommendation_v2_runs"], key=lambda item: item["id"])
+        ],
+        "historyHash": content_hash(recommendation_history),
+    }
+    recommendation_checkpoint["checkpointHash"] = content_hash(recommendation_checkpoint)
+    payload["recommendationV2HistoryCheckpoint"] = recommendation_checkpoint
     return payload
 
 
@@ -931,6 +990,519 @@ def _validate_analysis_v3_checkpoint(
                 "The Analysis V3 checkpoint is disconnected from immutable history.",
             )
         seen.add(key)
+
+
+def _recommendation_output_hash(tables: dict[str, list[dict[str, Any]]], run_id: str) -> str:
+    from app.recommendation.v2.contracts import candidate_from_payload
+    from app.recommendation.v2.policy import evaluate_registered
+
+    run = next(row for row in tables["recommendation_v2_runs"] if row["id"] == run_id)
+    candidates = sorted(
+        (row for row in tables["recommendation_v2_candidates"] if row["run_id"] == run_id),
+        key=lambda row: row["ordinal"],
+    )
+    return evaluate_registered(
+        run["policy_registry_version"],
+        tuple(candidate_from_payload(json.loads(row["candidate_json"])) for row in candidates),
+        run["available_time_ms"],
+    ).output_hash
+
+
+def _recommendation_audit_projection(
+    tables: dict[str, list[dict[str, Any]]], run_id: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    from app.recommendation.v2.contracts import candidate_from_payload
+    from app.recommendation.v2.policy import evaluate_registered
+
+    run = next(row for row in tables["recommendation_v2_runs"] if row["id"] == run_id)
+    candidate_rows = sorted(
+        (row for row in tables["recommendation_v2_candidates"] if row["run_id"] == run_id),
+        key=lambda row: row["ordinal"],
+    )
+    candidate_ids = {row["id"] for row in candidate_rows}
+    eligibility = {
+        row["candidate_id"]: row
+        for row in tables["recommendation_v2_eligibility_decisions"]
+        if row["candidate_id"] in candidate_ids
+    }
+    expected_values = {
+        row["candidate_id"]: row
+        for row in tables["recommendation_v2_expected_values"]
+        if row["candidate_id"] in candidate_ids
+    }
+    selections = {
+        row["candidate_id"]: row
+        for row in tables["recommendation_v2_selection_decisions"]
+        if row["candidate_id"] in candidate_ids
+    }
+    rules: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    components: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    reasons: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in tables["recommendation_v2_eligibility_rule_results"]:
+        if row["candidate_id"] in candidate_ids:
+            rules[row["candidate_id"]].append(row)
+    for row in tables["recommendation_v2_score_components"]:
+        if row["candidate_id"] in candidate_ids:
+            components[row["candidate_id"]].append(row)
+    for row in tables["recommendation_v2_reasons"]:
+        if row["candidate_id"] in candidate_ids:
+            reasons[row["candidate_id"]].append(row)
+    actual_candidates: list[dict[str, Any]] = []
+    actual_decisions: list[dict[str, Any]] = []
+    actual_reasons: list[dict[str, Any]] = []
+    component_order = {
+        code: ordinal
+        for ordinal, code in enumerate(
+            (
+                "TARGET_PRIORITY",
+                "PRIMARY_NEED",
+                "DEADLINE_PRESSURE",
+                "ALLOCATION_BALANCE",
+                "NEGLECT_OR_STALL",
+                "EXPECTED_LEARNING_VALUE",
+                "CONTEXT_COST",
+            )
+        )
+    }
+    for candidate_row in candidate_rows:
+        candidate_id = candidate_row["id"]
+        candidate = json.loads(candidate_row["candidate_json"])
+        eligibility_row = eligibility[candidate_id]
+        expected_value = expected_values[candidate_id]
+        selection = selections[candidate_id]
+        actual_candidates.append(
+            {
+                "candidate": candidate,
+                "eligible": bool(eligibility_row["eligible"]),
+                "eligibility_reason": eligibility_row["reason_code"],
+                "eligibility_rules": [
+                    {
+                        "code": row["rule_code"],
+                        "outcome": row["outcome"],
+                        "decisive": bool(row["decisive"]),
+                        "facts": json.loads(row["facts_json"]),
+                        "subject_ids": json.loads(row["subject_ids_json"]),
+                    }
+                    for row in sorted(rules[candidate_id], key=lambda item: item["ordinal"])
+                ],
+                "expected_learning_value": expected_value["value"],
+                "expected_learning_value_reasons": json.loads(expected_value["reason_codes_json"]),
+                "expected_learning_value_facts": json.loads(expected_value["matched_facts_json"]),
+                "expected_learning_value_source_ids": sorted(
+                    {
+                        source_id
+                        for row in reasons[candidate_id]
+                        if row["reason_code"] in json.loads(expected_value["reason_codes_json"])
+                        for source_id in json.loads(row["source_ids_json"])
+                    }
+                ),
+                "score_components": [
+                    {
+                        "code": row["component_code"],
+                        "value": row["value"],
+                        "allowed_minimum": row["allowed_minimum"],
+                        "allowed_maximum": row["allowed_maximum"],
+                        "decisive_facts": json.loads(row["decisive_facts_json"]),
+                        "source_ids": json.loads(row["source_ids_json"]),
+                    }
+                    for row in sorted(
+                        components[candidate_id],
+                        key=lambda item: component_order[item["component_code"]],
+                    )
+                ],
+                "score_total": selection["score_total"],
+                "rank_ordinal": selection["rank_ordinal"],
+            }
+        )
+        actual_decisions.append(
+            {
+                "candidate_stable_id": candidate_row["stable_id"],
+                "decision": selection["decision"],
+                "portfolio_role": selection["portfolio_role"],
+                "reason_code": selection["reason_code"],
+                "advisory_duration_ms": selection["advisory_duration_ms"],
+                "duration_reason_code": selection["duration_reason_code"],
+                "admission_ordinal": selection["admission_ordinal"],
+                "displaced_by_candidate_stable_id": selection["displaced_by_candidate_stable_id"],
+                "decisive_facts": json.loads(selection["decisive_facts_json"]),
+            }
+        )
+        actual_reasons.extend(
+            {
+                "candidate_stable_id": candidate_row["stable_id"],
+                "ordinal": row["ordinal"],
+                "reason_code": row["reason_code"],
+                "title": row["title"],
+                "facts": json.loads(row["explanation_facts_json"]),
+                "score_contribution": row["score_contribution"],
+                "template_key": row["template_key"],
+                "template_version": row["template_version"],
+                "rendered_text": row["rendered_text"],
+                "source_ids": json.loads(row["source_ids_json"]),
+                "policy_version": row["policy_version"],
+            }
+            for row in sorted(reasons[candidate_id], key=lambda item: item["ordinal"])
+        )
+    stable_by_candidate_id = {row["id"]: row["stable_id"] for row in candidate_rows}
+    actual_recommendations = [
+        {
+            "candidate_stable_id": stable_by_candidate_id[row["candidate_id"]],
+            "portfolio_role": row["portfolio_role"],
+            "advisory_duration_ms": row["advisory_duration_ms"],
+            "duration_range_ms": (
+                [
+                    row["duration_minimum_ms"],
+                    row["duration_preferred_ms"],
+                    row["duration_maximum_ms"],
+                ]
+                if row["duration_minimum_ms"] is not None
+                else None
+            ),
+            "rank_ordinal": row["rank_ordinal"],
+            "score_total": row["score_total"],
+            "score_breakdown_hash": row["score_breakdown_hash"],
+            "selection_reason_code": row["selection_reason_code"],
+        }
+        for row in sorted(
+            (row for row in tables["recommendation_v2_recommendations"] if row["run_id"] == run_id),
+            key=lambda item: item["portfolio_role"],
+        )
+    ]
+    actual_recommendations.sort(key=lambda item: item["candidate_stable_id"])
+    candidates = tuple(
+        candidate_from_payload(json.loads(row["candidate_json"])) for row in candidate_rows
+    )
+    expected = evaluate_registered(
+        run["policy_registry_version"], candidates, run["available_time_ms"]
+    )
+    actual_projection = {
+        "candidates": actual_candidates,
+        "decisions": actual_decisions,
+        "reasons": actual_reasons,
+        "recommendations": actual_recommendations,
+    }
+    expected_projection = {
+        "candidates": [asdict(item) for item in expected.candidates],
+        "decisions": [asdict(item) for item in expected.decisions],
+        "reasons": [asdict(item) for item in expected.reasons],
+        "recommendations": sorted(
+            (asdict(item) for item in expected.recommendations),
+            key=lambda item: item["candidate_stable_id"],
+        ),
+    }
+    return (
+        json.loads(canonical_json(actual_projection)),
+        json.loads(canonical_json(expected_projection)),
+    )
+
+
+def _validate_recommendation_v2_checkpoint(
+    payload: dict[str, Any], tables: dict[str, list[dict[str, Any]]], schema_version: int
+) -> None:
+    checkpoint = payload.get("recommendationV2HistoryCheckpoint")
+    if schema_version < 7:
+        if checkpoint is not None:
+            raise AppError(
+                422,
+                "PORTABLE_SCHEMA_INVALID",
+                "Portable schema versions before V7 cannot contain Recommendation V2 history.",
+            )
+        return
+    if (
+        not isinstance(checkpoint, dict)
+        or set(checkpoint) != {"runHashes", "historyHash", "checkpointHash"}
+        or not isinstance(checkpoint.get("runHashes"), list)
+        or checkpoint["checkpointHash"]
+        != content_hash(
+            {key: value for key, value in checkpoint.items() if key != "checkpointHash"}
+        )
+    ):
+        raise AppError(
+            422,
+            "PORTABLE_RECOMMENDATION_CHECKPOINT_INVALID",
+            "The Recommendation V2 history checkpoint is invalid.",
+        )
+    history = {
+        table_name: sorted(tables[table_name], key=canonical_json)
+        for table_name in sorted(PORTABLE_V7_RECOMMENDATION_TABLES)
+    }
+    if content_hash(history) != checkpoint["historyHash"]:
+        raise AppError(
+            422,
+            "PORTABLE_RECOMMENDATION_CHECKPOINT_INVALID",
+            "Recommendation V2 immutable history failed hash validation.",
+        )
+    runs = {row["id"]: row for row in tables["recommendation_v2_runs"]}
+    run_hashes = {row["runId"]: row for row in checkpoint["runHashes"]}
+    if set(runs) != set(run_hashes):
+        raise AppError(
+            422,
+            "PORTABLE_RECOMMENDATION_CHECKPOINT_INVALID",
+            "Recommendation V2 run coverage is incomplete.",
+        )
+    analysis_snapshots = {row["id"]: row for row in tables["analysis_snapshots"]}
+    for run in runs.values():
+        replay_of = run.get("replay_of_run_id")
+        if replay_of is None:
+            continue
+        original = runs.get(replay_of)
+        if (
+            original is None
+            or replay_of == run["id"]
+            or original["status"] != "completed"
+            or run["analysis_snapshot_id"] != original["analysis_snapshot_id"]
+            or run["available_time_ms"] != original["available_time_ms"]
+            or run["policy_registry_version"] != original["policy_registry_version"]
+            or run["policy_bundle_hash"] != original["policy_bundle_hash"]
+            or (
+                run["status"] == "completed"
+                and (
+                    run["input_hash"] != original["input_hash"]
+                    or run["output_hash"] != original["output_hash"]
+                )
+            )
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_RECOMMENDATION_CHECKPOINT_INVALID",
+                "Recommendation V2 replay lineage is invalid.",
+            )
+        seen = {run["id"]}
+        cursor = original
+        while cursor.get("replay_of_run_id") is not None:
+            cursor_id = cursor["replay_of_run_id"]
+            if cursor_id in seen or cursor_id not in runs:
+                raise AppError(
+                    422,
+                    "PORTABLE_RECOMMENDATION_CHECKPOINT_INVALID",
+                    "Recommendation V2 replay lineage contains a cycle.",
+                )
+            seen.add(cursor_id)
+            cursor = runs[cursor_id]
+    for run_id, run in runs.items():
+        from app.recommendation.v2.policy import registered_policy_bundle
+
+        frozen = json.loads(run["frozen_input_json"])
+        reference = run_hashes[run_id]
+        try:
+            registered_bundle = registered_policy_bundle(run["policy_registry_version"])
+        except KeyError as exc:
+            raise AppError(
+                422,
+                "PORTABLE_RECOMMENDATION_CHECKPOINT_INVALID",
+                "Recommendation V2 policy registry is unavailable.",
+            ) from exc
+        if (
+            set(reference)
+            != {"runId", "analysisSnapshotId", "inputHash", "outputHash", "policyBundleHash"}
+            or run["analysis_snapshot_id"] not in analysis_snapshots
+            or run["analysis_snapshot_id"] != reference["analysisSnapshotId"]
+            or run["input_hash"] != content_hash(frozen)
+            or run["input_hash"] != reference["inputHash"]
+            or run["policy_bundle_hash"] != content_hash(json.loads(run["policy_bundle_json"]))
+            or json.loads(run["policy_bundle_json"]) != registered_bundle
+            or run["algorithm_version"] != registered_bundle["algorithm"]
+            or run["application_version"] != registered_bundle["application"]
+            or run["policy_bundle_hash"] != reference["policyBundleHash"]
+            or run["output_hash"] != reference["outputHash"]
+            or run["status"] not in {"completed", "failed"}
+            or (
+                run["status"] == "failed"
+                and (
+                    run["output_hash"] is not None
+                    or run["failure_metadata_json"] is None
+                    or any(
+                        candidate["run_id"] == run_id
+                        for candidate in tables["recommendation_v2_candidates"]
+                    )
+                    or any(
+                        recommendation["run_id"] == run_id
+                        for recommendation in tables["recommendation_v2_recommendations"]
+                    )
+                )
+            )
+            or (
+                run["status"] == "completed"
+                and (
+                    run["output_hash"] != _recommendation_output_hash(tables, run_id)
+                    or run["failure_metadata_json"] is not None
+                )
+            )
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_RECOMMENDATION_CHECKPOINT_INVALID",
+                "Recommendation V2 history is disconnected or failed deterministic hash parity.",
+            )
+        snapshot = analysis_snapshots[run["analysis_snapshot_id"]]
+        analysis_reference = frozen.get("analysisSnapshot", {})
+        analysis_lineage = json.loads(snapshot["input_lineage_json"])
+        frozen_projects = frozen.get("projects", {})
+        complete_inputs = all(
+            key in frozen
+            for key in (
+                "targetProfileVersion",
+                "learningGraph",
+                "curriculum",
+                "projects",
+            )
+        )
+        original = runs.get(run.get("replay_of_run_id"))
+        if (
+            analysis_reference.get("id") != snapshot["id"]
+            or analysis_reference.get("inputHash") != snapshot["input_hash"]
+            or analysis_reference.get("outputHash") != snapshot["output_hash"]
+            or analysis_reference.get("cutoffAt") != snapshot["cutoff_at"]
+            or run["cutoff_at"] != snapshot["cutoff_at"]
+            or run["target_profile_version_id"] != snapshot["target_profile_version_id"]
+            or run["learning_graph_version_id"] != snapshot["learning_graph_reference"]
+            or run["curriculum_reference"] != snapshot["curriculum_reference"]
+            or json.loads(run["semantic_definition_references_json"])
+            != json.loads(snapshot["semantic_definition_references_json"])
+            or json.loads(run["capability_scale_version_references_json"])
+            != json.loads(snapshot["capability_scale_version_references_json"])
+            or run["available_time_ms"] != frozen.get("availableTimeMs")
+            or run["user_constraints_hash"] != content_hash(frozen.get("userConstraints", {}))
+            or run["project_reference"]
+            != (frozen_projects.get("input_hash") if isinstance(frozen_projects, dict) else None)
+            or (
+                original is not None
+                and run["status"] == "failed"
+                and (
+                    (
+                        not complete_inputs
+                        and frozen.get("replayOfRunId") != run.get("replay_of_run_id")
+                    )
+                    or (complete_inputs and run["input_hash"] != original["input_hash"])
+                )
+            )
+            or (
+                run["status"] == "completed"
+                and (
+                    frozen.get("targetProfileVersion") != analysis_lineage.get("profile")
+                    or frozen.get("learningGraph") != analysis_lineage.get("graph")
+                    or frozen.get("curriculum") != analysis_lineage.get("curriculumCatalog")
+                    or frozen.get("projects") != analysis_lineage.get("projectCatalog")
+                )
+            )
+            or (
+                run["status"] == "failed"
+                and complete_inputs
+                and (
+                    frozen["targetProfileVersion"] != analysis_lineage.get("profile")
+                    or frozen["learningGraph"] != analysis_lineage.get("graph")
+                    or frozen["curriculum"] != analysis_lineage.get("curriculumCatalog")
+                    or frozen["projects"] != analysis_lineage.get("projectCatalog")
+                )
+            )
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_RECOMMENDATION_CHECKPOINT_INVALID",
+                "Recommendation V2 frozen lineage is inconsistent.",
+            )
+        if run["status"] == "completed":
+            from app.recommendation.v2.input_replay import (
+                regenerate_candidates_from_frozen_input,
+            )
+
+            generated_candidates = regenerate_candidates_from_frozen_input(
+                frozen, run["policy_registry_version"]
+            )
+            persisted_candidate_payloads = [
+                json.loads(row["candidate_json"])
+                for row in sorted(
+                    (
+                        row
+                        for row in tables["recommendation_v2_candidates"]
+                        if row["run_id"] == run_id
+                    ),
+                    key=lambda row: row["ordinal"],
+                )
+            ]
+            if frozen["candidates"] != persisted_candidate_payloads or frozen[
+                "candidates"
+            ] != json.loads(canonical_json([asdict(item) for item in generated_candidates])):
+                raise AppError(
+                    422,
+                    "PORTABLE_RECOMMENDATION_CHECKPOINT_INVALID",
+                    "Recommendation V2 candidate generation does not replay exactly.",
+                )
+            try:
+                actual_audit, expected_audit = _recommendation_audit_projection(tables, run_id)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise AppError(
+                    422,
+                    "PORTABLE_RECOMMENDATION_CHECKPOINT_INVALID",
+                    "Recommendation V2 audit cannot be replayed.",
+                ) from exc
+            if actual_audit != expected_audit:
+                raise AppError(
+                    422,
+                    "PORTABLE_RECOMMENDATION_CHECKPOINT_INVALID",
+                    "Recommendation V2 persisted audit differs from deterministic replay.",
+                )
+            run_candidates = {
+                row["id"]: row
+                for row in tables["recommendation_v2_candidates"]
+                if row["run_id"] == run_id
+            }
+            expected_candidates = {
+                item["candidate"]["stable_id"]: item for item in expected_audit["candidates"]
+            }
+            expected_values = {
+                row["candidate_id"]: row
+                for row in tables["recommendation_v2_expected_values"]
+                if row["candidate_id"] in run_candidates
+            }
+            policy_mismatch = any(
+                row["policy_version"] != registered_bundle["eligibility"]
+                for table_name in (
+                    "recommendation_v2_eligibility_decisions",
+                    "recommendation_v2_eligibility_rule_results",
+                )
+                for row in tables[table_name]
+                if row["candidate_id"] in run_candidates
+            ) or any(
+                row["policy_version"] != registered_bundle[policy_key]
+                for table_name, policy_key in (
+                    ("recommendation_v2_expected_values", "expectedLearningValue"),
+                    ("recommendation_v2_score_components", "score"),
+                    ("recommendation_v2_selection_decisions", "portfolio"),
+                    ("recommendation_v2_reasons", "reason"),
+                )
+                for row in tables[table_name]
+                if row["candidate_id"] in run_candidates
+            )
+            value_mismatch = any(
+                candidate_id not in expected_values
+                or json.loads(expected_values[candidate_id]["matched_facts_json"])
+                != expected_candidates[candidate["stable_id"]]["expected_learning_value_facts"]
+                or expected_values[candidate_id]["deciding_rule_code"]
+                != (
+                    expected_candidates[candidate["stable_id"]]["expected_learning_value_reasons"][
+                        0
+                    ]
+                    if expected_candidates[candidate["stable_id"]][
+                        "expected_learning_value_reasons"
+                    ]
+                    else "DECISIVE_LEARNING_VALUE_FACTS_MISSING"
+                )
+                for candidate_id, candidate in run_candidates.items()
+            )
+            selected_mismatch = any(
+                row["algorithm_version"] != registered_bundle["algorithm"]
+                or row["analysis_snapshot_id"] != run["analysis_snapshot_id"]
+                or row["presentation_version"] != "recommendation-presentation/v1"
+                for row in tables["recommendation_v2_recommendations"]
+                if row["run_id"] == run_id
+            )
+            if policy_mismatch or value_mismatch or selected_mismatch:
+                raise AppError(
+                    422,
+                    "PORTABLE_RECOMMENDATION_CHECKPOINT_INVALID",
+                    "Recommendation V2 persisted policy or explanation lineage is inconsistent.",
+                )
 
 
 def _validate_curriculum_checkpoint(payload: dict[str, Any], schema_version: int) -> None:
@@ -1404,6 +1976,7 @@ def _insert_portable_tables(connection: Any, tables: dict[str, list[dict[str, An
     evidence_supersession_pointers: list[tuple[str, str | None]] = []
     evidence_replacement_pointers: list[tuple[str, str | None]] = []
     evidence_link_replacement_pointers: list[tuple[str, str | None]] = []
+    recommendation_replay_pointers: list[tuple[str, str | None]] = []
     for model in PORTABLE_MODELS:
         table_name = _table(model).name
         rows = [dict(row) for row in tables.get(table_name, [])]
@@ -1466,6 +2039,10 @@ def _insert_portable_tables(connection: Any, tables: dict[str, list[dict[str, An
                     (row["id"], row.get("replacement_link_id"))
                 )
                 row["replacement_link_id"] = None
+        if model is RecommendationV2Run:
+            for row in rows:
+                recommendation_replay_pointers.append((row["id"], row.get("replay_of_run_id")))
+                row["replay_of_run_id"] = None
         if rows:
             connection.execute(insert(_table(model)), rows)
     for definition_id, parent_id in parent_pointers:
@@ -1539,6 +2116,14 @@ def _insert_portable_tables(connection: Any, tables: dict[str, list[dict[str, An
                 .update()
                 .where(EvidenceLinkRetraction.id == retraction_id)
                 .values(replacement_link_id=replacement_id)
+            )
+    for run_id, replay_of_run_id in recommendation_replay_pointers:
+        if replay_of_run_id:
+            connection.execute(
+                _table(RecommendationV2Run)
+                .update()
+                .where(RecommendationV2Run.id == run_id)
+                .values(replay_of_run_id=replay_of_run_id)
             )
     for roadmap_id, roadmap_version_id, phase_id, is_current in roadmap_pointers:
         connection.execute(
@@ -1668,6 +2253,12 @@ def _normalize_portable_tables(
             "PORTABLE_MANIFEST_INVALID",
             "The portable V6 manifest is missing or does not match the recovery contract.",
         )
+    if schema_version == 7 and parsed.manifest != PORTABLE_V7_MANIFEST:
+        raise AppError(
+            422,
+            "PORTABLE_MANIFEST_INVALID",
+            "The portable V7 manifest is missing or does not match the recovery contract.",
+        )
     if schema_version == 1 and parsed.manifest is not None:
         raise AppError(
             422, "PORTABLE_SCHEMA_INVALID", "A V1 portable package cannot contain a V2 manifest."
@@ -1693,23 +2284,38 @@ def _normalize_portable_tables(
         raise AppError(
             422, "PORTABLE_SCHEMA_INVALID", "A V5 portable package cannot contain V6 tables."
         )
+    if schema_version == 6 and set(tables) & set(PORTABLE_V6_FORBIDDEN_TABLES):
+        raise AppError(
+            422, "PORTABLE_SCHEMA_INVALID", "A V6 portable package cannot contain V7 tables."
+        )
     unknown = set(tables) - set(PORTABLE_BY_TABLE)
     v2_tables = set(PORTABLE_V2_FOUNDATION_TABLES)
     v3_tables = set(PORTABLE_V3_CURRICULUM_TABLES)
     v4_tables = set(PORTABLE_V4_PROJECT_TABLES)
     v5_tables = set(PORTABLE_V5_GRAPH_PROJECTION_TABLES)
     v6_tables = set(PORTABLE_V6_ANALYSIS_TABLES)
+    v7_tables = set(PORTABLE_V7_RECOMMENDATION_TABLES)
     missing = set(PORTABLE_BY_TABLE) - set(tables)
     allowed_v1_missing = (
-        v2_tables | v3_tables | v4_tables | v5_tables | v6_tables | {"roadmap_scope_events"}
+        v2_tables
+        | v3_tables
+        | v4_tables
+        | v5_tables
+        | v6_tables
+        | v7_tables
+        | {"roadmap_scope_events"}
     )
     legacy_without_scope_history = schema_version == 1 and "roadmap_scope_events" in missing
     valid_missing = (
         (schema_version == 1 and missing <= allowed_v1_missing)
-        or (schema_version == 2 and missing <= (v3_tables | v4_tables | v5_tables | v6_tables))
-        or (schema_version == 3 and missing <= (v4_tables | v5_tables | v6_tables))
-        or (schema_version == 4 and missing <= (v5_tables | v6_tables))
-        or (schema_version == 5 and missing <= v6_tables)
+        or (
+            schema_version == 2
+            and missing <= (v3_tables | v4_tables | v5_tables | v6_tables | v7_tables)
+        )
+        or (schema_version == 3 and missing <= (v4_tables | v5_tables | v6_tables | v7_tables))
+        or (schema_version == 4 and missing <= (v5_tables | v6_tables | v7_tables))
+        or (schema_version == 5 and missing <= (v6_tables | v7_tables))
+        or (schema_version == 6 and missing <= v7_tables)
         or not missing
     )
     if unknown or not valid_missing:
@@ -1733,20 +2339,27 @@ def _normalize_portable_tables(
         upgrade_v3_to_v4_tables(tables)
         upgrade_v4_to_v5_tables(tables)
         upgrade_v5_to_v6_tables(tables)
+        upgrade_v6_to_v7_tables(tables)
     elif schema_version == 2:
         upgrade_v2_to_v3_tables(tables)
         upgrade_v3_to_v4_tables(tables)
         upgrade_v4_to_v5_tables(tables)
         upgrade_v5_to_v6_tables(tables)
+        upgrade_v6_to_v7_tables(tables)
     elif schema_version == 3:
         upgrade_v3_to_v4_tables(tables)
         upgrade_v4_to_v5_tables(tables)
         upgrade_v5_to_v6_tables(tables)
+        upgrade_v6_to_v7_tables(tables)
     elif schema_version == 4:
         upgrade_v4_to_v5_tables(tables)
         upgrade_v5_to_v6_tables(tables)
+        upgrade_v6_to_v7_tables(tables)
     elif schema_version == 5:
         upgrade_v5_to_v6_tables(tables)
+        upgrade_v6_to_v7_tables(tables)
+    elif schema_version == 6:
+        upgrade_v6_to_v7_tables(tables)
     return tables, legacy_without_scope_history
 
 
@@ -1761,6 +2374,7 @@ def _validate_portable_payload(
     _validate_project_checkpoint(payload, schema_version)
     _validate_roadmap_projection_checkpoint(payload, schema_version)
     _validate_analysis_v3_checkpoint(payload, tables, schema_version)
+    _validate_recommendation_v2_checkpoint(payload, tables, schema_version)
     for table_name, rows in tables.items():
         if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
             raise AppError(422, "PORTABLE_SCHEMA_INVALID", f"Table {table_name} has invalid rows.")
@@ -1843,6 +2457,8 @@ def _validate_portable_payload(
             "nativeLearningGraphsInferred": 0,
             "initializedAnalysisV3Tables": len(PORTABLE_V6_ANALYSIS_TABLES),
             "nativeAnalysisHistoryInferred": 0,
+            "initializedRecommendationV2Tables": len(PORTABLE_V7_RECOMMENDATION_TABLES),
+            "nativeRecommendationHistoryInferred": 0,
         }
     elif schema_version == 3:
         compatibility_conversions = {
@@ -1852,6 +2468,8 @@ def _validate_portable_payload(
             "nativeLearningGraphsInferred": 0,
             "initializedAnalysisV3Tables": len(PORTABLE_V6_ANALYSIS_TABLES),
             "nativeAnalysisHistoryInferred": 0,
+            "initializedRecommendationV2Tables": len(PORTABLE_V7_RECOMMENDATION_TABLES),
+            "nativeRecommendationHistoryInferred": 0,
         }
     elif schema_version == 4:
         compatibility_conversions = {
@@ -1859,11 +2477,20 @@ def _validate_portable_payload(
             "nativeLearningGraphsInferred": 0,
             "initializedAnalysisV3Tables": len(PORTABLE_V6_ANALYSIS_TABLES),
             "nativeAnalysisHistoryInferred": 0,
+            "initializedRecommendationV2Tables": len(PORTABLE_V7_RECOMMENDATION_TABLES),
+            "nativeRecommendationHistoryInferred": 0,
         }
     elif schema_version == 5:
         compatibility_conversions = {
             "initializedAnalysisV3Tables": len(PORTABLE_V6_ANALYSIS_TABLES),
             "nativeAnalysisHistoryInferred": 0,
+            "initializedRecommendationV2Tables": len(PORTABLE_V7_RECOMMENDATION_TABLES),
+            "nativeRecommendationHistoryInferred": 0,
+        }
+    elif schema_version == 6:
+        compatibility_conversions = {
+            "initializedRecommendationV2Tables": len(PORTABLE_V7_RECOMMENDATION_TABLES),
+            "nativeRecommendationHistoryInferred": 0,
         }
     return tables, {
         "tableCounts": {name: len(rows) for name, rows in sorted(tables.items())},
@@ -2082,6 +2709,7 @@ def _delete_portable_state(db: Session) -> None:
     db.execute(_table(Evidence).update().values(supersedes_evidence_id=None))
     db.execute(_table(EvidenceRetraction).update().values(replacement_evidence_id=None))
     db.execute(_table(EvidenceLinkRetraction).update().values(replacement_link_id=None))
+    db.execute(_table(RecommendationV2Run).update().values(replay_of_run_id=None))
     db.execute(_table(RoadmapProjectionCheckpoint).delete())
     db.execute(_table(RoadmapProjectionCache).delete())
     for item in list(db.identity_map.values()):

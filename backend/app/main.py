@@ -33,6 +33,8 @@ from app.models import User
 from app.operation_lock import exclusive_operation_lock
 from app.projects import models as project_models  # noqa: F401
 from app.projects.api import router as project_router
+from app.recommendation.v2 import models as recommendation_v2_models  # noqa: F401
+from app.recommendation.v2.api import router as recommendation_v2_router
 from app.recommendations import router as recommendation_router
 from app.reflections import router as reflection_router
 from app.reports import backfill_reports, report_scheduler
@@ -176,3 +178,4 @@ app.include_router(learning_graph_router, prefix="/api/v2")
 app.include_router(roadmap_projection_router, prefix="/api/v2")
 app.include_router(legacy_roadmap_graph_router, prefix="/api/v2")
 app.include_router(analysis_v3_router, prefix="/api/v2")
+app.include_router(recommendation_v2_router, prefix="/api/v2")

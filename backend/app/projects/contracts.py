@@ -247,6 +247,14 @@ class ProjectBlockerFactPublicDTO:
 
 
 @dataclass(frozen=True)
+class ProjectEvidenceOpportunityPublicDTO:
+    opportunity_id: str
+    task_definition_id: str | None
+    project_criterion_definition_id: str | None
+    intended_independence_modes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class ProjectCandidatePublicDTO:
     candidate_type: str
     project_id: str
@@ -269,6 +277,9 @@ class ProjectCandidatePublicDTO:
     target_ids: tuple[str, ...]
     target_facts: tuple[ProjectTargetFactPublicDTO, ...]
     input_hash: str
+    evidence_opportunity_ids: tuple[str, ...] = ()
+    intended_independence_modes: tuple[str, ...] = ()
+    evidence_opportunities: tuple[ProjectEvidenceOpportunityPublicDTO, ...] = ()
 
 
 @dataclass(frozen=True)
