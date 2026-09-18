@@ -15,6 +15,7 @@ from app.portability.registry import (
     PORTABLE_V2_FOUNDATION_TABLES,
     PORTABLE_V3_CURRICULUM_TABLES,
     PORTABLE_V4_PROJECT_TABLES,
+    PORTABLE_V5_GRAPH_PROJECTION_TABLES,
 )
 from httpx import AsyncClient
 from sqlalchemy import inspect, select, text
@@ -152,7 +153,7 @@ async def test_new_portable_backup_round_trips_scope_history_and_preserves_auth(
     assert restored_events[-1]["event_sequence"] == len(expected_events) + 1
     assert restored_events[-1]["phase_id"] == phase_two_id
     round_trip = await _portable_export(client, csrf)
-    assert round_trip["schemaVersion"] == 4
+    assert round_trip["schemaVersion"] == 5
     assert round_trip["payload"]["tables"]["roadmap_scope_events"] == restored_events
 
 
@@ -171,8 +172,11 @@ async def test_legacy_portable_backup_gets_only_deterministic_current_scope_base
         package["payload"]["tables"].pop(table_name)
     for table_name in PORTABLE_V4_PROJECT_TABLES:
         package["payload"]["tables"].pop(table_name)
+    for table_name in PORTABLE_V5_GRAPH_PROJECTION_TABLES:
+        package["payload"]["tables"].pop(table_name)
     package["payload"].pop("curriculumCatalogCheckpoint")
     package["payload"].pop("projectCatalogCheckpoint")
+    package["payload"].pop("roadmapProjectionCheckpoint")
     package["payload"].pop("portableScope")
     package["payload"].pop("manifest")
     package["schemaVersion"] = 1

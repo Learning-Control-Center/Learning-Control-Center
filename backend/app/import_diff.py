@@ -6,6 +6,7 @@ from typing import Any, cast
 from sqlalchemy import Table, select
 from sqlalchemy.orm import Session
 
+from app.compatibility.v1.roadmap_active_state import current_legacy_roadmap
 from app.models import (
     CompetencyAbilityItem,
     CompetencyDefinition,
@@ -311,7 +312,7 @@ def _exit_criteria_change(
 def build_roadmap_diff(
     db: Session, incoming_payload: RoadmapCreate, operation: str
 ) -> dict[str, Any]:
-    current = db.scalar(select(Roadmap).where(Roadmap.is_current.is_(True)))
+    current = current_legacy_roadmap(db)
     before = _database_snapshot(db, current)
     after = _payload_snapshot(incoming_payload)
     competency_modified = []

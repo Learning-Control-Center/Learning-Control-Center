@@ -913,6 +913,18 @@ def evaluate_capability(
         if historical_replay:
             created_runs.append(run)
             continue
+        db.add(
+            ProjectionInvalidation(
+                projection_kind="roadmap_projection_v2",
+                subject_type="competency_capability",
+                subject_id=competency_id,
+                source_fact_id=run.id,
+                target_policy_version="roadmap-projection/v2.0",
+                status="pending",
+                attempt_count=0,
+                requested_at=run.generated_at,
+            )
+        )
         meaningful_at = _meaningful_evidence_at(
             scope_facts, {item.id: item for item in criteria}, selected
         )

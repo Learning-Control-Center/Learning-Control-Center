@@ -16,6 +16,7 @@ from app.analytics import router as analytics_router
 from app.auth import router as auth_router
 from app.capability import drain_projection_invalidations
 from app.capability import router as capability_router
+from app.compatibility.v1.roadmap_graph import router as legacy_roadmap_graph_router
 from app.config import get_settings, is_strong_operator_secret
 from app.curriculum import models as curriculum_models  # noqa: F401
 from app.curriculum.api import router as curriculum_router
@@ -23,6 +24,8 @@ from app.database import SessionLocal, initialize_database, run_migrations
 from app.errors import install_error_handlers
 from app.evidence import router as evidence_router
 from app.import_export import router as import_export_router
+from app.learning_graph import models as learning_graph_models  # noqa: F401
+from app.learning_graph.api import router as learning_graph_router
 from app.models import User
 from app.operation_lock import exclusive_operation_lock
 from app.projects import models as project_models  # noqa: F401
@@ -32,6 +35,11 @@ from app.reflections import router as reflection_router
 from app.reports import backfill_reports, report_scheduler
 from app.reports import router as report_router
 from app.roadmap import router as roadmap_router
+from app.roadmap_projection import models as roadmap_projection_models  # noqa: F401
+from app.roadmap_projection.api import router as roadmap_projection_router
+from app.roadmap_projection.service import (
+    drain_projection_invalidations as drain_roadmap_projection_invalidations,
+)
 from app.sessions import router as session_router
 from app.settings_api import get_or_create_profile
 from app.settings_api import router as settings_router
@@ -50,6 +58,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             get_or_create_profile(db)
             backfill_reports(db)
             drain_projection_invalidations(db, recover_running=True)
+            drain_roadmap_projection_invalidations(db, recover_running=True)
         stop_event = asyncio.Event()
         scheduler_task = asyncio.create_task(report_scheduler(stop_event))
         try:
@@ -158,3 +167,6 @@ app.include_router(evidence_router, prefix="/api/v2")
 app.include_router(capability_router, prefix="/api/v2")
 app.include_router(curriculum_router, prefix="/api/v2")
 app.include_router(project_router, prefix="/api/v2")
+app.include_router(learning_graph_router, prefix="/api/v2")
+app.include_router(roadmap_projection_router, prefix="/api/v2")
+app.include_router(legacy_roadmap_graph_router, prefix="/api/v2")

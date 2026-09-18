@@ -110,6 +110,11 @@ async def test_application_lifespan_runs_startup_and_shutdown_work(
         "drain_projection_invalidations",
         lambda _db, *, recover_running: calls.append(f"drain:{recover_running}"),
     )
+    monkeypatch.setattr(
+        main,
+        "drain_roadmap_projection_invalidations",
+        lambda _db, *, recover_running: calls.append(f"roadmap_drain:{recover_running}"),
+    )
     monkeypatch.setattr(main, "report_scheduler", scheduler)
 
     async with main.lifespan(main.app):
@@ -122,6 +127,7 @@ async def test_application_lifespan_runs_startup_and_shutdown_work(
         "profile",
         "reports",
         "drain:True",
+        "roadmap_drain:True",
         "serving",
         "scheduler_started",
         "scheduler_stopped",

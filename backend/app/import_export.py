@@ -18,7 +18,6 @@ from sqlalchemy import Engine, Table, insert, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.analysis.contracts import content_hash
 from app.analytics import build_analytics
 from app.api_serialization import serialize_api_instants
 from app.auth import AuthContext, get_auth_context, require_csrf
@@ -34,6 +33,7 @@ from app.compatibility.v1.portable import (
     upgrade_v1_evidence_tables,
     upgrade_v1_profile_competency_tables,
 )
+from app.compatibility.v1.roadmap_active_state import current_legacy_roadmap
 from app.config import Settings, get_settings_dependency
 from app.curriculum.models import (
     ActiveCurriculumVersionState,
@@ -59,6 +59,7 @@ from app.curriculum.service import (
     serialize_catalog,
 )
 from app.database import create_database_engine, get_db, run_migrations
+from app.determinism import content_hash
 from app.domain import transition_status
 from app.domain_integrity import (
     portable_state_presence,
@@ -68,6 +69,14 @@ from app.domain_integrity import (
 from app.errors import AppError
 from app.evidence import create_verification_with_evidence
 from app.import_diff import build_portable_replacement_diff, build_roadmap_diff
+from app.learning_graph.models import (
+    ActiveLearningGraphState,
+    CompetencyEdgeDefinition,
+    CompetencyEdgeIdentity,
+    LearningGraph,
+    LearningGraphActivationEvent,
+    LearningGraphVersion,
+)
 from app.models import (
     ActiveCompetencyDefinitionState,
     ActiveTargetProfileState,
@@ -149,11 +158,15 @@ from app.portability.registry import (
     PORTABLE_V3_CURRICULUM_TABLES,
     PORTABLE_V3_FORBIDDEN_TABLES,
     PORTABLE_V3_MANIFEST,
+    PORTABLE_V4_FORBIDDEN_TABLES,
     PORTABLE_V4_MANIFEST,
     PORTABLE_V4_PROJECT_TABLES,
+    PORTABLE_V5_GRAPH_PROJECTION_TABLES,
+    PORTABLE_V5_MANIFEST,
     supports_portable_schema,
     upgrade_v2_to_v3_tables,
     upgrade_v3_to_v4_tables,
+    upgrade_v4_to_v5_tables,
 )
 from app.projects.contracts import ProjectCatalogPublicDTO
 from app.projects.models import (
@@ -183,6 +196,19 @@ from app.projects.models import (
 )
 from app.projects.service import PROJECT_AVAILABILITY_POLICY
 from app.projects.service import build_catalog as build_project_catalog
+from app.roadmap_projection.models import (
+    LegacyRoadmapActiveState,
+    RoadmapNodePositionOverride,
+    RoadmapProjectionCache,
+    RoadmapProjectionCheckpoint,
+    RoadmapProjectionPreference,
+)
+from app.roadmap_projection.service import (
+    build_projection as build_roadmap_projection,
+)
+from app.roadmap_projection.service import (
+    rebuild_projection as rebuild_roadmap_projection,
+)
 from app.schemas import (
     ExportRequest,
     ImportApplyRequest,
@@ -243,6 +269,12 @@ PORTABLE_MODELS = [
     ActiveCompetencyDefinitionState,
     CompetencyDefinitionActivationEvent,
     LegacyCriterionAssertion,
+    LearningGraph,
+    LearningGraphVersion,
+    CompetencyEdgeIdentity,
+    CompetencyEdgeDefinition,
+    ActiveLearningGraphState,
+    LearningGraphActivationEvent,
     Curriculum,
     CurriculumVersion,
     CurriculumObjectiveIdentity,
@@ -273,6 +305,9 @@ PORTABLE_MODELS = [
     ActiveProjectVersionState,
     ProjectVersionActivationEvent,
     ProjectEvent,
+    LegacyRoadmapActiveState,
+    RoadmapNodePositionOverride,
+    RoadmapProjectionPreference,
     ActivityCategoryVersion,
     Activity,
     ActivityCurriculumUnitLink,
@@ -374,7 +409,7 @@ def _capability_projection_checkpoints(db: Session) -> list[dict[str, str]]:
 
 def _portable_payload(db: Session, project_ids: set[str] | None = None) -> dict[str, Any]:
     payload: dict[str, Any] = {
-        "manifest": PORTABLE_V4_MANIFEST,
+        "manifest": PORTABLE_V5_MANIFEST,
         "tables": {
             _table(model).name: [_row_dict(item) for item in db.scalars(select(model)).all()]
             for model in PORTABLE_MODELS
@@ -392,9 +427,7 @@ def _portable_payload(db: Session, project_ids: set[str] | None = None) -> dict[
     requested_project_ids = set(project_ids) if project_ids is not None else set(all_project_ids)
     versions_by_id = {row["id"]: row for row in tables["project_versions"]}
     task_defs_by_id = {row["id"]: row for row in tables["project_task_definitions"]}
-    project_links_by_id = {
-        row["id"]: row for row in tables["activity_project_task_links"]
-    }
+    project_links_by_id = {row["id"]: row for row in tables["activity_project_task_links"]}
     project_criteria_by_identity = {
         row["id"]: row for row in tables["project_criterion_identities"]
     }
@@ -428,9 +461,7 @@ def _portable_payload(db: Session, project_ids: set[str] | None = None) -> dict[
     while changed:
         changed = False
         for correction in tables["activity_project_task_link_corrections"]:
-            original_project_id = link_project_ids.get(
-                correction["activity_project_task_link_id"]
-            )
+            original_project_id = link_project_ids.get(correction["activity_project_task_link_id"])
             replacement_project_id = link_project_ids.get(correction["replacement_link_id"])
             if (
                 original_project_id in included_project_ids
@@ -485,9 +516,7 @@ def _portable_payload(db: Session, project_ids: set[str] | None = None) -> dict[
                 for row in tables[table_name]
                 if row["project_version_id"] in included_version_ids
             ]
-        included_task_definition_ids = {
-            row["id"] for row in tables["project_task_definitions"]
-        }
+        included_task_definition_ids = {row["id"] for row in tables["project_task_definitions"]}
         included_criterion_definition_ids = {
             row["id"] for row in tables["project_criterion_definitions"]
         }
@@ -522,9 +551,7 @@ def _portable_payload(db: Session, project_ids: set[str] | None = None) -> dict[
             for row in tables["session_project_contributions"]
             if row["project_id"] in included_project_ids
         ]
-        included_contribution_ids = {
-            row["id"] for row in tables["session_project_contributions"]
-        }
+        included_contribution_ids = {row["id"] for row in tables["session_project_contributions"]}
         tables["session_project_contribution_retractions"] = [
             row
             for row in tables["session_project_contribution_retractions"]
@@ -535,9 +562,7 @@ def _portable_payload(db: Session, project_ids: set[str] | None = None) -> dict[
             for row in tables["project_criterion_evaluations"]
             if row["project_criterion_definition_id"] in included_criterion_definition_ids
         ]
-        included_evaluation_ids = {
-            row["id"] for row in tables["project_criterion_evaluations"]
-        }
+        included_evaluation_ids = {row["id"] for row in tables["project_criterion_evaluations"]}
         tables["project_criterion_evaluation_evidence"] = [
             row
             for row in tables["project_criterion_evaluation_evidence"]
@@ -643,6 +668,24 @@ def _portable_payload(db: Session, project_ids: set[str] | None = None) -> dict[
     }
     project_checkpoint["inputHash"] = content_hash(project_checkpoint)
     payload["projectCatalogCheckpoint"] = project_checkpoint
+    projection = build_roadmap_projection(
+        db,
+        cutoff_at=project_cutoff,
+        project_catalog=project_catalog,
+        include_current_presentation=True,
+    )
+    projection_checkpoint = {
+        "configured": bool(projection.get("configured")),
+        "cutoffAt": project_cutoff,
+        "cutoffSemantics": "exclusive",
+        "projectionPolicyVersion": projection.get("projectionPolicyVersion"),
+        "layoutPolicyVersion": projection.get("layoutPolicyVersion"),
+        "scopeKey": projection.get("scopeKey"),
+        "sourceHash": content_hash(projection.get("sourceLineage", {})),
+        "outputHash": content_hash(projection),
+    }
+    projection_checkpoint["inputHash"] = content_hash(projection_checkpoint)
+    payload["roadmapProjectionCheckpoint"] = projection_checkpoint
     return payload
 
 
@@ -680,6 +723,69 @@ def _validate_capability_checkpoints(
                 "Capability projection checkpoint is disconnected from immutable history.",
             )
         seen.add(key)
+
+
+def _validate_roadmap_projection_checkpoint(payload: dict[str, Any], schema_version: int) -> None:
+    checkpoint = payload.get("roadmapProjectionCheckpoint")
+    if schema_version < 5:
+        if checkpoint is not None:
+            raise AppError(
+                422,
+                "PORTABLE_SCHEMA_INVALID",
+                "Portable schema versions before V5 cannot contain a "
+                "Roadmap Projection checkpoint.",
+            )
+        return
+    expected = {
+        "configured",
+        "cutoffAt",
+        "cutoffSemantics",
+        "projectionPolicyVersion",
+        "layoutPolicyVersion",
+        "scopeKey",
+        "sourceHash",
+        "outputHash",
+        "inputHash",
+    }
+    if (
+        not isinstance(checkpoint, dict)
+        or set(checkpoint) != expected
+        or type(checkpoint["configured"]) is not bool
+        or type(checkpoint["cutoffAt"]) is not int
+        or checkpoint["cutoffSemantics"] != "exclusive"
+        or checkpoint["inputHash"]
+        != content_hash({key: value for key, value in checkpoint.items() if key != "inputHash"})
+    ):
+        raise AppError(
+            422,
+            "PORTABLE_ROADMAP_PROJECTION_CHECKPOINT_INVALID",
+            "The Roadmap Projection checkpoint is invalid.",
+        )
+
+
+def _assert_roadmap_projection_checkpoint_parity(
+    db: Session, checkpoint: dict[str, Any] | None
+) -> None:
+    if checkpoint is None:
+        return
+    projection = build_roadmap_projection(
+        db,
+        cutoff_at=checkpoint["cutoffAt"],
+        include_current_presentation=True,
+    )
+    if (
+        bool(projection.get("configured")) != checkpoint["configured"]
+        or projection.get("scopeKey") != checkpoint["scopeKey"]
+        or projection.get("projectionPolicyVersion") != checkpoint["projectionPolicyVersion"]
+        or projection.get("layoutPolicyVersion") != checkpoint["layoutPolicyVersion"]
+        or content_hash(projection.get("sourceLineage", {})) != checkpoint["sourceHash"]
+        or content_hash(projection) != checkpoint["outputHash"]
+    ):
+        raise AppError(
+            422,
+            "PORTABLE_ROADMAP_PROJECTION_PARITY_FAILED",
+            "Restored canonical facts do not reproduce the Roadmap Projection checkpoint.",
+        )
 
 
 def _validate_curriculum_checkpoint(payload: dict[str, Any], schema_version: int) -> None:
@@ -859,7 +965,7 @@ def _resolve_export_scope(db: Session, request: ExportRequest) -> ResolvedExport
     if start_date > end_date:
         raise AppError(422, "EXPORT_RANGE_INVALID", "The export date range is invalid.")
 
-    current = db.scalar(select(Roadmap).where(Roadmap.is_current.is_(True)))
+    current = current_legacy_roadmap(db)
     active_version_id = current.active_version_id if current else None
     current_tracks = (
         db.scalars(select(Track).where(Track.roadmap_version_id == active_version_id)).all()
@@ -970,7 +1076,7 @@ def _roadmap_analysis_payload(
 ) -> dict[str, Any] | None:
     from app.roadmap import serialize_current_roadmap
 
-    current = db.scalar(select(Roadmap).where(Roadmap.is_current.is_(True)))
+    current = current_legacy_roadmap(db)
     if current is None:
         return None
     serialized = serialize_current_roadmap(db, current)
@@ -1147,6 +1253,7 @@ def _insert_portable_tables(connection: Any, tables: dict[str, list[dict[str, An
     parent_pointers: list[tuple[str, str | None]] = []
     curriculum_version_pointers: list[tuple[str, str | None]] = []
     project_version_pointers: list[tuple[str, str | None]] = []
+    learning_graph_version_pointers: list[tuple[str, str | None]] = []
     project_event_correction_pointers: list[tuple[str, str | None]] = []
     activity_supersession_pointers: list[tuple[str, str | None]] = []
     evidence_supersession_pointers: list[tuple[str, str | None]] = []
@@ -1179,6 +1286,12 @@ def _insert_portable_tables(connection: Any, tables: dict[str, list[dict[str, An
         if model is ProjectVersion:
             for row in rows:
                 project_version_pointers.append((row["id"], row.get("supersedes_version_id")))
+                row["supersedes_version_id"] = None
+        if model is LearningGraphVersion:
+            for row in rows:
+                learning_graph_version_pointers.append(
+                    (row["id"], row.get("supersedes_version_id"))
+                )
                 row["supersedes_version_id"] = None
         if model is ProjectEvent:
             for row in rows:
@@ -1232,6 +1345,14 @@ def _insert_portable_tables(connection: Any, tables: dict[str, list[dict[str, An
                 _table(ProjectVersion)
                 .update()
                 .where(ProjectVersion.id == project_version_id)
+                .values(supersedes_version_id=supersedes_id)
+            )
+    for graph_version_id, supersedes_id in learning_graph_version_pointers:
+        if supersedes_id:
+            connection.execute(
+                _table(LearningGraphVersion)
+                .update()
+                .where(LearningGraphVersion.id == graph_version_id)
                 .values(supersedes_version_id=supersedes_id)
             )
     for project_event_id, corrects_id in project_event_correction_pointers:
@@ -1389,6 +1510,12 @@ def _normalize_portable_tables(
             "PORTABLE_MANIFEST_INVALID",
             "The portable V4 manifest is missing or does not match the recovery contract.",
         )
+    if schema_version == 5 and parsed.manifest != PORTABLE_V5_MANIFEST:
+        raise AppError(
+            422,
+            "PORTABLE_MANIFEST_INVALID",
+            "The portable V5 manifest is missing or does not match the recovery contract.",
+        )
     if schema_version == 1 and parsed.manifest is not None:
         raise AppError(
             422, "PORTABLE_SCHEMA_INVALID", "A V1 portable package cannot contain a V2 manifest."
@@ -1406,17 +1533,23 @@ def _normalize_portable_tables(
         raise AppError(
             422, "PORTABLE_SCHEMA_INVALID", "A V3 portable package cannot contain V4 tables."
         )
+    if schema_version == 4 and set(tables) & set(PORTABLE_V4_FORBIDDEN_TABLES):
+        raise AppError(
+            422, "PORTABLE_SCHEMA_INVALID", "A V4 portable package cannot contain V5 tables."
+        )
     unknown = set(tables) - set(PORTABLE_BY_TABLE)
     v2_tables = set(PORTABLE_V2_FOUNDATION_TABLES)
     v3_tables = set(PORTABLE_V3_CURRICULUM_TABLES)
     v4_tables = set(PORTABLE_V4_PROJECT_TABLES)
+    v5_tables = set(PORTABLE_V5_GRAPH_PROJECTION_TABLES)
     missing = set(PORTABLE_BY_TABLE) - set(tables)
-    allowed_v1_missing = v2_tables | v3_tables | v4_tables | {"roadmap_scope_events"}
+    allowed_v1_missing = v2_tables | v3_tables | v4_tables | v5_tables | {"roadmap_scope_events"}
     legacy_without_scope_history = schema_version == 1 and "roadmap_scope_events" in missing
     valid_missing = (
         (schema_version == 1 and missing <= allowed_v1_missing)
-        or (schema_version == 2 and missing <= (v3_tables | v4_tables))
-        or (schema_version == 3 and missing <= v4_tables)
+        or (schema_version == 2 and missing <= (v3_tables | v4_tables | v5_tables))
+        or (schema_version == 3 and missing <= (v4_tables | v5_tables))
+        or (schema_version == 4 and missing <= v5_tables)
         or not missing
     )
     if unknown or not valid_missing:
@@ -1438,11 +1571,16 @@ def _normalize_portable_tables(
             row.setdefault("analysis_snapshot_id", None)
         upgrade_v2_to_v3_tables(tables)
         upgrade_v3_to_v4_tables(tables)
+        upgrade_v4_to_v5_tables(tables)
     elif schema_version == 2:
         upgrade_v2_to_v3_tables(tables)
         upgrade_v3_to_v4_tables(tables)
+        upgrade_v4_to_v5_tables(tables)
     elif schema_version == 3:
         upgrade_v3_to_v4_tables(tables)
+        upgrade_v4_to_v5_tables(tables)
+    elif schema_version == 4:
+        upgrade_v4_to_v5_tables(tables)
     return tables, legacy_without_scope_history
 
 
@@ -1455,6 +1593,7 @@ def _validate_portable_payload(
     _validate_capability_checkpoints(payload, tables)
     _validate_curriculum_checkpoint(payload, schema_version)
     _validate_project_checkpoint(payload, schema_version)
+    _validate_roadmap_projection_checkpoint(payload, schema_version)
     for table_name, rows in tables.items():
         if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
             raise AppError(422, "PORTABLE_SCHEMA_INVALID", f"Table {table_name} has invalid rows.")
@@ -1488,6 +1627,9 @@ def _validate_portable_payload(
                     )
                     _assert_project_checkpoint_parity(
                         validation_db, payload.get("projectCatalogCheckpoint")
+                    )
+                    _assert_roadmap_projection_checkpoint_parity(
+                        validation_db, payload.get("roadmapProjectionCheckpoint")
                     )
         finally:
             validation_engine.dispose()
@@ -1530,11 +1672,20 @@ def _validate_portable_payload(
             "nativeCurriculaInferred": 0,
             "initializedProjectTables": len(PORTABLE_V4_PROJECT_TABLES),
             "nativeProjectsInferred": 0,
+            "initializedLearningGraphProjectionTables": len(PORTABLE_V5_GRAPH_PROJECTION_TABLES),
+            "nativeLearningGraphsInferred": 0,
         }
     elif schema_version == 3:
         compatibility_conversions = {
             "initializedProjectTables": len(PORTABLE_V4_PROJECT_TABLES),
             "nativeProjectsInferred": 0,
+            "initializedLearningGraphProjectionTables": len(PORTABLE_V5_GRAPH_PROJECTION_TABLES),
+            "nativeLearningGraphsInferred": 0,
+        }
+    elif schema_version == 4:
+        compatibility_conversions = {
+            "initializedLearningGraphProjectionTables": len(PORTABLE_V5_GRAPH_PROJECTION_TABLES),
+            "nativeLearningGraphsInferred": 0,
         }
     return tables, {
         "tableCounts": {name: len(rows) for name, rows in sorted(tables.items())},
@@ -1747,22 +1898,21 @@ def _delete_portable_state(db: Session) -> None:
     db.execute(_table(CompetencyDefinition).update().values(parent_definition_id=None))
     db.execute(_table(CurriculumVersion).update().values(supersedes_version_id=None))
     db.execute(_table(ProjectVersion).update().values(supersedes_version_id=None))
+    db.execute(_table(LearningGraphVersion).update().values(supersedes_version_id=None))
     db.execute(_table(ProjectEvent).update().values(corrects_event_id=None))
     db.execute(_table(Activity).update().values(supersedes_activity_id=None))
     db.execute(_table(Evidence).update().values(supersedes_evidence_id=None))
     db.execute(_table(EvidenceRetraction).update().values(replacement_evidence_id=None))
     db.execute(_table(EvidenceLinkRetraction).update().values(replacement_link_id=None))
+    db.execute(_table(RoadmapProjectionCheckpoint).delete())
+    db.execute(_table(RoadmapProjectionCache).delete())
     for model in reversed(PORTABLE_MODELS):
         db.execute(_table(model).delete())
     db.flush()
 
 
 def _current_scope(db: Session) -> tuple[str, str, str] | None:
-    roadmap = db.execute(
-        select(Roadmap.id, Roadmap.active_version_id, Roadmap.current_phase_id).where(
-            Roadmap.is_current.is_(True)
-        )
-    ).first()
+    roadmap = current_legacy_roadmap(db)
     if roadmap is None or roadmap.active_version_id is None or roadmap.current_phase_id is None:
         return None
     return roadmap.id, roadmap.active_version_id, roadmap.current_phase_id
@@ -1782,6 +1932,7 @@ def _apply_portable_restore(
     }
     curriculum_checkpoint = payload.get("curriculumCatalogCheckpoint")
     project_checkpoint = payload.get("projectCatalogCheckpoint")
+    roadmap_projection_checkpoint = payload.get("roadmapProjectionCheckpoint")
     tables, legacy_without_scope_history = _normalize_portable_tables(
         payload, package_id, schema_version
     )
@@ -1799,6 +1950,7 @@ def _apply_portable_restore(
     db.flush()
     _assert_curriculum_checkpoint_parity(db, curriculum_checkpoint)
     _assert_project_checkpoint_parity(db, project_checkpoint)
+    _assert_roadmap_projection_checkpoint_parity(db, roadmap_projection_checkpoint)
     restored_capability_baseline: dict[tuple[str, str], tuple[str, str]] = {}
     for run in db.scalars(
         select(CapabilityEvaluationRun).order_by(
@@ -1872,6 +2024,27 @@ def _apply_portable_restore(
                     "scopeKey": state.scope_key,
                 },
             )
+    rebuilt_roadmap = rebuild_roadmap_projection(db)
+    rebuilt_at = utc_now_ms()
+    for invalidation in db.scalars(
+        select(ProjectionInvalidation).where(
+            ProjectionInvalidation.projection_kind == "roadmap_projection_v2",
+            ProjectionInvalidation.status.in_(["pending", "running"]),
+        )
+    ).all():
+        invalidation.status = "completed"
+        invalidation.attempt_count += 1
+        invalidation.started_at = invalidation.started_at or rebuilt_at
+        invalidation.completed_at = rebuilt_at
+        invalidation.error_json = None
+    if roadmap_projection_checkpoint is not None and bool(
+        rebuilt_roadmap.get("configured")
+    ) != bool(roadmap_projection_checkpoint["configured"]):
+        raise AppError(
+            422,
+            "RESTORE_ROADMAP_PROJECTION_PARITY_FAILED",
+            "Roadmap Projection rebuild availability changed during restore.",
+        )
     validate_domain_integrity(db)
 
 

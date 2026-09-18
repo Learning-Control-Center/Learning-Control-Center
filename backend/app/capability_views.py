@@ -5,7 +5,12 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import CapabilityEvaluationRun, CapabilityScaleLevel, CriterionEvaluationResult
+from app.models import (
+    CapabilityEvaluationRun,
+    CapabilityScaleLevel,
+    CriterionEvaluationResult,
+    ReviewEvent,
+)
 
 
 @dataclass(frozen=True)
@@ -29,6 +34,31 @@ class CriterionEvaluationPublicDTO:
     evaluation_run_id: str
     evaluated_cutoff_at: int
     recorded_at: int
+
+
+@dataclass(frozen=True)
+class ReviewPublicDTO:
+    semantic_definition_id: str
+    scope_key: str
+    dimension_id: str | None
+    freshness: str
+    review_due: bool
+    review_event_id: str
+    evaluation_run_id: str
+    recorded_at: int
+
+
+@dataclass(frozen=True)
+class CapabilityScopeProjectionPublicDTO:
+    scope_key: str
+    evaluation_run_id: str
+    evaluation_output_hash: str
+    assessment_status: str
+    selected_level_id: str | None
+    aggregate_confidence: str
+    freshness: str
+    review_due: bool | None
+    review_event_id: str | None
 
 
 def capability_as_of(
@@ -104,3 +134,82 @@ def criterion_evaluation_as_of(
         evaluated_cutoff_at=run.cutoff_at,
         recorded_at=run.generated_at,
     )
+
+
+def review_as_of(
+    db: Session,
+    *,
+    semantic_definition_id: str,
+    scope_key: str,
+    dimension_id: str | None,
+    exclusive_cutoff_at: int,
+) -> ReviewPublicDTO | None:
+    row = db.scalar(
+        select(ReviewEvent)
+        .where(
+            ReviewEvent.semantic_definition_id == semantic_definition_id,
+            ReviewEvent.scope_key == scope_key,
+            ReviewEvent.dimension_id == dimension_id,
+            ReviewEvent.created_at < exclusive_cutoff_at,
+        )
+        .order_by(ReviewEvent.created_at.desc(), ReviewEvent.event_sequence.desc())
+        .limit(1)
+    )
+    if row is None:
+        return None
+    return ReviewPublicDTO(
+        semantic_definition_id=row.semantic_definition_id,
+        scope_key=row.scope_key,
+        dimension_id=row.dimension_id,
+        freshness=row.new_freshness,
+        review_due=row.new_review_due,
+        review_event_id=row.id,
+        evaluation_run_id=row.evaluation_run_id,
+        recorded_at=row.created_at,
+    )
+
+
+def capability_projection_as_of(
+    db: Session, *, semantic_definition_id: str, exclusive_cutoff_at: int
+) -> tuple[CapabilityScopeProjectionPublicDTO, ...]:
+    """Return the latest immutable capability and review facts per scope at a cutoff."""
+    runs = db.scalars(
+        select(CapabilityEvaluationRun)
+        .where(
+            CapabilityEvaluationRun.semantic_definition_id == semantic_definition_id,
+            CapabilityEvaluationRun.generated_at < exclusive_cutoff_at,
+            CapabilityEvaluationRun.cutoff_at < exclusive_cutoff_at,
+        )
+        .order_by(
+            CapabilityEvaluationRun.scope_key,
+            CapabilityEvaluationRun.cutoff_at.desc(),
+            CapabilityEvaluationRun.generated_at.desc(),
+            CapabilityEvaluationRun.id.desc(),
+        )
+    ).all()
+    latest_runs: dict[str, CapabilityEvaluationRun] = {}
+    for run in runs:
+        latest_runs.setdefault(run.scope_key, run)
+    result: list[CapabilityScopeProjectionPublicDTO] = []
+    for run in sorted(latest_runs.values(), key=lambda item: item.scope_key):
+        review = review_as_of(
+            db,
+            semantic_definition_id=run.semantic_definition_id,
+            scope_key=run.scope_key,
+            dimension_id=run.dimension_id,
+            exclusive_cutoff_at=exclusive_cutoff_at,
+        )
+        result.append(
+            CapabilityScopeProjectionPublicDTO(
+                scope_key=run.scope_key,
+                evaluation_run_id=run.id,
+                evaluation_output_hash=run.output_hash,
+                assessment_status=run.assessment_status,
+                selected_level_id=run.selected_level_id,
+                aggregate_confidence=run.aggregate_confidence,
+                freshness=review.freshness if review else "unknown",
+                review_due=review.review_due if review else None,
+                review_event_id=review.review_event_id if review else None,
+            )
+        )
+    return tuple(result)

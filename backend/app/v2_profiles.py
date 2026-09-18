@@ -64,6 +64,7 @@ def _queue_definition_invalidations(
         ("capability", "capability-policy/v1"),
         ("review", "freshness-policy/v1"),
         ("analysis", "analysis-policy/v1"),
+        ("roadmap_projection_v2", "roadmap-projection/v2.0"),
     ):
         db.add(
             ProjectionInvalidation(
@@ -89,6 +90,18 @@ def _queue_profile_analysis_invalidation(
             subject_id=profile_version_id,
             source_fact_id=source_fact_id,
             target_policy_version="analysis-policy/v1",
+            status="pending",
+            attempt_count=0,
+            requested_at=requested_at,
+        )
+    )
+    db.add(
+        ProjectionInvalidation(
+            projection_kind="roadmap_projection_v2",
+            subject_type="target_profile_version",
+            subject_id=profile_version_id,
+            source_fact_id=source_fact_id,
+            target_policy_version="roadmap-projection/v2.0",
             status="pending",
             attempt_count=0,
             requested_at=requested_at,

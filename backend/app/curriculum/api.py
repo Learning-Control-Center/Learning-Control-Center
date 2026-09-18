@@ -51,7 +51,7 @@ def _queue_curriculum_invalidations(
 ) -> None:
     for projection_kind, policy in (
         ("curriculum_availability", "curriculum-availability-policy/v1"),
-        ("roadmap_projection", "roadmap-projection-policy/v1"),
+        ("roadmap_projection_v2", "roadmap-projection/v2.0"),
         ("analysis", "analysis-policy/v3"),
     ):
         db.add(

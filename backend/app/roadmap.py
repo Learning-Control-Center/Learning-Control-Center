@@ -8,6 +8,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth import AuthContext, get_auth_context, require_csrf
+from app.compatibility.v1.roadmap_active_state import (
+    current_legacy_roadmap,
+    synchronize_legacy_roadmap_state,
+)
 from app.database import get_db
 from app.domain import has_required_dependency_cycle, transition_status
 from app.errors import AppError
@@ -211,7 +215,7 @@ def serialize_current_roadmap(db: Session, roadmap: Roadmap) -> dict[str, Any]:
 async def current_roadmap(
     _auth: AuthContext = Depends(get_auth_context), db: Session = Depends(get_db)
 ) -> dict[str, Any]:
-    roadmap = db.scalar(select(Roadmap).where(Roadmap.is_current.is_(True)))
+    roadmap = current_legacy_roadmap(db)
     if roadmap is None:
         return {"configured": False, "guidance": "Import a roadmap package to begin."}
     return {"configured": True, "roadmap": serialize_current_roadmap(db, roadmap)}
@@ -296,13 +300,14 @@ def apply_roadmap_payload(
 ) -> Roadmap:
     validate_roadmap_payload(payload)
 
-    existing_current = db.scalar(select(Roadmap).where(Roadmap.is_current.is_(True)))
+    existing_current = current_legacy_roadmap(db)
     existing_same = db.scalar(select(Roadmap).where(Roadmap.stable_key == payload.stable_key))
     if existing_current is not None and existing_current.id != getattr(existing_same, "id", None):
         existing_current.is_current = False
         existing_current.active_version_id = None
         existing_current.current_phase_id = None
         db.flush()
+        synchronize_legacy_roadmap_state(db, existing_current)
     if existing_same is not None:
         duplicate_version = db.scalar(
             select(RoadmapVersion).where(
@@ -516,6 +521,7 @@ def apply_roadmap_payload(
     roadmap.active_version_id = version.id
     roadmap.current_phase_id = phases[payload.current_phase_stable_key].id
     db.flush()
+    synchronize_legacy_roadmap_state(db, roadmap)
     record_roadmap_scope_event(
         db,
         roadmap_id=roadmap.id,
@@ -544,7 +550,7 @@ async def set_current_phase(
     _auth: AuthContext = Depends(require_csrf),
     db: Session = Depends(get_db),
 ) -> dict[str, str]:
-    roadmap = db.scalar(select(Roadmap).where(Roadmap.is_current.is_(True)))
+    roadmap = current_legacy_roadmap(db)
     phase = db.get(Phase, phase_id)
     if (
         roadmap is None
@@ -558,6 +564,7 @@ async def set_current_phase(
     previous_phase = db.get(Phase, roadmap.current_phase_id)
     roadmap.current_phase_id = phase.id
     db.flush()
+    synchronize_legacy_roadmap_state(db, roadmap)
     record_roadmap_scope_event(
         db,
         roadmap_id=roadmap.id,
@@ -608,18 +615,17 @@ async def set_exit_criterion_state(
     criterion = db.get(ExitCriterionIdentity, criterion_identity_id)
     if criterion is None:
         raise AppError(404, "EXIT_CRITERION_NOT_FOUND", "The exit criterion does not exist.")
+    active_roadmap = current_legacy_roadmap(db)
     source_definition = db.scalar(
         select(ExitCriterionDefinition)
         .join(
             CompetencyDefinition,
             CompetencyDefinition.id == ExitCriterionDefinition.competency_definition_id,
         )
-        .join(RoadmapVersion, RoadmapVersion.id == CompetencyDefinition.roadmap_version_id)
-        .join(Roadmap, Roadmap.id == RoadmapVersion.roadmap_id)
         .where(
             ExitCriterionDefinition.exit_criterion_identity_id == criterion.id,
-            Roadmap.is_current.is_(True),
-            Roadmap.active_version_id == CompetencyDefinition.roadmap_version_id,
+            CompetencyDefinition.roadmap_version_id
+            == (active_roadmap.active_version_id if active_roadmap else None),
         )
         .order_by(ExitCriterionDefinition.created_at.desc(), ExitCriterionDefinition.id.desc())
         .limit(1)
@@ -704,7 +710,7 @@ async def reset_layout_positions(
     sessions, verification records, current phase, and definitions of any
     other (inactive) roadmap version are never modified.
     """
-    roadmap = db.scalar(select(Roadmap).where(Roadmap.is_current.is_(True)))
+    roadmap = current_legacy_roadmap(db)
     if roadmap is None or roadmap.active_version_id is None:
         raise AppError(409, "ROADMAP_STATE_INVALID", "The current roadmap has no active version.")
     definitions = db.scalars(

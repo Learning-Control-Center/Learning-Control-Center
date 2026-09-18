@@ -6,7 +6,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.analysis.contracts import content_hash
+from app.determinism import content_hash
 from app.requirements.contracts import RequirementEvaluationDTO
 from app.schemas import validate_external_reference
 

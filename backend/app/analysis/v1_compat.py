@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.analysis.contracts import AnalysisEnvelope, content_hash, immutable
 from app.analytics import build_analytics, session_facts
+from app.compatibility.v1.roadmap_active_state import current_legacy_roadmap
 from app.models import (
     CompetencyDefinition,
     CompetencyIdentity,
@@ -18,7 +19,6 @@ from app.models import (
     ExitCriterionDefinition,
     ExitCriterionIdentity,
     Phase,
-    Roadmap,
     Track,
     VerificationRecord,
 )
@@ -63,7 +63,7 @@ def build_v1_recommendation_envelope(db: Session, *, now_ms: int | None = None) 
     cutoff = now + 1
     profile = get_or_create_profile(db)
     today = local_date_for_ms(now, profile.timezone)
-    roadmap = db.scalar(select(Roadmap).where(Roadmap.is_current.is_(True)))
+    roadmap = current_legacy_roadmap(db)
     definitions: list[CompetencyDefinition] = []
     normalized: dict[str, Any]
     lineage: list[dict[str, Any]] = []

@@ -97,6 +97,7 @@ def _backup_before_migration(database_url: str, config: Config) -> Path | None:
             row = None
         head = ScriptDirectory.from_config(config).get_current_head()
         if row == (head,):
+            _assert_known_migration_source(source, row, config)
             return None
         _assert_known_migration_source(source, row, config)
         backup_directory = get_settings().backup_directory.resolve()
@@ -258,6 +259,70 @@ def _assert_known_migration_source(
         "project_criterion_evaluations",
         "project_criterion_evaluation_evidence",
     }
+    learning_graph_tables = {
+        "learning_graphs",
+        "learning_graph_versions",
+        "competency_edge_identities",
+        "competency_edge_definitions",
+        "active_learning_graph_states",
+        "learning_graph_activation_events",
+    }
+    roadmap_projection_tables = {
+        "legacy_roadmap_active_states",
+        "roadmap_node_position_overrides",
+        "roadmap_projection_preferences",
+        "roadmap_projection_caches",
+        "roadmap_projection_checkpoints",
+    }
+    if revision in {"0013_learning_graph", "0014_roadmap_projection_state"} and not (
+        learning_graph_tables <= tables
+    ):
+        raise RuntimeError(
+            "Database has an ambiguously partial Learning Graph migration; restore its verified "
+            "pre-migration backup before retrying."
+        )
+    roadmap_projection_markers = roadmap_projection_tables & tables
+    if (
+        revision == "0013_learning_graph"
+        and roadmap_projection_markers
+        or revision == "0014_roadmap_projection_state"
+        and not (roadmap_projection_tables <= tables)
+    ):
+        raise RuntimeError(
+            "Database has an ambiguously partial Roadmap Projection migration; restore its "
+            "verified pre-migration backup before retrying."
+        )
+    if "legacy_roadmap_active_states" in tables:
+        roadmaps = connection.execute(
+            "SELECT id, active_version_id, current_phase_id, is_current FROM roadmaps ORDER BY id"
+        ).fetchall()
+        states = {
+            row[0]: row
+            for row in connection.execute(
+                "SELECT roadmap_id, active_version_id, current_phase_id, is_current, state_hash "
+                "FROM legacy_roadmap_active_states ORDER BY roadmap_id"
+            ).fetchall()
+        }
+        if len(roadmaps) != len(states):
+            raise RuntimeError("Legacy Roadmap active-state parity validation failed.")
+        for roadmap_id, active_version_id, current_phase_id, is_current in roadmaps:
+            state = states.get(roadmap_id)
+            payload = {
+                "activeVersionId": active_version_id,
+                "currentPhaseId": current_phase_id,
+                "isCurrent": bool(is_current),
+                "roadmapId": roadmap_id,
+            }
+            expected_hash = hashlib.sha256(
+                json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            if state is None or (
+                state[1] != active_version_id
+                or state[2] != current_phase_id
+                or bool(state[3]) != bool(is_current)
+                or state[4] != expected_hash
+            ):
+                raise RuntimeError("Legacy Roadmap active-state parity validation failed.")
     projection_columns = {
         row[1] for row in connection.execute("PRAGMA table_info(projection_invalidations)")
     }
@@ -374,6 +439,22 @@ def _assert_known_migration_source(
         raise RuntimeError(
             "Database has an ambiguously partial Project migration; restore its verified "
             "pre-migration backup before retrying."
+        )
+    if revision == "0012_project_core" and (
+        bool(learning_graph_tables & tables)
+        or any(name.startswith("_alembic_tmp_") for name in tables)
+    ):
+        raise RuntimeError(
+            "Database has an ambiguously partial Learning Graph migration; restore its verified "
+            "pre-migration backup before retrying."
+        )
+    if revision == "0013_learning_graph" and (
+        bool(roadmap_projection_tables & tables)
+        or any(name.startswith("_alembic_tmp_") for name in tables)
+    ):
+        raise RuntimeError(
+            "Database has an ambiguously partial Roadmap Projection migration; restore its "
+            "verified pre-migration backup before retrying."
         )
 
 

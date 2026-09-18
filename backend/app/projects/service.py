@@ -10,8 +10,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.activity_views import activity_actuality_as_of
-from app.analysis.contracts import content_hash
 from app.capability_views import capability_as_of, criterion_evaluation_as_of
+from app.determinism import content_hash
 from app.domain import has_required_dependency_cycle
 from app.errors import AppError
 from app.models import (
@@ -1154,6 +1154,12 @@ def build_catalog(db: Session, cutoff_at: int) -> ProjectCatalogPublicDTO:
     refs: list[ActiveProjectVersionReferencePublicDTO] = []
     candidates: list[ProjectCandidatePublicDTO] = []
     for project, version, activation in active_project_versions_as_of(db, cutoff_at):
+        latest_project_event = db.scalar(
+            select(ProjectEvent)
+            .where(ProjectEvent.project_id == project.id, ProjectEvent.occurred_at < cutoff_at)
+            .order_by(ProjectEvent.event_sequence.desc(), ProjectEvent.id.desc())
+            .limit(1)
+        )
         refs.append(
             ActiveProjectVersionReferencePublicDTO(
                 project.id,
@@ -1163,6 +1169,8 @@ def build_catalog(db: Session, cutoff_at: int) -> ProjectCatalogPublicDTO:
                 version.content_hash,
                 activation.id,
                 activation.event_sequence,
+                latest_project_event.id if latest_project_event else None,
+                latest_project_event.event_sequence if latest_project_event else 0,
             )
         )
         for task in db.scalars(

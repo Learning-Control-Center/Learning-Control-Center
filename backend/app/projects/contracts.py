@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.analysis.contracts import content_hash
+from app.determinism import content_hash
 from app.requirements.contracts import RequirementEvaluationDTO
 from app.schemas import validate_external_reference
 
@@ -280,6 +280,8 @@ class ActiveProjectVersionReferencePublicDTO:
     content_hash: str
     activation_event_id: str
     activation_sequence: int
+    latest_project_event_id: str | None
+    project_event_sequence_cutoff: int
 
 
 @dataclass(frozen=True)

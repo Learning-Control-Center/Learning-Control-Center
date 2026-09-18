@@ -8,7 +8,6 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.activity_views import activity_actuality_as_of
-from app.analysis.contracts import canonical_json, content_hash
 from app.capability_views import capability_as_of, criterion_evaluation_as_of
 from app.curriculum.contracts import (
     ActiveCurriculumVersionReferencePublicDTO,
@@ -41,6 +40,7 @@ from app.curriculum.models import (
     LearningUnitRequirement,
     LearningUnitTarget,
 )
+from app.determinism import canonical_json, content_hash
 from app.errors import AppError
 from app.models import (
     CapabilityScaleDimension,

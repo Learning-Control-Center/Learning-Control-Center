@@ -1,7 +1,10 @@
 from __future__ import annotations
 
-PORTABLE_SCHEMA_CURRENT = 4
-PORTABLE_SCHEMA_READABLE = frozenset({1, 2, 3, 4})
+import hashlib
+import json
+
+PORTABLE_SCHEMA_CURRENT = 5
+PORTABLE_SCHEMA_READABLE = frozenset({1, 2, 3, 4, 5})
 PORTABLE_V2_FOUNDATION_TABLES = frozenset(
     {
         "analysis_runs",
@@ -202,6 +205,56 @@ PORTABLE_V4_MANIFEST = {
     ],
 }
 
+PORTABLE_V5_GRAPH_PROJECTION_TABLES = frozenset(
+    {
+        "learning_graphs",
+        "learning_graph_versions",
+        "competency_edge_identities",
+        "competency_edge_definitions",
+        "active_learning_graph_states",
+        "learning_graph_activation_events",
+        "legacy_roadmap_active_states",
+        "roadmap_node_position_overrides",
+        "roadmap_projection_preferences",
+    }
+)
+PORTABLE_V1_FORBIDDEN_TABLES = frozenset(
+    set(PORTABLE_V1_FORBIDDEN_TABLES) | set(PORTABLE_V5_GRAPH_PROJECTION_TABLES)
+)
+PORTABLE_V2_FORBIDDEN_TABLES = frozenset(
+    set(PORTABLE_V2_FORBIDDEN_TABLES) | set(PORTABLE_V5_GRAPH_PROJECTION_TABLES)
+)
+PORTABLE_V3_FORBIDDEN_TABLES = frozenset(
+    set(PORTABLE_V3_FORBIDDEN_TABLES) | set(PORTABLE_V5_GRAPH_PROJECTION_TABLES)
+)
+PORTABLE_V4_FORBIDDEN_TABLES = PORTABLE_V5_GRAPH_PROJECTION_TABLES
+PORTABLE_V5_MANIFEST = {
+    "includedCanonicalDomains": [
+        *PORTABLE_V4_MANIFEST["includedCanonicalDomains"],
+        "learning_graph",
+        "roadmap_projection_manual_input",
+        "legacy_roadmap_active_state_compatibility",
+    ],
+    "includedImmutableHistory": [
+        *PORTABLE_V4_MANIFEST["includedImmutableHistory"],
+        "learning_graph_versions",
+        "learning_graph_activation_events",
+    ],
+    "omittedRebuildableState": [
+        *PORTABLE_V4_MANIFEST["omittedRebuildableState"],
+        "learning_graph_edge_satisfaction",
+        "roadmap_projection_cache",
+        "roadmap_projection_checkpoint",
+    ],
+    "restoreActions": [
+        *PORTABLE_V4_MANIFEST["restoreActions"],
+        "rebuild_learning_graph_satisfaction",
+        "rebuild_roadmap_projection",
+        "verify_roadmap_projection_hash_parity",
+        "verify_legacy_roadmap_active_state_parity",
+    ],
+}
+
 
 def upgrade_v2_to_v3_tables(tables: dict[str, list[dict[str, object]]]) -> dict[str, int]:
     """Apply the lossless v2-to-v3 empty Curriculum-domain adapter in place."""
@@ -221,6 +274,41 @@ def upgrade_v3_to_v4_tables(tables: dict[str, list[dict[str, object]]]) -> dict[
             tables[table_name] = []
             created += 1
     return {"initializedProjectTables": created}
+
+
+def upgrade_v4_to_v5_tables(tables: dict[str, list[dict[str, object]]]) -> dict[str, int]:
+    """Apply the lossless v4-to-v5 empty native Graph/Projection adapter in place."""
+    created = 0
+    for table_name in sorted(PORTABLE_V5_GRAPH_PROJECTION_TABLES):
+        if table_name not in tables:
+            if table_name == "legacy_roadmap_active_states":
+                states: list[dict[str, object]] = []
+                for roadmap in sorted(tables.get("roadmaps", []), key=lambda row: str(row["id"])):
+                    hash_payload = {
+                        "activeVersionId": roadmap.get("active_version_id"),
+                        "currentPhaseId": roadmap.get("current_phase_id"),
+                        "isCurrent": bool(roadmap.get("is_current")),
+                        "roadmapId": roadmap["id"],
+                    }
+                    states.append(
+                        {
+                            "roadmap_id": roadmap["id"],
+                            "active_version_id": roadmap.get("active_version_id"),
+                            "current_phase_id": roadmap.get("current_phase_id"),
+                            "is_current": bool(roadmap.get("is_current")),
+                            "state_hash": hashlib.sha256(
+                                json.dumps(
+                                    hash_payload, sort_keys=True, separators=(",", ":")
+                                ).encode("utf-8")
+                            ).hexdigest(),
+                            "updated_at": roadmap["updated_at"],
+                        }
+                    )
+                tables[table_name] = states
+            else:
+                tables[table_name] = []
+            created += 1
+    return {"initializedLearningGraphProjectionTables": created}
 
 
 def supports_portable_schema(version: int) -> bool:

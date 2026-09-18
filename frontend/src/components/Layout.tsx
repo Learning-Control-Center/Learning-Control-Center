@@ -6,6 +6,7 @@ import {
   FolderKanban,
   CalendarClock,
   FileOutput,
+  GitBranch,
   LogOut,
   Map,
   Menu,
@@ -22,6 +23,7 @@ import { useAuth } from '../auth'
 const navigation = [
   { to: '/', label: 'Today', icon: Sparkles },
   { to: '/roadmap', label: 'Roadmap', icon: Map },
+  { to: '/roadmap-v2', label: 'Roadmap V2 preview', icon: GitBranch },
   { to: '/curriculum', label: 'Curriculum', icon: LibraryBig },
   { to: '/projects', label: 'Projects', icon: FolderKanban },
   { to: '/sessions', label: 'Log & sessions', icon: CalendarClock },

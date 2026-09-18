@@ -94,7 +94,7 @@ def _version(db: Session, project_id: str, version_id: str) -> ProjectVersion:
 def _queue(db: Session, *, project_id: str, source_fact_id: str, requested_at: int) -> None:
     for kind, policy in (
         ("project_availability", PROJECT_AVAILABILITY_POLICY),
-        ("roadmap_projection", "roadmap-projection-policy/v1"),
+        ("roadmap_projection_v2", "roadmap-projection/v2.0"),
         ("analysis", "analysis-policy/v3"),
     ):
         db.add(

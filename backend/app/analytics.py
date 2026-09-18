@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.api_serialization import serialize_api_instants
 from app.auth import AuthContext, get_auth_context
+from app.compatibility.v1.roadmap_active_state import current_legacy_roadmap
 from app.database import get_db
 from app.domain import CONCEPTUAL_ACTIVITIES, PRACTICAL_ACTIVITIES, SUCCESSFUL_OUTCOMES
 from app.historical import HistoricalEvaluationContext
@@ -22,7 +23,6 @@ from app.models import (
     CompetencyState,
     CompetencyStatusEvent,
     LearningSession,
-    Roadmap,
     Track,
     VerificationRecord,
 )
@@ -413,7 +413,7 @@ def build_analytics(
     ]
     practical = [fact for fact in facts if fact.practical]
     independent = [fact for fact in practical if fact.independent_practical]
-    roadmap = db.scalar(select(Roadmap).where(Roadmap.is_current.is_(True)))
+    roadmap = current_legacy_roadmap(db)
     roadmap_version_id = (
         historical_context.scope.roadmap_version_id
         if historical_context is not None and historical_context.scope is not None

@@ -9,7 +9,6 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import Boolean, Integer, String, Table, Text, func, select, text
 
-from app.analysis.contracts import content_hash
 from app.capability_scales import builtin_scale_tables
 from app.compatibility.v1.activity_backfill import (
     POLICY_KEY as ACTIVITY_POLICY_KEY,
@@ -46,8 +45,21 @@ from app.curriculum.models import (
     LearningUnitRequirement,
     LearningUnitTarget,
 )
+from app.determinism import content_hash
 from app.domain import has_required_dependency_cycle
 from app.errors import AppError
+from app.learning_graph.models import (
+    ActiveLearningGraphState,
+    CompetencyEdgeDefinition,
+    CompetencyEdgeIdentity,
+    LearningGraph,
+    LearningGraphActivationEvent,
+    LearningGraphVersion,
+)
+from app.learning_graph.service import (
+    GRAPH_SATISFACTION_POLICY,
+    GRAPH_SCHEMA_VERSION,
+)
 from app.models import (
     ActiveCompetencyDefinitionState,
     ActiveTargetProfileState,
@@ -146,6 +158,11 @@ from app.projects.models import (
     SessionProjectContributionRetraction,
 )
 from app.projects.service import PROJECT_CRITERION_POLICY, evaluate_project_criterion_evidence
+from app.roadmap_projection.models import (
+    LegacyRoadmapActiveState,
+    RoadmapNodePositionOverride,
+    RoadmapProjectionPreference,
+)
 from app.schemas import validate_external_reference
 from app.time_utils import datetime_to_epoch_ms
 
@@ -2031,6 +2048,7 @@ def validate_domain_integrity(connection: Any) -> None:
     _validate_capability_history(connection)
     _validate_curriculum(connection)
     _validate_projects(connection)
+    _validate_learning_graph_and_projection(connection)
     for timezone_name in connection.execute(select(DisciplineProfile.timezone)).scalars():
         try:
             ZoneInfo(timezone_name)
@@ -4370,6 +4388,367 @@ def _validate_capability_history(connection: Any) -> None:
                 422,
                 "PORTABLE_CAPABILITY_PROJECTION_INVALID",
                 "The current review projection is disconnected from history.",
+            )
+
+
+def _validate_learning_graph_and_projection(connection: Any) -> None:
+    graphs = {row.id: row for row in connection.execute(select(*LearningGraph.__table__.c)).all()}
+    versions = {
+        row.id: row for row in connection.execute(select(*LearningGraphVersion.__table__.c)).all()
+    }
+    identities = {
+        row.id: row for row in connection.execute(select(*CompetencyEdgeIdentity.__table__.c)).all()
+    }
+    definitions = list(connection.execute(select(*CompetencyEdgeDefinition.__table__.c)).all())
+    definitions_by_version: dict[str, list[Any]] = defaultdict(list)
+    semantics = {
+        row.id: row
+        for row in connection.execute(select(*SemanticCompetencyDefinition.__table__.c)).all()
+    }
+    levels = {
+        row.id: row for row in connection.execute(select(*CapabilityScaleLevel.__table__.c)).all()
+    }
+    dimensions = {
+        row.id: row
+        for row in connection.execute(select(*CapabilityScaleDimension.__table__.c)).all()
+    }
+    semantic_dimensions = {
+        (row.semantic_definition_id, row.scale_dimension_id)
+        for row in connection.execute(select(*SemanticDefinitionDimension.__table__.c)).all()
+    }
+    criteria = {
+        row.id: row for row in connection.execute(select(*CriterionDefinition.__table__.c)).all()
+    }
+    for edge in definitions:
+        definitions_by_version[edge.learning_graph_version_id].append(edge)
+        identity = identities.get(edge.edge_identity_id)
+        version = versions.get(edge.learning_graph_version_id)
+        if (
+            identity is None
+            or version is None
+            or identity.learning_graph_id != version.learning_graph_id
+            or identity.edge_type != edge.edge_type
+            or identity.source_competency_identity_id != edge.source_competency_identity_id
+            or identity.target_competency_identity_id != edge.target_competency_identity_id
+            or (
+                edge.edge_type == "related"
+                and edge.source_competency_identity_id > edge.target_competency_identity_id
+            )
+            or (edge.edge_type == "prerequisite" and edge.requirement_kind is None)
+            or (edge.edge_type != "prerequisite" and edge.requirement_kind is not None)
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_LEARNING_GRAPH_INVALID",
+                "Learning Graph edge identity or semantics are inconsistent.",
+            )
+        try:
+            requirement = json.loads(edge.requirement_json)
+        except (TypeError, ValueError) as exc:
+            raise AppError(
+                422,
+                "PORTABLE_LEARNING_GRAPH_INVALID",
+                "A Learning Graph requirement is invalid.",
+            ) from exc
+        if not isinstance(requirement, dict) or (
+            edge.requirement_kind is not None and requirement.get("kind") != edge.requirement_kind
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_LEARNING_GRAPH_INVALID",
+                "A Learning Graph requirement does not match its typed definition.",
+            )
+        source = semantics.get(edge.source_semantic_definition_id)
+        target = semantics.get(edge.target_semantic_definition_id)
+        if source is None or target is None:
+            raise AppError(
+                422, "PORTABLE_LEARNING_GRAPH_INVALID", "Graph endpoints must be semantic facts."
+            )
+        if (
+            source.competency_identity_id != edge.source_competency_identity_id
+            or target.competency_identity_id != edge.target_competency_identity_id
+            or edge.source_competency_identity_id == edge.target_competency_identity_id
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_LEARNING_GRAPH_INVALID",
+                "Graph definitions must pin versions of their stable Competency endpoints.",
+            )
+        if edge.requirement_kind == "capability_at_least":
+            level = levels.get(requirement.get("minimum_level_id"))
+            dimension_id = requirement.get("dimension_id")
+            dimension = dimensions.get(dimension_id) if dimension_id is not None else None
+            if (
+                requirement.get("scale_version_id") != source.scale_version_id
+                or level is None
+                or level.scale_version_id != source.scale_version_id
+                or (
+                    dimension_id is not None
+                    and (dimension is None or dimension.scale_version_id != source.scale_version_id)
+                )
+                or (dimension_id is None and edge.satisfaction_scope_key != "overall")
+                or (
+                    dimension_id is not None
+                    and (
+                        (source.id, dimension_id) not in semantic_dimensions
+                        or edge.satisfaction_scope_key != f"dimension:{dimension_id}"
+                    )
+                )
+                or requirement.get("review_requirement") not in {"none", "review_due_false"}
+            ):
+                raise AppError(
+                    422,
+                    "PORTABLE_LEARNING_GRAPH_INVALID",
+                    "Native capability requirements require an exact scale version.",
+                )
+        if edge.requirement_kind == "criterion_set_demonstrated":
+            criterion_ids = requirement.get("criterion_definition_ids")
+            if (
+                not isinstance(criterion_ids, list)
+                or not criterion_ids
+                or len(criterion_ids) != len(set(criterion_ids))
+                or any(
+                    criterion_id not in criteria
+                    or criteria[criterion_id].semantic_definition_id != source.id
+                    for criterion_id in criterion_ids
+                )
+            ):
+                raise AppError(
+                    422,
+                    "PORTABLE_LEARNING_GRAPH_INVALID",
+                    "Native criterion requirements must belong to the prerequisite competency.",
+                )
+    for version in versions.values():
+        if version.learning_graph_id not in graphs:
+            raise AppError(
+                422, "PORTABLE_LEARNING_GRAPH_INVALID", "Graph version ownership is invalid."
+            )
+        try:
+            payload = json.loads(version.definition_payload_json)
+        except (TypeError, ValueError) as exc:
+            raise AppError(
+                422, "PORTABLE_LEARNING_GRAPH_INVALID", "Graph definition JSON is invalid."
+            ) from exc
+        if (
+            not isinstance(payload, dict)
+            or version.schema_version != GRAPH_SCHEMA_VERSION
+            or version.satisfaction_policy_version != GRAPH_SATISFACTION_POLICY
+            or payload.get("schema_version") != GRAPH_SCHEMA_VERSION
+            or payload.get("satisfaction_policy_version") != GRAPH_SATISFACTION_POLICY
+            or content_hash(payload) != version.content_hash
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_LEARNING_GRAPH_INVALID",
+                "Graph policy lineage or content hash is invalid.",
+            )
+        payload_edges = payload.get("edges")
+        stored_edges = sorted(
+            definitions_by_version.get(version.id, []), key=lambda row: (row.order_index, row.id)
+        )
+        if not isinstance(payload_edges, list) or len(payload_edges) != len(stored_edges):
+            raise AppError(
+                422, "PORTABLE_LEARNING_GRAPH_INVALID", "Graph payload children are incomplete."
+            )
+        prerequisite_graph: dict[str, set[str]] = defaultdict(set)
+        specialization_graph: dict[str, set[str]] = defaultdict(set)
+        pinned_definitions: dict[str, str] = {}
+        for payload_edge, stored in zip(
+            sorted(
+                payload_edges,
+                key=lambda row: (row.get("order_index", -1), row.get("stable_key", "")),
+            ),
+            stored_edges,
+            strict=True,
+        ):
+            identity = identities[stored.edge_identity_id]
+            requirement = json.loads(stored.requirement_json)
+            if (
+                not isinstance(payload_edge, dict)
+                or payload_edge.get("stable_key") != identity.stable_key
+                or payload_edge.get("edge_type") != stored.edge_type
+                or payload_edge.get("source_semantic_definition_id")
+                != stored.source_semantic_definition_id
+                or payload_edge.get("target_semantic_definition_id")
+                != stored.target_semantic_definition_id
+                or payload_edge.get("source_competency_identity_id")
+                != stored.source_competency_identity_id
+                or payload_edge.get("target_competency_identity_id")
+                != stored.target_competency_identity_id
+                or payload_edge.get("satisfaction_scope_key") != stored.satisfaction_scope_key
+                or (payload_edge.get("requirement") or {}) != requirement
+                or payload_edge.get("provenance") != stored.provenance
+                or payload_edge.get("meaning_key") != identity.meaning_key
+                or payload_edge.get("order_index") != stored.order_index
+            ):
+                raise AppError(
+                    422,
+                    "PORTABLE_LEARNING_GRAPH_INVALID",
+                    "Graph payload and typed children do not match.",
+                )
+            if stored.edge_type == "prerequisite":
+                prerequisite_graph[stored.source_competency_identity_id].add(
+                    stored.target_competency_identity_id
+                )
+            if stored.edge_type == "specialization":
+                specialization_graph[stored.source_competency_identity_id].add(
+                    stored.target_competency_identity_id
+                )
+            for competency_id, definition_id in (
+                (stored.source_competency_identity_id, stored.source_semantic_definition_id),
+                (stored.target_competency_identity_id, stored.target_semantic_definition_id),
+            ):
+                prior = pinned_definitions.setdefault(competency_id, definition_id)
+                if (
+                    prior != definition_id
+                    or semantics[definition_id].effective_at > version.effective_at
+                ):
+                    raise AppError(
+                        422,
+                        "PORTABLE_LEARNING_GRAPH_INVALID",
+                        "A graph version must pin one already-effective definition per competency.",
+                    )
+        if has_required_dependency_cycle(prerequisite_graph) or has_required_dependency_cycle(
+            specialization_graph
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_LEARNING_GRAPH_INVALID",
+                "Hard Learning Graph relations violate acyclicity.",
+            )
+    versions_by_graph: dict[str, list[Any]] = defaultdict(list)
+    for version in versions.values():
+        versions_by_graph[version.learning_graph_id].append(version)
+    for graph_id, graph_versions in versions_by_graph.items():
+        ordered_versions = sorted(graph_versions, key=lambda item: item.version)
+        if [item.version for item in ordered_versions] != list(
+            range(1, len(ordered_versions) + 1)
+        ) or any(
+            item.supersedes_version_id != (ordered_versions[index - 1].id if index else None)
+            for index, item in enumerate(ordered_versions)
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_LEARNING_GRAPH_INVALID",
+                f"Graph version lineage is not contiguous for {graph_id}.",
+            )
+    activation_rows = sorted(
+        connection.execute(select(*LearningGraphActivationEvent.__table__.c)).all(),
+        key=lambda row: (row.event_sequence, row.id),
+    )
+    previous_version_id: str | None = None
+    previous_activated_at: int | None = None
+    last_version_number_by_graph: dict[str, int] = {}
+    for expected_sequence, event in enumerate(activation_rows, start=1):
+        to_version = versions.get(event.to_learning_graph_version_id)
+        from_version = versions.get(event.from_learning_graph_version_id)
+        if (
+            event.event_sequence != expected_sequence
+            or event.learning_graph_id not in graphs
+            or to_version is None
+            or to_version.learning_graph_id != event.learning_graph_id
+            or event.from_learning_graph_version_id != previous_version_id
+            or (event.from_learning_graph_version_id is not None and from_version is None)
+            or (previous_activated_at is not None and event.activated_at < previous_activated_at)
+            or to_version.effective_at > event.activated_at
+            or to_version.version < last_version_number_by_graph.get(event.learning_graph_id, 0)
+        ):
+            raise AppError(
+                422, "PORTABLE_LEARNING_GRAPH_INVALID", "Graph activation history is invalid."
+            )
+        previous_version_id = event.to_learning_graph_version_id
+        previous_activated_at = event.activated_at
+        last_version_number_by_graph[event.learning_graph_id] = to_version.version
+    states = list(connection.execute(select(*ActiveLearningGraphState.__table__.c)).all())
+    if len(states) != (1 if activation_rows else 0):
+        raise AppError(
+            422, "PORTABLE_LEARNING_GRAPH_INVALID", "Current Graph state is not replayable."
+        )
+    if states:
+        state = states[0]
+        latest = activation_rows[-1]
+        if (
+            state.id != 1
+            or state.learning_graph_id != latest.learning_graph_id
+            or state.learning_graph_version_id != latest.to_learning_graph_version_id
+            or state.activated_at != latest.activated_at
+        ):
+            raise AppError(
+                422, "PORTABLE_LEARNING_GRAPH_INVALID", "Current Graph state is not replayable."
+            )
+    profile_versions = {row.id for row in connection.execute(select(TargetProfileVersion.id)).all()}
+    profile_targets_by_version: dict[str, set[str]] = defaultdict(set)
+    profile_target_identities = {
+        row.id: row.competency_identity_id
+        for row in connection.execute(
+            select(ProfileTargetIdentity.id, ProfileTargetIdentity.competency_identity_id)
+        ).all()
+    }
+    for row in connection.execute(
+        select(ProfileTarget.profile_version_id, ProfileTarget.target_identity_id)
+    ).all():
+        profile_targets_by_version[row.profile_version_id].add(
+            profile_target_identities[row.target_identity_id]
+        )
+    graph_nodes_by_version: dict[str, set[str]] = defaultdict(set)
+    for edge in definitions:
+        graph_nodes_by_version[edge.learning_graph_version_id].update(
+            {edge.source_competency_identity_id, edge.target_competency_identity_id}
+        )
+    projection_input_rows = [
+        *connection.execute(select(*RoadmapNodePositionOverride.__table__.c)).all(),
+        *connection.execute(select(*RoadmapProjectionPreference.__table__.c)).all(),
+    ]
+    for row in projection_input_rows:
+        parts = row.scope_key.split(":")
+        if (
+            len(parts) != 4
+            or parts[0] != "profile"
+            or parts[2] != "graph"
+            or parts[1] not in profile_versions
+            or parts[3] not in versions
+            or (
+                hasattr(row, "node_key")
+                and row.node_key
+                not in (profile_targets_by_version[parts[1]] | graph_nodes_by_version[parts[3]])
+            )
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_ROADMAP_PROJECTION_INPUT_INVALID",
+                "A Roadmap Projection override or preference has invalid scope.",
+            )
+    roadmaps = {row.id: row for row in connection.execute(select(*Roadmap.__table__.c)).all()}
+    compatibility_states = {
+        row.roadmap_id: row
+        for row in connection.execute(select(*LegacyRoadmapActiveState.__table__.c)).all()
+    }
+    if set(roadmaps) != set(compatibility_states):
+        raise AppError(
+            422,
+            "PORTABLE_LEGACY_ROADMAP_STATE_INVALID",
+            "Every legacy Roadmap requires exact active-state compatibility data.",
+        )
+    for roadmap_id, roadmap in roadmaps.items():
+        state = compatibility_states[roadmap_id]
+        expected_hash = content_hash(
+            {
+                "roadmapId": roadmap.id,
+                "activeVersionId": roadmap.active_version_id,
+                "currentPhaseId": roadmap.current_phase_id,
+                "isCurrent": bool(roadmap.is_current),
+            }
+        )
+        if (
+            state.active_version_id != roadmap.active_version_id
+            or state.current_phase_id != roadmap.current_phase_id
+            or bool(state.is_current) != bool(roadmap.is_current)
+            or state.state_hash != expected_hash
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_LEGACY_ROADMAP_STATE_INVALID",
+                "Legacy Roadmap active-state hashes do not match.",
             )
 
 

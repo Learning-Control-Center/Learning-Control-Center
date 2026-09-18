@@ -456,7 +456,10 @@ async def test_definition_activation_invalidations_are_durable_and_drained(
     pending = db.scalars(
         select(ProjectionInvalidation).where(ProjectionInvalidation.status == "pending")
     ).all()
-    assert {item.projection_kind for item in pending} == {"analysis"}
+    assert {item.projection_kind for item in pending} == {
+        "analysis",
+        "roadmap_projection_v2",
+    }
     completed = db.scalars(
         select(ProjectionInvalidation).where(ProjectionInvalidation.status == "completed")
     ).all()
@@ -564,7 +567,7 @@ async def test_explicit_authoritative_reassessment_downgrades_and_drains(
         "capability-policy/v999"
     )
     with pytest.raises(AppError, match="Capability evaluation hashes or facts"):
-        _validate_portable_payload(invalid_policy, "capability-policy-tampered", schema_version=4)
+        _validate_portable_payload(invalid_policy, "capability-policy-tampered", schema_version=5)
     invalid_event = copy.deepcopy(portable)
     authoritative_event = next(
         row
@@ -573,12 +576,12 @@ async def test_explicit_authoritative_reassessment_downgrades_and_drains(
     )
     authoritative_event["new_confidence"] = "high"
     with pytest.raises(AppError, match="Capability or review event history"):
-        _validate_portable_payload(invalid_event, "capability-event-tampered", schema_version=4)
+        _validate_portable_payload(invalid_event, "capability-event-tampered", schema_version=5)
     invalid_checkpoint = copy.deepcopy(portable)
     invalid_checkpoint["capabilityProjectionCheckpoints"][0]["outputHash"] = "0" * 64
     with pytest.raises(AppError, match="checkpoint is disconnected"):
         _validate_portable_payload(
-            invalid_checkpoint, "capability-checkpoint-tampered", schema_version=4
+            invalid_checkpoint, "capability-checkpoint-tampered", schema_version=5
         )
 
 

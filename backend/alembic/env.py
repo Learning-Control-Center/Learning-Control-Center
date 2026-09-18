@@ -6,7 +6,9 @@ from alembic import context
 from app import models  # noqa: F401
 from app.curriculum import models as curriculum_models  # noqa: F401
 from app.database import Base
+from app.learning_graph import models as learning_graph_models  # noqa: F401
 from app.projects import models as project_models  # noqa: F401
+from app.roadmap_projection import models as roadmap_projection_models  # noqa: F401
 from sqlalchemy import engine_from_config, pool
 
 config = context.config
