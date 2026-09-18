@@ -26,6 +26,14 @@ from app.models import (
     ProjectionInvalidation,
     SessionContribution,
 )
+from app.projects.models import (
+    ActiveProjectVersionState,
+    Project,
+    ProjectTaskDefinition,
+    ProjectVersion,
+    SessionProjectContribution,
+    SessionProjectContributionRetraction,
+)
 from app.schemas import (
     ActivityCreate,
     SessionContributionCreate,
@@ -41,22 +49,53 @@ router = APIRouter(tags=["v2 activities and sessions"])
 
 def _validated_contribution_targets(
     db: Session, payloads: list[SessionContributionCreate]
-) -> list[tuple[SessionContributionCreate, CompetencyIdentity, CriterionIdentity | None]]:
-    if sum(item.relevance == "primary" for item in payloads) > 1:
+) -> list[SessionContributionCreate]:
+    if (
+        sum(item.relevance == "primary" and item.target_type == "competency" for item in payloads)
+        > 1
+    ):
         raise AppError(
             422, "PRIMARY_CONTRIBUTION_EXISTS", "Only one Primary competency is allowed."
         )
-    seen: set[tuple[str, str | None]] = set()
-    validated: list[
-        tuple[SessionContributionCreate, CompetencyIdentity, CriterionIdentity | None]
-    ] = []
+    if sum(item.relevance == "primary" and item.target_type == "project" for item in payloads) > 1:
+        raise AppError(
+            422, "PRIMARY_PROJECT_CONTRIBUTION_EXISTS", "Only one Primary Project is allowed."
+        )
+    seen: set[tuple[str, str | None, str | None]] = set()
     for payload in payloads:
         if payload.target_type == "project":
-            raise AppError(
-                422,
-                "FEATURE_NOT_AVAILABLE",
-                "Project contributions are unavailable until the canonical Project model exists.",
+            assert payload.project_id is not None
+            project = db.get(Project, payload.project_id)
+            active = db.get(ActiveProjectVersionState, payload.project_id)
+            version_id = payload.project_version_id or (
+                active.project_version_id if active is not None else None
             )
+            version = db.get(ProjectVersion, version_id) if version_id else None
+            task = (
+                db.get(ProjectTaskDefinition, payload.project_task_definition_id)
+                if payload.project_task_definition_id
+                else None
+            )
+            if (
+                project is None
+                or version is None
+                or version.project_id != project.id
+                or (task is not None and task.project_version_id != version.id)
+                or (payload.project_task_definition_id is not None and task is None)
+            ):
+                raise AppError(
+                    422,
+                    "SESSION_CONTRIBUTION_INVALID",
+                    "Project contribution target is invalid.",
+                )
+            payload.project_version_id = version.id
+            project_target = (project.id, version.id, task.id if task else None)
+            if project_target in seen:
+                raise AppError(
+                    422, "SESSION_CONTRIBUTION_INVALID", "Contribution target is duplicated."
+                )
+            seen.add(project_target)
+            continue
         assert payload.competency_identity_id is not None
         competency = db.get(CompetencyIdentity, payload.competency_identity_id)
         criterion = (
@@ -64,35 +103,66 @@ def _validated_contribution_targets(
             if payload.criterion_identity_id
             else None
         )
-        target = (payload.competency_identity_id, payload.criterion_identity_id)
+        competency_target = (
+            payload.competency_identity_id,
+            payload.criterion_identity_id,
+            None,
+        )
         if (
             competency is None
-            or target in seen
+            or competency_target in seen
             or (
                 payload.criterion_identity_id
                 and (criterion is None or criterion.competency_identity_id != competency.id)
             )
         ):
             raise AppError(422, "SESSION_CONTRIBUTION_INVALID", "Contribution target is invalid.")
-        seen.add(target)
-        validated.append((payload, competency, criterion))
-    return validated
+        seen.add(competency_target)
+    return payloads
 
 
 def _add_initial_contributions(
     db: Session,
     session: LearningSession,
-    validated: list[tuple[SessionContributionCreate, CompetencyIdentity, CriterionIdentity | None]],
+    validated: list[SessionContributionCreate],
 ) -> None:
-    for payload, competency, _criterion in validated:
-        contribution = SessionContribution(
+    for payload in validated:
+        if payload.target_type == "project":
+            assert payload.project_id is not None and payload.project_version_id is not None
+            project_contribution = SessionProjectContribution(
+                session_id=session.id,
+                project_id=payload.project_id,
+                project_version_id=payload.project_version_id,
+                task_definition_id=payload.project_task_definition_id,
+                relevance=payload.relevance,
+                provenance=payload.provenance,
+            )
+            db.add(project_contribution)
+            db.flush()
+            db.add(
+                ProjectionInvalidation(
+                    projection_kind="analysis",
+                    subject_type="learning_session",
+                    subject_id=session.id,
+                    source_fact_id=project_contribution.id,
+                    target_policy_version="analysis-policy/v3",
+                    status="pending",
+                    attempt_count=0,
+                    requested_at=utc_now_ms(),
+                )
+            )
+            continue
+        assert payload.competency_identity_id is not None
+        competency = db.get(CompetencyIdentity, payload.competency_identity_id)
+        assert competency is not None
+        competency_contribution = SessionContribution(
             session_id=session.id,
             competency_identity_id=competency.id,
             criterion_identity_id=payload.criterion_identity_id,
             relevance=payload.relevance,
             provenance=payload.provenance,
         )
-        db.add(contribution)
+        db.add(competency_contribution)
         db.flush()
         if payload.relevance == "primary":
             session.competency_identity_id = competency.id
@@ -101,7 +171,7 @@ def _add_initial_contributions(
                 projection_kind="analysis",
                 subject_type="learning_session",
                 subject_id=session.id,
-                source_fact_id=contribution.id,
+                source_fact_id=competency_contribution.id,
                 target_policy_version="analysis-policy/v1",
                 status="pending",
                 attempt_count=0,
@@ -147,6 +217,22 @@ def _serialize_session(
         .where(SessionContribution.session_id == item.id)
         .order_by(SessionContribution.created_at, SessionContribution.id)
     ).all()
+    retracted_project_ids = set(
+        db.scalars(
+            select(SessionProjectContributionRetraction.contribution_id)
+            .join(
+                SessionProjectContribution,
+                SessionProjectContribution.id
+                == SessionProjectContributionRetraction.contribution_id,
+            )
+            .where(SessionProjectContribution.session_id == item.id)
+        ).all()
+    )
+    project_contributions = db.scalars(
+        select(SessionProjectContribution)
+        .where(SessionProjectContribution.session_id == item.id)
+        .order_by(SessionProjectContribution.created_at, SessionProjectContribution.id)
+    ).all()
     payload.update(
         {
             "activityId": item.activity_id,
@@ -162,6 +248,20 @@ def _serialize_session(
                     "retracted": contribution.id in retracted_ids,
                 }
                 for contribution in contributions
+            ]
+            + [
+                {
+                    "id": contribution.id,
+                    "targetType": "project",
+                    "projectId": contribution.project_id,
+                    "projectVersionId": contribution.project_version_id,
+                    "projectTaskDefinitionId": contribution.task_definition_id,
+                    "relevance": contribution.relevance,
+                    "provenance": contribution.provenance,
+                    "createdAt": epoch_ms_to_rfc3339(contribution.created_at),
+                    "retracted": contribution.id in retracted_project_ids,
+                }
+                for contribution in project_contributions
             ],
         }
     )
@@ -362,11 +462,67 @@ async def add_session_contribution(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     session = db.get(LearningSession, session_id)
+    if session is None or session.tombstoned_at is not None:
+        raise AppError(404, "SESSION_NOT_FOUND", "The session does not exist.")
     if payload.target_type == "project":
-        raise AppError(
-            422,
-            "FEATURE_NOT_AVAILABLE",
-            "Project contributions are unavailable until the canonical Project model exists.",
+        _validated_contribution_targets(db, [payload])
+        assert payload.project_id is not None and payload.project_version_id is not None
+        active_project_contributions = db.scalars(
+            select(SessionProjectContribution)
+            .outerjoin(
+                SessionProjectContributionRetraction,
+                SessionProjectContributionRetraction.contribution_id
+                == SessionProjectContribution.id,
+            )
+            .where(
+                SessionProjectContribution.session_id == session_id,
+                SessionProjectContributionRetraction.id.is_(None),
+            )
+        ).all()
+        if payload.relevance == "primary" and any(
+            item.relevance == "primary" for item in active_project_contributions
+        ):
+            raise AppError(
+                409,
+                "PRIMARY_PROJECT_CONTRIBUTION_EXISTS",
+                "The Session already has a Primary Project.",
+            )
+        if any(
+            item.project_id == payload.project_id
+            and item.project_version_id == payload.project_version_id
+            and item.task_definition_id == payload.project_task_definition_id
+            for item in active_project_contributions
+        ):
+            raise AppError(
+                409, "SESSION_CONTRIBUTION_EXISTS", "The Project contribution already exists."
+            )
+        project_contribution = SessionProjectContribution(
+            session_id=session.id,
+            project_id=payload.project_id,
+            project_version_id=payload.project_version_id,
+            task_definition_id=payload.project_task_definition_id,
+            relevance=payload.relevance,
+            provenance=payload.provenance,
+        )
+        db.add(project_contribution)
+        db.flush()
+        db.add(
+            ProjectionInvalidation(
+                projection_kind="analysis",
+                subject_type="learning_session",
+                subject_id=session.id,
+                source_fact_id=project_contribution.id,
+                target_policy_version="analysis-policy/v3",
+                status="pending",
+                attempt_count=0,
+                requested_at=utc_now_ms(),
+            )
+        )
+        db.commit()
+        return next(
+            value
+            for value in _serialize_session(db, session)["contributions"]
+            if value["id"] == project_contribution.id
         )
     assert payload.competency_identity_id is not None
     competency = db.get(CompetencyIdentity, payload.competency_identity_id)
@@ -375,14 +531,12 @@ async def add_session_contribution(
         if payload.criterion_identity_id
         else None
     )
-    if session is None or session.tombstoned_at is not None:
-        raise AppError(404, "SESSION_NOT_FOUND", "The session does not exist.")
     if competency is None or (
         payload.criterion_identity_id
         and (criterion is None or criterion.competency_identity_id != competency.id)
     ):
         raise AppError(422, "SESSION_CONTRIBUTION_INVALID", "Contribution target is invalid.")
-    active = db.scalars(
+    active_competency_contributions = db.scalars(
         select(SessionContribution)
         .outerjoin(
             ContributionRetraction,
@@ -393,14 +547,16 @@ async def add_session_contribution(
             ContributionRetraction.id.is_(None),
         )
     ).all()
-    if payload.relevance == "primary" and any(item.relevance == "primary" for item in active):
+    if payload.relevance == "primary" and any(
+        item.relevance == "primary" for item in active_competency_contributions
+    ):
         raise AppError(
             409, "PRIMARY_CONTRIBUTION_EXISTS", "The Session already has a Primary competency."
         )
     if any(
         item.competency_identity_id == payload.competency_identity_id
         and item.criterion_identity_id == payload.criterion_identity_id
-        for item in active
+        for item in active_competency_contributions
     ):
         raise AppError(409, "SESSION_CONTRIBUTION_EXISTS", "The contribution already exists.")
     contribution = SessionContribution(
@@ -440,7 +596,41 @@ async def retract_session_contribution(
     db: Session = Depends(get_db),
 ) -> dict[str, bool]:
     contribution = db.get(SessionContribution, contribution_id)
-    if contribution is None or contribution.session_id != session_id:
+    if contribution is None:
+        project_contribution = db.get(SessionProjectContribution, contribution_id)
+        if project_contribution is None or project_contribution.session_id != session_id:
+            raise AppError(
+                404, "SESSION_CONTRIBUTION_NOT_FOUND", "The contribution does not exist."
+            )
+        if db.scalar(
+            select(SessionProjectContributionRetraction.id).where(
+                SessionProjectContributionRetraction.contribution_id == contribution_id
+            )
+        ):
+            return {"retracted": True}
+        now = utc_now_ms()
+        project_retraction = SessionProjectContributionRetraction(
+            contribution_id=contribution_id,
+            reason="Project contribution retracted through the V2 API.",
+            retracted_at=now,
+        )
+        db.add(project_retraction)
+        db.flush()
+        db.add(
+            ProjectionInvalidation(
+                projection_kind="analysis",
+                subject_type="learning_session",
+                subject_id=session_id,
+                source_fact_id=project_retraction.id,
+                target_policy_version="analysis-policy/v3",
+                status="pending",
+                attempt_count=0,
+                requested_at=now,
+            )
+        )
+        db.commit()
+        return {"retracted": True}
+    if contribution.session_id != session_id:
         raise AppError(404, "SESSION_CONTRIBUTION_NOT_FOUND", "The contribution does not exist.")
     if db.scalar(
         select(ContributionRetraction.id).where(

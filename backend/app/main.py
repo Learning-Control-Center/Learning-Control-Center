@@ -25,6 +25,8 @@ from app.evidence import router as evidence_router
 from app.import_export import router as import_export_router
 from app.models import User
 from app.operation_lock import exclusive_operation_lock
+from app.projects import models as project_models  # noqa: F401
+from app.projects.api import router as project_router
 from app.recommendations import router as recommendation_router
 from app.reflections import router as reflection_router
 from app.reports import backfill_reports, report_scheduler
@@ -155,3 +157,4 @@ app.include_router(v2_activity_router, prefix="/api/v2")
 app.include_router(evidence_router, prefix="/api/v2")
 app.include_router(capability_router, prefix="/api/v2")
 app.include_router(curriculum_router, prefix="/api/v2")
+app.include_router(project_router, prefix="/api/v2")

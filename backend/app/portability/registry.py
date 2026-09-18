@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-PORTABLE_SCHEMA_CURRENT = 3
-PORTABLE_SCHEMA_READABLE = frozenset({1, 2, 3})
+PORTABLE_SCHEMA_CURRENT = 4
+PORTABLE_SCHEMA_READABLE = frozenset({1, 2, 3, 4})
 PORTABLE_V2_FOUNDATION_TABLES = frozenset(
     {
         "analysis_runs",
@@ -139,6 +139,69 @@ PORTABLE_V3_MANIFEST = {
     ],
 }
 
+PORTABLE_V4_PROJECT_TABLES = frozenset(
+    {
+        "projects",
+        "project_versions",
+        "project_goal_identities",
+        "project_goal_definitions",
+        "project_task_identities",
+        "project_task_definitions",
+        "project_criterion_identities",
+        "project_criterion_definitions",
+        "project_milestone_identities",
+        "project_milestone_definitions",
+        "project_targets",
+        "project_requirements",
+        "project_task_dependencies",
+        "project_evidence_opportunities",
+        "active_project_version_states",
+        "project_version_activation_events",
+        "project_events",
+        "activity_project_task_links",
+        "activity_project_task_link_corrections",
+        "session_project_contributions",
+        "session_project_contribution_retractions",
+        "project_criterion_evaluations",
+        "project_criterion_evaluation_evidence",
+    }
+)
+PORTABLE_V1_FORBIDDEN_TABLES = frozenset(
+    set(PORTABLE_V1_FORBIDDEN_TABLES) | set(PORTABLE_V4_PROJECT_TABLES)
+)
+PORTABLE_V2_FORBIDDEN_TABLES = frozenset(
+    set(PORTABLE_V2_FORBIDDEN_TABLES) | set(PORTABLE_V4_PROJECT_TABLES)
+)
+PORTABLE_V3_FORBIDDEN_TABLES = PORTABLE_V4_PROJECT_TABLES
+PORTABLE_V4_MANIFEST = {
+    "includedCanonicalDomains": [
+        *PORTABLE_V3_MANIFEST["includedCanonicalDomains"],
+        "projects",
+        "project_activity_and_session_attribution",
+        "project_evidence_evaluations",
+    ],
+    "includedImmutableHistory": [
+        *PORTABLE_V3_MANIFEST["includedImmutableHistory"],
+        "project_versions",
+        "project_version_activation_events",
+        "project_events",
+        "activity_project_task_link_corrections",
+        "session_project_contribution_retractions",
+        "project_criterion_evaluations",
+    ],
+    "omittedRebuildableState": [
+        *PORTABLE_V3_MANIFEST["omittedRebuildableState"],
+        "project_current_lifecycle",
+        "project_task_availability",
+    ],
+    "restoreActions": [
+        *PORTABLE_V3_MANIFEST["restoreActions"],
+        "rebuild_project_current_state",
+        "rebuild_project_task_availability",
+        "verify_project_catalog_hash_parity",
+    ],
+}
+
 
 def upgrade_v2_to_v3_tables(tables: dict[str, list[dict[str, object]]]) -> dict[str, int]:
     """Apply the lossless v2-to-v3 empty Curriculum-domain adapter in place."""
@@ -148,6 +211,16 @@ def upgrade_v2_to_v3_tables(tables: dict[str, list[dict[str, object]]]) -> dict[
             tables[table_name] = []
             created += 1
     return {"initializedCurriculumTables": created}
+
+
+def upgrade_v3_to_v4_tables(tables: dict[str, list[dict[str, object]]]) -> dict[str, int]:
+    """Apply the lossless v3-to-v4 empty Project-domain adapter in place."""
+    created = 0
+    for table_name in sorted(PORTABLE_V4_PROJECT_TABLES):
+        if table_name not in tables:
+            tables[table_name] = []
+            created += 1
+    return {"initializedProjectTables": created}
 
 
 def supports_portable_schema(version: int) -> bool:

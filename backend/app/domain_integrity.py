@@ -75,6 +75,7 @@ from app.models import (
     CriterionIdentity,
     DisciplineProfile,
     Evidence,
+    EvidenceInvalidation,
     EvidenceLink,
     EvidenceLinkRetraction,
     EvidenceRedaction,
@@ -114,6 +115,37 @@ from app.models import (
     VerificationEvidence,
     VerificationRecord,
 )
+from app.projects.contracts import ProjectVersionInput
+from app.projects.evidence_policy import (
+    PROJECT_EVIDENCE_POLICY,
+    derive_project_evidence_characteristics,
+)
+from app.projects.models import (
+    ActiveProjectVersionState,
+    ActivityProjectTaskLink,
+    ActivityProjectTaskLinkCorrection,
+    Project,
+    ProjectCriterionDefinition,
+    ProjectCriterionEvaluation,
+    ProjectCriterionEvaluationEvidence,
+    ProjectCriterionIdentity,
+    ProjectEvent,
+    ProjectEvidenceOpportunity,
+    ProjectGoalDefinition,
+    ProjectGoalIdentity,
+    ProjectMilestoneDefinition,
+    ProjectMilestoneIdentity,
+    ProjectRequirement,
+    ProjectTarget,
+    ProjectTaskDefinition,
+    ProjectTaskDependency,
+    ProjectTaskIdentity,
+    ProjectVersion,
+    ProjectVersionActivationEvent,
+    SessionProjectContribution,
+    SessionProjectContributionRetraction,
+)
+from app.projects.service import PROJECT_CRITERION_POLICY, evaluate_project_criterion_evidence
 from app.schemas import validate_external_reference
 from app.time_utils import datetime_to_epoch_ms
 
@@ -174,6 +206,11 @@ def _validate_json_columns(connection: Any) -> None:
         (EvidenceOpportunityDefinition, "possible_characteristics_json"),
         (EvidenceOpportunityDefinition, "required_characteristics_json"),
         (AssessmentRubricDefinition, "rubric_json"),
+        (ProjectVersion, "definition_payload_json"),
+        (ProjectRequirement, "subject_json"),
+        (ProjectEvidenceOpportunity, "intended_characteristics_json"),
+        (ProjectEvent, "payload_json"),
+        (ProjectCriterionEvaluation, "facts_json"),
     )
     for model, column_name in json_columns:
         column = getattr(model, column_name)
@@ -926,6 +963,9 @@ def _validate_v2_profile_competency(connection: Any) -> None:
                 "A readiness gate target crosses profile versions.",
             )
     criterion_identity_ids = set(connection.execute(select(CriterionIdentity.id)).scalars())
+    project_criterion_identity_ids = set(
+        connection.execute(select(ProjectCriterionIdentity.id)).scalars()
+    )
     expected_subject_keys = {
         "capability_at_least": {
             "competencyIdentityId",
@@ -935,6 +975,7 @@ def _validate_v2_profile_competency(connection: Any) -> None:
             "levelStableKey",
         },
         "criterion_demonstrated": {"criterionIdentityId"},
+        "project_criterion_demonstrated": {"projectCriterionIdentityId"},
         "evidence_present": {"evidencePolicyStableKey"},
     }
     for predicate in connection.execute(
@@ -947,13 +988,14 @@ def _validate_v2_profile_competency(connection: Any) -> None:
         subject = json.loads(predicate.subject_json)
         invalid = (
             predicate.gate_id not in gates
-            or predicate.predicate_type == "project_criterion_demonstrated"
             or predicate.predicate_type not in expected_subject_keys
             or not isinstance(subject, dict)
             or set(subject) != expected_subject_keys.get(predicate.predicate_type, set())
         )
         if not invalid and predicate.predicate_type == "criterion_demonstrated":
             invalid = subject["criterionIdentityId"] not in criterion_identity_ids
+        if not invalid and predicate.predicate_type == "project_criterion_demonstrated":
+            invalid = subject["projectCriterionIdentityId"] not in project_criterion_identity_ids
         if not invalid and predicate.predicate_type == "capability_at_least":
             scale = next(
                 (
@@ -1660,6 +1702,8 @@ def _validate_evidence(connection: Any) -> None:
             "source_unspecified",
             "user_unspecified",
             "import_unspecified",
+            "activity_outcome_unknown",
+            "session_assistance_unknown",
         }
         unknown_reasons = (
             item.strength_unknown_reason,
@@ -1986,6 +2030,7 @@ def validate_domain_integrity(connection: Any) -> None:
     _validate_evidence(connection)
     _validate_capability_history(connection)
     _validate_curriculum(connection)
+    _validate_projects(connection)
     for timezone_name in connection.execute(select(DisciplineProfile.timezone)).scalars():
         try:
             ZoneInfo(timezone_name)
@@ -2698,6 +2743,1359 @@ def _validate_curriculum(connection: Any) -> None:
                 )
             seen.add(current)
             current = replacement_edges.get(current)
+
+
+def _validate_projects(connection: Any) -> None:
+    projects = {item.id: item for item in connection.execute(select(*Project.__table__.c)).all()}
+    versions = {
+        item.id: item for item in connection.execute(select(*ProjectVersion.__table__.c)).all()
+    }
+    normalized_by_version: dict[str, dict[str, Any]] = {}
+    identities_by_kind = {
+        "goal": {
+            item.id: item
+            for item in connection.execute(select(*ProjectGoalIdentity.__table__.c)).all()
+        },
+        "task": {
+            item.id: item
+            for item in connection.execute(select(*ProjectTaskIdentity.__table__.c)).all()
+        },
+        "criterion": {
+            item.id: item
+            for item in connection.execute(select(*ProjectCriterionIdentity.__table__.c)).all()
+        },
+        "milestone": {
+            item.id: item
+            for item in connection.execute(select(*ProjectMilestoneIdentity.__table__.c)).all()
+        },
+    }
+    grouped_versions: dict[str, list[Any]] = defaultdict(list)
+    for version in versions.values():
+        grouped_versions[version.project_id].append(version)
+        try:
+            parsed = ProjectVersionInput.model_validate(json.loads(version.definition_payload_json))
+        except Exception as exc:
+            raise AppError(
+                422,
+                "PORTABLE_PROJECT_INVALID",
+                "A Project definition envelope is malformed.",
+            ) from exc
+        normalized = parsed.model_dump(mode="json")
+        for key in (
+            "goals",
+            "milestones",
+            "tasks",
+            "criteria",
+            "targets",
+            "requirements",
+            "evidence_opportunities",
+        ):
+            normalized[key] = sorted(
+                normalized[key], key=lambda item: (item["order_index"], item.get("stable_key", ""))
+            )
+        for opportunity in normalized["evidence_opportunities"]:
+            opportunity["intended_strengths"] = sorted(opportunity["intended_strengths"])
+            opportunity["intended_independence_modes"] = sorted(
+                opportunity["intended_independence_modes"]
+            )
+        normalized["dependencies"] = sorted(
+            normalized["dependencies"],
+            key=lambda item: (
+                item["dependent_task_stable_key"],
+                item["prerequisite_task_stable_key"],
+                item["dependency_type"],
+            ),
+        )
+        normalized_by_version[version.id] = normalized
+        if (
+            version.project_id not in projects
+            or version.schema_version != "project-definition/v1"
+            or version.content_hash != content_hash(normalized)
+            or json.loads(version.definition_payload_json) != normalized
+            or version.title != normalized["title"]
+            or version.description != normalized["description"]
+            or version.effective_at != datetime_to_epoch_ms(parsed.effective_at)
+            or version.creation_source != normalized["creation_source"]
+            or version.created_at < projects[version.project_id].created_at
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_PROJECT_INVALID",
+                "Project version lineage or content hashing is inconsistent.",
+            )
+    for _project_id, items in grouped_versions.items():
+        ordered = sorted(items, key=lambda item: item.version)
+        if [item.version for item in ordered] != list(range(1, len(ordered) + 1)):
+            raise AppError(
+                422,
+                "PORTABLE_PROJECT_INVALID",
+                "Project versions must be contiguous per aggregate.",
+            )
+        for index, item in enumerate(ordered):
+            expected = ordered[index - 1].id if index else None
+            if item.supersedes_version_id != expected:
+                raise AppError(
+                    422,
+                    "PORTABLE_PROJECT_INVALID",
+                    "Project version supersession lineage is inconsistent.",
+                )
+    for values in identities_by_kind.values():
+        for identity in values.values():
+            if (
+                identity.project_id not in projects
+                or identity.created_at < projects[identity.project_id].created_at
+            ):
+                raise AppError(
+                    422,
+                    "PORTABLE_PROJECT_INVALID",
+                    "A Project stable identity has invalid ownership or chronology.",
+                )
+    task_defs = {
+        item.id: item
+        for item in connection.execute(select(*ProjectTaskDefinition.__table__.c)).all()
+    }
+    criterion_defs = {
+        item.id: item
+        for item in connection.execute(select(*ProjectCriterionDefinition.__table__.c)).all()
+    }
+    goal_defs = list(connection.execute(select(*ProjectGoalDefinition.__table__.c)).all())
+    milestone_defs = list(connection.execute(select(*ProjectMilestoneDefinition.__table__.c)).all())
+    for model, identity_kind, identity_column in (
+        (ProjectGoalDefinition, "goal", "goal_identity_id"),
+        (ProjectMilestoneDefinition, "milestone", "milestone_identity_id"),
+        (ProjectTaskDefinition, "task", "task_identity_id"),
+        (ProjectCriterionDefinition, "criterion", "criterion_identity_id"),
+    ):
+        for definition in connection.execute(select(*model.__table__.c)):
+            version = versions.get(definition.project_version_id)
+            identity = identities_by_kind[identity_kind].get(getattr(definition, identity_column))
+            if version is None or identity is None or identity.project_id != version.project_id:
+                raise AppError(
+                    422,
+                    "PORTABLE_PROJECT_INVALID",
+                    "A Project definition crosses aggregate boundaries.",
+                )
+            milestone_id = getattr(definition, "milestone_identity_id", None)
+            if milestone_id is not None:
+                milestone_identity = identities_by_kind["milestone"].get(milestone_id)
+                if (
+                    milestone_identity is None
+                    or milestone_identity.project_id != version.project_id
+                ):
+                    raise AppError(
+                        422,
+                        "PORTABLE_PROJECT_INVALID",
+                        "A Project definition references another aggregate's milestone.",
+                    )
+            if (
+                model is ProjectCriterionDefinition
+                and definition.evaluation_policy_version != PROJECT_CRITERION_POLICY
+            ):
+                raise AppError(
+                    422,
+                    "PORTABLE_PROJECT_INVALID",
+                    "A ProjectCriterion declares an unsupported evaluation policy.",
+                )
+    targets = list(connection.execute(select(*ProjectTarget.__table__.c)).all())
+    requirements = list(connection.execute(select(*ProjectRequirement.__table__.c)).all())
+    dependencies = list(connection.execute(select(*ProjectTaskDependency.__table__.c)).all())
+    opportunities = list(connection.execute(select(*ProjectEvidenceOpportunity.__table__.c)).all())
+    opportunity_characteristics: dict[str, dict[str, Any]] = {}
+    for item in opportunities:
+        try:
+            parsed_characteristics = json.loads(item.intended_characteristics_json)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise AppError(
+                422,
+                "PORTABLE_PROJECT_INVALID",
+                "A Project Evidence opportunity has malformed characteristics.",
+            ) from exc
+        if (
+            not isinstance(parsed_characteristics, dict)
+            or set(parsed_characteristics)
+            != {
+                "intended_strengths",
+                "intended_independence_modes",
+                "requires_artifact",
+            }
+            or not isinstance(parsed_characteristics["intended_strengths"], list)
+            or not isinstance(parsed_characteristics["intended_independence_modes"], list)
+            or not isinstance(parsed_characteristics["requires_artifact"], bool)
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_PROJECT_INVALID",
+                "A Project Evidence opportunity has malformed characteristics.",
+            )
+        opportunity_characteristics[item.id] = parsed_characteristics
+
+    def stable_key(kind: str, identity_id: str | None) -> str | None:
+        if identity_id is None:
+            return None
+        identity = identities_by_kind[kind].get(identity_id)
+        return identity.stable_key if identity is not None else None
+
+    for version_id, expected in normalized_by_version.items():
+        actual_goals = sorted(
+            [
+                {
+                    "stable_key": stable_key("goal", item.goal_identity_id),
+                    "title": item.title,
+                    "description": item.description,
+                    "order_index": item.order_index,
+                }
+                for item in goal_defs
+                if item.project_version_id == version_id
+            ],
+            key=lambda item: (item["order_index"], item["stable_key"] or ""),
+        )
+        actual_milestones = sorted(
+            [
+                {
+                    "stable_key": stable_key("milestone", item.milestone_identity_id),
+                    "title": item.title,
+                    "description": item.description,
+                    "order_index": item.order_index,
+                }
+                for item in milestone_defs
+                if item.project_version_id == version_id
+            ],
+            key=lambda item: (item["order_index"], item["stable_key"] or ""),
+        )
+        actual_tasks = sorted(
+            [
+                {
+                    "stable_key": stable_key("task", item.task_identity_id),
+                    "title": item.title,
+                    "description": item.description,
+                    "order_index": item.order_index,
+                    "milestone_stable_key": stable_key("milestone", item.milestone_identity_id),
+                    "instructions": item.instructions,
+                    "status": item.status,
+                    "minimum_useful_duration_ms": item.minimum_useful_duration_ms,
+                    "preferred_duration_ms": item.preferred_duration_ms,
+                    "maximum_useful_duration_ms": item.maximum_useful_duration_ms,
+                }
+                for item in task_defs.values()
+                if item.project_version_id == version_id
+            ],
+            key=lambda item: (item["order_index"], item["stable_key"] or ""),
+        )
+        actual_criteria = sorted(
+            [
+                {
+                    "stable_key": stable_key("criterion", item.criterion_identity_id),
+                    "title": item.title,
+                    "description": item.description,
+                    "order_index": item.order_index,
+                    "milestone_stable_key": stable_key("milestone", item.milestone_identity_id),
+                    "evaluation_policy_version": item.evaluation_policy_version,
+                }
+                for item in criterion_defs.values()
+                if item.project_version_id == version_id
+            ],
+            key=lambda item: (item["order_index"], item["stable_key"] or ""),
+        )
+        actual_targets = sorted(
+            [
+                {
+                    "task_stable_key": stable_key(
+                        "task",
+                        task_defs[item.task_definition_id].task_identity_id
+                        if item.task_definition_id in task_defs
+                        else None,
+                    ),
+                    "project_criterion_stable_key": stable_key(
+                        "criterion",
+                        criterion_defs[item.project_criterion_definition_id].criterion_identity_id
+                        if item.project_criterion_definition_id in criterion_defs
+                        else None,
+                    ),
+                    "semantic_definition_id": item.semantic_definition_id,
+                    "criterion_definition_id": item.criterion_definition_id,
+                    "scale_version_id": item.scale_version_id,
+                    "dimension_id": item.dimension_id,
+                    "level_id": item.level_id,
+                    "intended_outcome": item.intended_outcome,
+                    "role": item.role,
+                    "order_index": item.order_index,
+                }
+                for item in targets
+                if item.project_version_id == version_id
+            ],
+            key=lambda item: (item["order_index"], item["task_stable_key"] or ""),
+        )
+        actual_requirements = sorted(
+            [
+                {
+                    "task_stable_key": stable_key(
+                        "task",
+                        task_defs[item.task_definition_id].task_identity_id
+                        if item.task_definition_id in task_defs
+                        else None,
+                    ),
+                    "stable_key": item.stable_key,
+                    "requirement_type": item.requirement_type,
+                    "effect": item.effect,
+                    "scope": item.scope,
+                    "subject": json.loads(item.subject_json),
+                    "order_index": item.order_index,
+                }
+                for item in requirements
+                if item.project_version_id == version_id
+            ],
+            key=lambda item: (item["order_index"], item["stable_key"]),
+        )
+        actual_dependencies = sorted(
+            [
+                {
+                    "dependent_task_stable_key": stable_key(
+                        "task", item.dependent_task_identity_id
+                    ),
+                    "prerequisite_task_stable_key": stable_key(
+                        "task", item.prerequisite_task_identity_id
+                    ),
+                    "dependency_type": item.dependency_type,
+                }
+                for item in dependencies
+                if item.project_version_id == version_id
+            ],
+            key=lambda item: (
+                item["dependent_task_stable_key"] or "",
+                item["prerequisite_task_stable_key"] or "",
+                item["dependency_type"],
+            ),
+        )
+        actual_opportunities = sorted(
+            [
+                {
+                    "stable_key": item.stable_key,
+                    "task_stable_key": stable_key(
+                        "task",
+                        task_defs[item.task_definition_id].task_identity_id
+                        if item.task_definition_id in task_defs
+                        else None,
+                    ),
+                    "project_criterion_stable_key": stable_key(
+                        "criterion",
+                        criterion_defs[item.project_criterion_definition_id].criterion_identity_id
+                        if item.project_criterion_definition_id in criterion_defs
+                        else None,
+                    ),
+                    "evidence_kind": item.evidence_kind,
+                    "intended_strengths": opportunity_characteristics[item.id][
+                        "intended_strengths"
+                    ],
+                    "intended_independence_modes": opportunity_characteristics[item.id][
+                        "intended_independence_modes"
+                    ],
+                    "requires_artifact": opportunity_characteristics[item.id]["requires_artifact"],
+                    "order_index": item.order_index,
+                }
+                for item in opportunities
+                if item.project_version_id == version_id
+            ],
+            key=lambda item: (item["order_index"], item["stable_key"]),
+        )
+        if any(
+            actual != expected[name]
+            for name, actual in (
+                ("goals", actual_goals),
+                ("milestones", actual_milestones),
+                ("tasks", actual_tasks),
+                ("criteria", actual_criteria),
+                ("targets", actual_targets),
+                ("requirements", actual_requirements),
+                ("dependencies", actual_dependencies),
+                ("evidence_opportunities", actual_opportunities),
+            )
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_PROJECT_INVALID",
+                "Project child definitions do not match their immutable definition envelope.",
+            )
+    semantic_defs = {
+        item.id: item
+        for item in connection.execute(select(*SemanticCompetencyDefinition.__table__.c)).all()
+    }
+    native_criterion_defs = {
+        item.id: item for item in connection.execute(select(*CriterionDefinition.__table__.c)).all()
+    }
+    scale_dimensions = {
+        item.id: item
+        for item in connection.execute(select(*CapabilityScaleDimension.__table__.c)).all()
+    }
+    scale_levels = {
+        item.id: item
+        for item in connection.execute(select(*CapabilityScaleLevel.__table__.c)).all()
+    }
+    enabled_dimensions = {
+        (item.semantic_definition_id, item.scale_dimension_id)
+        for item in connection.execute(select(*SemanticDefinitionDimension.__table__.c)).all()
+    }
+    for target in targets:
+        version = versions.get(target.project_version_id)
+        task = task_defs.get(target.task_definition_id) if target.task_definition_id else None
+        criterion = (
+            criterion_defs.get(target.project_criterion_definition_id)
+            if target.project_criterion_definition_id
+            else None
+        )
+        semantic = semantic_defs.get(target.semantic_definition_id)
+        native_criterion = (
+            native_criterion_defs.get(target.criterion_definition_id)
+            if target.criterion_definition_id
+            else None
+        )
+        dimension = scale_dimensions.get(target.dimension_id) if target.dimension_id else None
+        level = scale_levels.get(target.level_id) if target.level_id else None
+        if (
+            version is None
+            or (task is not None and task.project_version_id != version.id)
+            or (criterion is not None and criterion.project_version_id != version.id)
+            or (target.task_definition_id is not None and task is None)
+            or (target.project_criterion_definition_id is not None and criterion is None)
+            or semantic is None
+            or semantic.scale_version_id != target.scale_version_id
+            or (
+                native_criterion is not None
+                and native_criterion.semantic_definition_id != semantic.id
+            )
+            or (
+                native_criterion is not None
+                and native_criterion.dimension_id != target.dimension_id
+            )
+            or (native_criterion is not None and native_criterion.level_id != target.level_id)
+            or (target.criterion_definition_id is not None and native_criterion is None)
+            or (
+                dimension is not None
+                and (
+                    dimension.scale_version_id != target.scale_version_id
+                    or (semantic.id, dimension.id) not in enabled_dimensions
+                )
+            )
+            or (target.dimension_id is not None and dimension is None)
+            or (level is not None and level.scale_version_id != target.scale_version_id)
+            or (target.level_id is not None and level is None)
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_PROJECT_INVALID",
+                "A Project target crosses definition versions.",
+            )
+    primary_global_targets: dict[str, list[Any]] = defaultdict(list)
+    primary_task_targets: dict[str, list[Any]] = defaultdict(list)
+    for target in targets:
+        if target.role != "primary":
+            continue
+        if target.task_definition_id is not None:
+            primary_task_targets[target.task_definition_id].append(target)
+        elif target.project_criterion_definition_id is None:
+            primary_global_targets[target.project_version_id].append(target)
+
+    def stored_target_signature(items: list[Any]) -> set[tuple[Any, ...]]:
+        return {
+            (
+                item.semantic_definition_id,
+                item.criterion_definition_id,
+                item.scale_version_id,
+                item.dimension_id,
+                item.level_id,
+            )
+            for item in items
+        }
+
+    definitions_by_task_identity: dict[str, list[Any]] = defaultdict(list)
+    for task in task_defs.values():
+        definitions_by_task_identity[task.task_identity_id].append(task)
+    for items in definitions_by_task_identity.values():
+        ordered = sorted(items, key=lambda item: versions[item.project_version_id].version)
+        prior_signature: set[tuple[Any, ...]] | None = None
+        for item in ordered:
+            signature = stored_target_signature(
+                primary_task_targets[item.id] + primary_global_targets[item.project_version_id]
+            )
+            if prior_signature is not None and signature != prior_signature:
+                raise AppError(
+                    422,
+                    "PORTABLE_PROJECT_INVALID",
+                    "A stable Project task identity changes its Primary semantic target signature.",
+                )
+            prior_signature = signature
+    hard_edges_by_version: dict[str, dict[str, set[str]]] = defaultdict(dict)
+    task_ids_by_version: dict[str, set[str]] = defaultdict(set)
+    for task in task_defs.values():
+        task_ids_by_version[task.project_version_id].add(task.task_identity_id)
+        hard_edges_by_version[task.project_version_id].setdefault(task.task_identity_id, set())
+    for dependency in dependencies:
+        if (
+            dependency.dependent_task_identity_id
+            not in task_ids_by_version[dependency.project_version_id]
+            or dependency.prerequisite_task_identity_id
+            not in task_ids_by_version[dependency.project_version_id]
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_PROJECT_INVALID",
+                "A Project dependency crosses definition versions.",
+            )
+        if dependency.dependency_type == "hard":
+            hard_edges_by_version[dependency.project_version_id].setdefault(
+                dependency.dependent_task_identity_id, set()
+            ).add(dependency.prerequisite_task_identity_id)
+    for version_id in task_ids_by_version:
+        if has_required_dependency_cycle(hard_edges_by_version[version_id]):
+            raise AppError(
+                422,
+                "PORTABLE_PROJECT_INVALID",
+                "Hard Project task dependencies contain a cycle.",
+            )
+    requirement_subject_keys = {
+        "capability_at_least": {
+            "semanticDefinitionId",
+            "scaleVersionId",
+            "dimensionId",
+            "levelId",
+        },
+        "criterion_demonstrated": {"criterionDefinitionId"},
+        "project_criterion_demonstrated": {"projectCriterionStableKey"},
+        "project_task_completed": {"taskStableKey"},
+        "resource_available": {"resourceKey"},
+        "user_constraint": {"constraintKey", "expectedValue"},
+    }
+    requirement_scopes = {
+        "capability_at_least": "learner",
+        "criterion_demonstrated": "learner",
+        "project_criterion_demonstrated": "project",
+        "project_task_completed": "project",
+        "resource_available": "environment",
+        "user_constraint": "user",
+    }
+    for requirement in requirements:
+        subject = json.loads(requirement.subject_json)
+        version = versions.get(requirement.project_version_id)
+        project_id = version.project_id if version is not None else None
+        version_task_keys = {
+            stable_key("task", item.task_identity_id)
+            for item in task_defs.values()
+            if item.project_version_id == requirement.project_version_id
+        }
+        version_criterion_keys = {
+            stable_key("criterion", item.criterion_identity_id)
+            for item in criterion_defs.values()
+            if item.project_version_id == requirement.project_version_id
+        }
+        invalid = (
+            requirement.policy_version != "project-requirement-policy/v1"
+            or requirement.requirement_type not in requirement_subject_keys
+            or not isinstance(subject, dict)
+            or set(subject) != requirement_subject_keys.get(requirement.requirement_type, set())
+            or requirement.scope != requirement_scopes.get(requirement.requirement_type)
+        )
+        if requirement.task_definition_id is not None and (
+            requirement.task_definition_id not in task_defs
+            or task_defs[requirement.task_definition_id].project_version_id
+            != requirement.project_version_id
+        ):
+            invalid = True
+        if not invalid and requirement.requirement_type == "project_task_completed":
+            invalid = subject["taskStableKey"] not in version_task_keys
+        if not invalid and requirement.requirement_type == "project_criterion_demonstrated":
+            invalid = subject["projectCriterionStableKey"] not in version_criterion_keys
+        if not invalid and requirement.requirement_type == "criterion_demonstrated":
+            invalid = subject["criterionDefinitionId"] not in native_criterion_defs
+        if not invalid and requirement.requirement_type == "resource_available":
+            invalid = not isinstance(subject["resourceKey"], str) or not subject["resourceKey"]
+        if not invalid and requirement.requirement_type == "user_constraint":
+            invalid = (
+                not isinstance(subject["constraintKey"], str)
+                or not subject["constraintKey"]
+                or subject["expectedValue"] is None
+            )
+        if not invalid and requirement.requirement_type == "capability_at_least":
+            semantic = semantic_defs.get(subject["semanticDefinitionId"])
+            dimension = (
+                scale_dimensions.get(subject["dimensionId"])
+                if subject["dimensionId"] is not None
+                else None
+            )
+            level = scale_levels.get(subject["levelId"])
+            invalid = (
+                semantic is None
+                or semantic.scale_version_id != subject["scaleVersionId"]
+                or level is None
+                or level.scale_version_id != subject["scaleVersionId"]
+                or (
+                    subject["dimensionId"] is not None
+                    and (
+                        dimension is None
+                        or dimension.scale_version_id != subject["scaleVersionId"]
+                        or (semantic.id, dimension.id) not in enabled_dimensions
+                    )
+                )
+            )
+        if invalid or project_id is None:
+            raise AppError(
+                422,
+                "PORTABLE_PROJECT_INVALID",
+                "A Project requirement is malformed or crosses definition versions.",
+            )
+    for opportunity in opportunities:
+        task = (
+            task_defs.get(opportunity.task_definition_id)
+            if opportunity.task_definition_id
+            else None
+        )
+        criterion = (
+            criterion_defs.get(opportunity.project_criterion_definition_id)
+            if opportunity.project_criterion_definition_id
+            else None
+        )
+        if (
+            (task is None and criterion is None)
+            or (task is not None and task.project_version_id != opportunity.project_version_id)
+            or (
+                criterion is not None
+                and criterion.project_version_id != opportunity.project_version_id
+            )
+            or opportunity.policy_version != "project-evidence-opportunity-policy/v1"
+            or set(json.loads(opportunity.intended_characteristics_json))
+            != {
+                "intended_strengths",
+                "intended_independence_modes",
+                "requires_artifact",
+            }
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_PROJECT_INVALID",
+                "A Project Evidence opportunity has invalid ownership.",
+            )
+    activation_events: dict[str, list[Any]] = defaultdict(list)
+    for item in connection.execute(select(*ProjectVersionActivationEvent.__table__.c)):
+        version = versions.get(item.to_project_version_id)
+        previous = (
+            versions.get(item.from_project_version_id) if item.from_project_version_id else None
+        )
+        if (
+            version is None
+            or version.project_id != item.project_id
+            or (previous is not None and previous.project_id != item.project_id)
+            or item.activated_at < version.created_at
+            or item.activated_at < version.effective_at
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_PROJECT_INVALID",
+                "Project activation history is inconsistent.",
+            )
+        activation_events[item.project_id].append(item)
+    latest_activation: dict[str, Any] = {}
+    for project_id, items in activation_events.items():
+        ordered = sorted(items, key=lambda item: item.event_sequence)
+        if [item.event_sequence for item in ordered] != list(range(1, len(ordered) + 1)):
+            raise AppError(
+                422,
+                "PORTABLE_PROJECT_INVALID",
+                "Project activation sequences must be contiguous.",
+            )
+        previous_id = None
+        activation_previous_time: int | None = None
+        for item in ordered:
+            if item.from_project_version_id != previous_id or (
+                activation_previous_time is not None
+                and item.activated_at < activation_previous_time
+            ):
+                raise AppError(
+                    422,
+                    "PORTABLE_PROJECT_INVALID",
+                    "Project activation lineage is disconnected.",
+                )
+            previous_id = item.to_project_version_id
+            activation_previous_time = item.activated_at
+        latest_activation[project_id] = ordered[-1]
+    states = {
+        item.project_id: item
+        for item in connection.execute(select(*ActiveProjectVersionState.__table__.c)).all()
+    }
+    if set(states) != set(latest_activation) or any(
+        state.project_version_id != latest_activation[project_id].to_project_version_id
+        or state.activated_at != latest_activation[project_id].activated_at
+        for project_id, state in states.items()
+    ):
+        raise AppError(
+            422,
+            "PORTABLE_PROJECT_INVALID",
+            "Current Project version state disagrees with activation history.",
+        )
+    events_by_project: dict[str, list[Any]] = defaultdict(list)
+    event_ids: dict[str, Any] = {}
+    for item in connection.execute(select(*ProjectEvent.__table__.c)):
+        event_ids[item.id] = item
+        version = versions.get(item.project_version_id)
+        task = (
+            identities_by_kind["task"].get(item.task_identity_id) if item.task_identity_id else None
+        )
+        if (
+            version is None
+            or version.project_id != item.project_id
+            or item.occurred_at < version.created_at
+            or (task is not None and task.project_id != item.project_id)
+            or (item.task_identity_id is not None and task is None)
+            or (
+                item.task_identity_id is not None
+                and item.task_identity_id not in task_ids_by_version[version.id]
+            )
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_PROJECT_INVALID",
+                "A Project event has invalid ownership or chronology.",
+            )
+        events_by_project[item.project_id].append(item)
+    for project_id, items in events_by_project.items():
+        ordered = sorted(items, key=lambda item: item.event_sequence)
+        if [item.event_sequence for item in ordered] != list(range(1, len(ordered) + 1)):
+            raise AppError(
+                422,
+                "PORTABLE_PROJECT_INVALID",
+                "Project event sequences must be contiguous.",
+            )
+        corrected_by: set[str] = set()
+        lifecycle_state = "planned"
+        task_states: dict[str, str] = defaultdict(lambda: "not_started")
+        open_blockers: set[tuple[str, str]] = set()
+        event_previous_time: int | None = None
+        for item in ordered:
+            try:
+                details = json.loads(item.payload_json)
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise AppError(
+                    422, "PORTABLE_PROJECT_INVALID", "A Project event payload is malformed."
+                ) from exc
+            if not isinstance(details, dict) or (
+                event_previous_time is not None and item.occurred_at < event_previous_time
+            ):
+                raise AppError(
+                    422,
+                    "PORTABLE_PROJECT_INVALID",
+                    "Project event knowledge time is not monotonic.",
+                )
+            event_previous_time = item.occurred_at
+            if item.corrects_event_id is not None:
+                corrected = event_ids.get(item.corrects_event_id)
+                if (
+                    item.event_type != "blocker_corrected"
+                    or corrected is None
+                    or corrected.project_id != project_id
+                    or corrected.event_sequence >= item.event_sequence
+                    or corrected.id in corrected_by
+                    or corrected.event_type not in {"blocker_opened", "blocker_corrected"}
+                    or corrected.task_identity_id != item.task_identity_id
+                    or corrected.blocker_key != item.blocker_key
+                    or item.task_identity_id is None
+                    or item.blocker_key is None
+                    or item.blocker_actionable is None
+                    or item.project_lifecycle_state is not None
+                    or item.task_lifecycle_state is not None
+                ):
+                    raise AppError(
+                        422,
+                        "PORTABLE_PROJECT_INVALID",
+                        "A Project event correction is inconsistent.",
+                    )
+                correction_body = {
+                    "corrects_event_id": item.corrects_event_id,
+                    "blocker_key": item.blocker_key,
+                    "actionable": item.blocker_actionable,
+                    "details": details,
+                    "source": item.source,
+                }
+                if item.command_hash != content_hash(correction_body):
+                    raise AppError(
+                        422,
+                        "PORTABLE_PROJECT_INVALID",
+                        "A Project event command hash is inconsistent.",
+                    )
+                blocker = (item.task_identity_id, item.blocker_key)
+                if blocker not in open_blockers:
+                    raise AppError(
+                        422,
+                        "PORTABLE_PROJECT_INVALID",
+                        "A Project blocker correction does not target an open blocker.",
+                    )
+                corrected_by.add(corrected.id)
+                continue
+            event_body = {
+                "event_type": item.event_type,
+                "project_lifecycle_state": item.project_lifecycle_state,
+                "task_identity_id": item.task_identity_id,
+                "task_lifecycle_state": item.task_lifecycle_state,
+                "blocker_key": item.blocker_key,
+                "blocker_actionable": item.blocker_actionable,
+                "details": details,
+                "source": item.source,
+            }
+            if item.command_hash != content_hash(event_body):
+                raise AppError(
+                    422,
+                    "PORTABLE_PROJECT_INVALID",
+                    "A Project event command hash is inconsistent.",
+                )
+            if item.event_type == "project_lifecycle":
+                allowed = {
+                    "planned": {"active", "archived"},
+                    "active": {"completed", "archived"},
+                    "completed": {"archived"},
+                    "archived": set(),
+                }
+                next_state = item.project_lifecycle_state
+                if (
+                    next_state is None
+                    or item.task_identity_id is not None
+                    or item.task_lifecycle_state is not None
+                    or item.blocker_key is not None
+                    or item.blocker_actionable is not None
+                    or (
+                        next_state != lifecycle_state and next_state not in allowed[lifecycle_state]
+                    )
+                ):
+                    raise AppError(
+                        422,
+                        "PORTABLE_PROJECT_INVALID",
+                        "A Project lifecycle event is invalid.",
+                    )
+                lifecycle_state = next_state
+            elif item.event_type == "task_lifecycle":
+                if item.task_identity_id is None or item.task_lifecycle_state is None:
+                    raise AppError(
+                        422, "PORTABLE_PROJECT_INVALID", "A task lifecycle event is invalid."
+                    )
+                current = task_states[item.task_identity_id]
+                allowed = {
+                    "not_started": {"started", "cancelled"},
+                    "started": {"completed", "cancelled"},
+                    "completed": set(),
+                    "cancelled": set(),
+                }
+                if (
+                    item.project_lifecycle_state is not None
+                    or item.blocker_key is not None
+                    or item.blocker_actionable is not None
+                    or (
+                        item.task_lifecycle_state != current
+                        and item.task_lifecycle_state not in allowed[current]
+                    )
+                ):
+                    raise AppError(
+                        422, "PORTABLE_PROJECT_INVALID", "A task lifecycle event is invalid."
+                    )
+                task_states[item.task_identity_id] = item.task_lifecycle_state
+            else:
+                if (
+                    item.event_type not in {"blocker_opened", "blocker_resolved"}
+                    or item.task_identity_id is None
+                    or item.blocker_key is None
+                    or item.project_lifecycle_state is not None
+                    or item.task_lifecycle_state is not None
+                    or (item.event_type == "blocker_opened" and item.blocker_actionable is None)
+                    or (
+                        item.event_type == "blocker_resolved"
+                        and item.blocker_actionable is not None
+                    )
+                ):
+                    raise AppError(
+                        422, "PORTABLE_PROJECT_INVALID", "A Project blocker event is invalid."
+                    )
+                blocker = (item.task_identity_id, item.blocker_key)
+                if (item.event_type == "blocker_opened") == (blocker in open_blockers):
+                    raise AppError(
+                        422,
+                        "PORTABLE_PROJECT_INVALID",
+                        "A Project blocker event cannot be replayed deterministically.",
+                    )
+                if item.event_type == "blocker_opened":
+                    open_blockers.add(blocker)
+                else:
+                    open_blockers.remove(blocker)
+    activity_rows = {
+        item.id: item for item in connection.execute(select(*Activity.__table__.c)).all()
+    }
+    links = {
+        item.id: item
+        for item in connection.execute(select(*ActivityProjectTaskLink.__table__.c)).all()
+    }
+    for link in links.values():
+        activity = activity_rows.get(link.activity_id)
+        task = task_defs.get(link.task_definition_id)
+        version = versions.get(task.project_version_id) if task else None
+        if (
+            activity is None
+            or task is None
+            or version is None
+            or link.created_at < activity.created_at
+            or link.created_at < version.created_at
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_PROJECT_INVALID",
+                "A Project Activity link has invalid provenance or chronology.",
+            )
+    link_corrections = list(
+        connection.execute(select(*ActivityProjectTaskLinkCorrection.__table__.c)).all()
+    )
+    correction_by_link = {item.activity_project_task_link_id: item for item in link_corrections}
+    replacement_edges: dict[str, str] = {}
+    for correction in link_corrections:
+        link = links.get(correction.activity_project_task_link_id)
+        replacement = (
+            links.get(correction.replacement_link_id) if correction.replacement_link_id else None
+        )
+        if (
+            link is None
+            or correction.corrected_at < link.created_at
+            or correction.replacement_link_id == correction.activity_project_task_link_id
+            or (correction.replacement_link_id is not None and replacement is None)
+            or (replacement is not None and replacement.activity_id != link.activity_id)
+            or (replacement is not None and replacement.created_at > correction.corrected_at)
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_PROJECT_INVALID",
+                "A Project Activity-link correction is inconsistent.",
+            )
+        if replacement is not None:
+            replacement_edges[link.id] = replacement.id
+    for link_id in replacement_edges:
+        seen: set[str] = set()
+        current_link_id: str | None = link_id
+        while current_link_id is not None:
+            if current_link_id in seen:
+                raise AppError(
+                    422,
+                    "PORTABLE_PROJECT_INVALID",
+                    "Project Activity-link corrections must not form cycles.",
+                )
+            seen.add(current_link_id)
+            current_link_id = replacement_edges.get(current_link_id)
+    active_link_targets: set[tuple[str, str]] = set()
+    for link in links.values():
+        if link.id in correction_by_link:
+            continue
+        link_key = (link.activity_id, link.task_definition_id)
+        if link_key in active_link_targets:
+            raise AppError(
+                422,
+                "PORTABLE_PROJECT_INVALID",
+                "An Activity has duplicate active links to the same Project task.",
+            )
+        active_link_targets.add(link_key)
+    sessions = {
+        item.id: item for item in connection.execute(select(*LearningSession.__table__.c)).all()
+    }
+    contributions = {
+        item.id: item
+        for item in connection.execute(select(*SessionProjectContribution.__table__.c)).all()
+    }
+    contribution_retractions = list(
+        connection.execute(select(*SessionProjectContributionRetraction.__table__.c))
+    )
+    retracted_contribution_ids = {item.contribution_id for item in contribution_retractions}
+    primary_by_session: set[str] = set()
+    active_contribution_targets: set[tuple[str, str, str, str | None]] = set()
+    for contribution in contributions.values():
+        session = sessions.get(contribution.session_id)
+        version = versions.get(contribution.project_version_id)
+        task = (
+            task_defs.get(contribution.task_definition_id)
+            if contribution.task_definition_id
+            else None
+        )
+        if (
+            session is None
+            or version is None
+            or version.project_id != contribution.project_id
+            or (task is not None and task.project_version_id != version.id)
+            or contribution.created_at < session.created_at
+            or (
+                session.tombstoned_at is not None
+                and contribution.created_at >= session.tombstoned_at
+            )
+            or ((contribution.idempotency_key is None) != (contribution.command_hash is None))
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_PROJECT_INVALID",
+                "A Project SessionContribution is inconsistent.",
+            )
+        if contribution.idempotency_key is not None and contribution.command_hash != content_hash(
+            {
+                "session_id": contribution.session_id,
+                "project_version_id": contribution.project_version_id,
+                "task_definition_id": contribution.task_definition_id,
+                "relevance": contribution.relevance,
+                "provenance": contribution.provenance,
+            }
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_PROJECT_INVALID",
+                "A Project SessionContribution command hash is inconsistent.",
+            )
+        if contribution.id not in retracted_contribution_ids:
+            target = (
+                contribution.session_id,
+                contribution.project_id,
+                contribution.project_version_id,
+                contribution.task_definition_id,
+            )
+            if target in active_contribution_targets:
+                raise AppError(
+                    422,
+                    "PORTABLE_PROJECT_INVALID",
+                    "A Session has duplicate active Project contributions.",
+                )
+            active_contribution_targets.add(target)
+        if (
+            contribution.relevance == "primary"
+            and contribution.id not in retracted_contribution_ids
+        ):
+            if contribution.session_id in primary_by_session:
+                raise AppError(
+                    422,
+                    "PORTABLE_PROJECT_INVALID",
+                    "A Session has multiple Primary Project contributions.",
+                )
+            primary_by_session.add(contribution.session_id)
+    for retraction in contribution_retractions:
+        original = contributions.get(retraction.contribution_id)
+        replacement = (
+            contributions.get(retraction.replacement_contribution_id)
+            if retraction.replacement_contribution_id
+            else None
+        )
+        if (
+            original is None
+            or retraction.retracted_at < original.created_at
+            or retraction.replacement_contribution_id == retraction.contribution_id
+            or (retraction.replacement_contribution_id is not None and replacement is None)
+            or (replacement is not None and replacement.session_id != original.session_id)
+            or (replacement is not None and replacement.created_at > retraction.retracted_at)
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_PROJECT_INVALID",
+                "A Project SessionContribution retraction is inconsistent.",
+            )
+    evidence_rows = {
+        item.id: item for item in connection.execute(select(*Evidence.__table__.c)).all()
+    }
+    evidence_links_by_evidence: dict[str, list[Any]] = defaultdict(list)
+    for item in connection.execute(select(*EvidenceLink.__table__.c)):
+        evidence_links_by_evidence[item.evidence_id].append(item)
+    invalidations = {
+        item.evidence_id: item
+        for item in connection.execute(select(*EvidenceInvalidation.__table__.c)).all()
+    }
+    evidence_retractions = {
+        item.evidence_id: item
+        for item in connection.execute(select(*EvidenceRetraction.__table__.c)).all()
+    }
+    session_corrections_by_session: dict[str, list[Any]] = defaultdict(list)
+    for item in connection.execute(select(*SessionCorrection.__table__.c)):
+        session_corrections_by_session[item.session_id].append(item)
+
+    def project_session_assistance_modes(
+        activity_id: str, cutoff_at: int, occurred_at: int
+    ) -> tuple[str, ...]:
+        modes: list[str] = []
+        for session in sessions.values():
+            if session.created_at >= cutoff_at:
+                continue
+            values: dict[str, Any] = {
+                "activity_id": session.activity_id,
+                "assistance_mode": session.assistance_mode,
+                "ended_at": session.ended_at,
+                "outcome": session.outcome,
+            }
+            for correction in sorted(
+                (
+                    item
+                    for item in session_corrections_by_session[session.id]
+                    if item.corrected_at >= cutoff_at
+                ),
+                key=lambda item: (item.corrected_at, item.id),
+                reverse=True,
+            ):
+                before = json.loads(correction.before_json)
+                for key in values:
+                    if key in before:
+                        values[key] = before[key]
+            if (
+                values["activity_id"] == activity_id
+                and isinstance(values["ended_at"], int)
+                and values["ended_at"] < cutoff_at
+                and values["ended_at"] <= occurred_at
+                and values["outcome"] in {"completed", "partial"}
+                and not (session.tombstoned_at is not None and session.tombstoned_at < cutoff_at)
+            ):
+                modes.append(str(values["assistance_mode"]))
+        return tuple(sorted(modes))
+
+    criterion_identities = {
+        item.id: item for item in connection.execute(select(*CriterionIdentity.__table__.c)).all()
+    }
+    project_evidence_idempotency_keys: set[str] = set()
+    for evidence in evidence_rows.values():
+        if evidence.source_type != "activity_project_task_link":
+            continue
+        source_link = links.get(evidence.source_id)
+        source_task = task_defs.get(source_link.task_definition_id) if source_link else None
+        source_version = versions.get(source_task.project_version_id) if source_task else None
+        try:
+            provenance = json.loads(evidence.provenance_json)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise AppError(
+                422, "PORTABLE_PROJECT_INVALID", "Project Evidence provenance is malformed."
+            ) from exc
+        opportunity = (
+            next(
+                (item for item in opportunities if item.id == provenance.get("opportunity_id")),
+                None,
+            )
+            if isinstance(provenance, dict)
+            else None
+        )
+        characteristics = opportunity_characteristics.get(opportunity.id, {}) if opportunity else {}
+        raw_derived = (
+            provenance.get("derived_characteristics", {}) if isinstance(provenance, dict) else {}
+        )
+        derived_shape_invalid = not isinstance(raw_derived, dict)
+        derived = raw_derived if isinstance(raw_derived, dict) else {}
+        activity = activity_rows.get(source_link.activity_id) if source_link is not None else None
+        has_artifact = evidence.artifact_hash is not None or evidence.external_reference is not None
+        actual_at = (
+            activity.context_ended_at
+            if activity is not None and activity.context_ended_at is not None
+            else activity.occurred_at
+            if activity is not None and activity.occurred_at is not None
+            else activity.created_at
+            if activity is not None
+            else None
+        )
+        cutoff_at = evidence.created_at + 1
+        actual_modes = (
+            project_session_assistance_modes(
+                source_link.activity_id, cutoff_at, evidence.occurred_at
+            )
+            if source_link is not None and evidence.occurred_at is not None
+            else ()
+        )
+        rubric_result = derived.get("rubricResult")
+        policy_result = (
+            derive_project_evidence_characteristics(
+                activity_outcome=activity.outcome_classification if activity else None,
+                has_artifact=has_artifact,
+                assistance_modes=actual_modes,
+                attribution_provenance=source_link.provenance,
+                rubric_result=rubric_result,
+                has_project_criterion=(
+                    opportunity is not None
+                    and opportunity.project_criterion_definition_id is not None
+                ),
+            )
+            if source_link is not None
+            else None
+        )
+        command_body = {
+            "activityProjectTaskLinkId": evidence.source_id,
+            "opportunityId": opportunity.id if opportunity else None,
+            "title": evidence.title,
+            "description": evidence.description,
+            "occurredAt": evidence.occurred_at,
+            "artifactHash": evidence.artifact_hash,
+            "externalReference": evidence.external_reference,
+            "rubricResult": rubric_result,
+        }
+        invalid = (
+            derived_shape_invalid
+            or source_link is None
+            or source_task is None
+            or source_version is None
+            or opportunity is None
+            or opportunity.project_version_id != source_version.id
+            or opportunity.task_definition_id not in {None, source_task.id}
+            or evidence.source_role != opportunity.stable_key
+            or evidence.evidence_type != opportunity.evidence_kind
+            or evidence.policy_version != "evidence-policy/v1"
+            or provenance.get("source_record_type") != evidence.source_type
+            or provenance.get("source_record_id") != evidence.source_id
+            or provenance.get("project_evidence_policy_version") != PROJECT_EVIDENCE_POLICY
+            or provenance.get("project_id") != source_version.project_id
+            or provenance.get("project_version_id") != source_version.id
+            or provenance.get("task_definition_id") != source_task.id
+            or provenance.get("activity_project_task_link_id") != source_link.id
+            or provenance.get("project_criterion_definition_id")
+            != opportunity.project_criterion_definition_id
+            or provenance.get("command_hash") != content_hash(command_body)
+            or not isinstance(provenance.get("idempotency_key"), str)
+            or not provenance.get("idempotency_key")
+            or derived.get("hasArtifact") is not has_artifact
+            or derived.get("activityOutcome")
+            != (activity.outcome_classification if activity else None)
+            or derived.get("assistanceModes") != list(actual_modes)
+            or rubric_result not in {None, "passed", "partially_met", "not_met"}
+            or (
+                rubric_result is not None
+                and opportunity is not None
+                and opportunity.project_criterion_definition_id is None
+            )
+            or policy_result is None
+            or evidence.strength != policy_result.strength
+            or evidence.strength_unknown_reason != policy_result.strength_unknown_reason
+            or evidence.independence != policy_result.independence
+            or evidence.independence_unknown_reason != policy_result.independence_unknown_reason
+            or evidence.source_confidence != policy_result.source_confidence
+            or evidence.source_confidence_unknown_reason
+            != policy_result.source_confidence_unknown_reason
+            or source_link.created_at > evidence.created_at
+            or actual_at is None
+            or actual_at > evidence.occurred_at
+            or evidence.occurred_at > evidence.created_at
+            or (bool(characteristics.get("requires_artifact")) and not has_artifact)
+            or (
+                characteristics.get("intended_strengths")
+                and evidence.strength not in characteristics["intended_strengths"]
+            )
+            or (
+                characteristics.get("intended_independence_modes")
+                and evidence.independence not in characteristics["intended_independence_modes"]
+            )
+        )
+        source_correction = correction_by_link.get(evidence.source_id)
+        if source_correction is not None:
+            invalidation = invalidations.get(evidence.id)
+            invalid = invalid or source_correction.corrected_at <= evidence.created_at
+            invalid = invalid or invalidation is None
+        idempotency_key = provenance.get("idempotency_key")
+        if idempotency_key in project_evidence_idempotency_keys:
+            invalid = True
+        elif isinstance(idempotency_key, str):
+            project_evidence_idempotency_keys.add(idempotency_key)
+        opportunity_criterion_id = (
+            opportunity.project_criterion_definition_id if opportunity is not None else None
+        )
+        selected_targets = [
+            item
+            for item in targets
+            if source_version is not None
+            and source_task is not None
+            and item.project_version_id == source_version.id
+            and (
+                item.task_definition_id == source_task.id
+                or (
+                    item.task_definition_id is None and item.project_criterion_definition_id is None
+                )
+                or item.project_criterion_definition_id == opportunity_criterion_id
+            )
+        ]
+        expected_links: set[tuple[Any, ...]] = set()
+        for target in selected_targets:
+            semantic = semantic_defs.get(target.semantic_definition_id)
+            native_criterion = (
+                native_criterion_defs.get(target.criterion_definition_id)
+                if target.criterion_definition_id
+                else None
+            )
+            criterion_identity = (
+                criterion_identities.get(native_criterion.criterion_identity_id)
+                if native_criterion
+                else None
+            )
+            expected_links.add(
+                (
+                    semantic.competency_identity_id if semantic else None,
+                    criterion_identity.id if criterion_identity else None,
+                    native_criterion.id if native_criterion else None,
+                    target.scale_version_id,
+                    target.dimension_id,
+                    target.level_id,
+                    "contradicts" if rubric_result == "not_met" else "supports",
+                    target.role,
+                )
+            )
+        actual_links = {
+            (
+                item.competency_identity_id,
+                item.criterion_identity_id,
+                item.criterion_definition_id,
+                item.scale_version_id,
+                item.dimension_id,
+                item.level_id,
+                item.effect,
+                item.relevance,
+            )
+            for item in evidence_links_by_evidence[evidence.id]
+        }
+        if invalid or not expected_links or actual_links != expected_links:
+            raise AppError(
+                422,
+                "PORTABLE_PROJECT_INVALID",
+                "Project Evidence lineage or derived characteristics are inconsistent.",
+            )
+    evaluation_evidence: dict[str, list[str]] = defaultdict(list)
+    for item in connection.execute(select(*ProjectCriterionEvaluationEvidence.__table__.c)):
+        evaluation_evidence[item.project_criterion_evaluation_id].append(item.evidence_id)
+    for evaluation in connection.execute(select(*ProjectCriterionEvaluation.__table__.c)):
+        criterion = criterion_defs.get(evaluation.project_criterion_definition_id)
+        ids = sorted(evaluation_evidence[evaluation.id])
+        evidence = [evidence_rows.get(item) for item in ids]
+        evidence_facts = tuple(
+            {
+                "evidenceId": item.id,
+                "strength": item.strength,
+                "independence": item.independence,
+                "sourceConfidence": item.source_confidence,
+            }
+            for item in evidence
+            if item is not None
+        )
+        expected_state, policy_facts = evaluate_project_criterion_evidence(evidence_facts)
+        expected_facts = {
+            **policy_facts,
+            "evidenceIds": ids,
+            "criterionDefinitionId": criterion.id if criterion else None,
+        }
+        if (
+            criterion is None
+            or not ids
+            or any(item is None for item in evidence)
+            or evaluation.evidence_set_hash != content_hash(ids)
+            or evaluation.policy_version != criterion.evaluation_policy_version
+            or evaluation.state != expected_state
+            or json.loads(evaluation.facts_json) != expected_facts
+            or any(
+                item.created_at > evaluation.evaluated_at
+                or json.loads(item.provenance_json).get("project_criterion_definition_id")
+                != criterion.id
+                or (
+                    item.id in invalidations
+                    and invalidations[item.id].created_at <= evaluation.evaluated_at
+                )
+                or (
+                    item.id in evidence_retractions
+                    and evidence_retractions[item.id].created_at <= evaluation.evaluated_at
+                )
+                for item in evidence
+                if item is not None
+            )
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_PROJECT_INVALID",
+                "A ProjectCriterion evaluation is disconnected from qualifying Evidence.",
+            )
 
 
 def _validate_capability_history(connection: Any) -> None:

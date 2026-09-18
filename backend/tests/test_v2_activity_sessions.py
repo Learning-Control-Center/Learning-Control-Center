@@ -149,7 +149,7 @@ async def test_non_time_activity_is_valid_reality(
     assert db.scalar(select(func.count()).select_from(LearningSession)) == 0
 
 
-async def test_project_contribution_is_explicitly_deferred_and_primary_mirrors_legacy_field(
+async def test_unknown_project_contribution_is_rejected_and_primary_mirrors_legacy_field(
     configured_client: tuple[AsyncClient, str, dict[str, object]], db: Session
 ) -> None:
     client, csrf, roadmap = configured_client
@@ -172,7 +172,7 @@ async def test_project_contribution_is_explicitly_deferred_and_primary_mirrors_l
         headers={"X-CSRF-Token": csrf},
     )
     assert project.status_code == 422
-    assert project.json()["error"]["code"] == "FEATURE_NOT_AVAILABLE"
+    assert project.json()["error"]["code"] == "SESSION_CONTRIBUTION_INVALID"
 
     added = await client.post(
         f"/api/v2/sessions/{session_id}/contributions",

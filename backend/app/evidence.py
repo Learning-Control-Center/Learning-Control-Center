@@ -15,6 +15,7 @@ from app.database import get_db
 from app.domain import transition_status
 from app.errors import AppError
 from app.models import (
+    Activity,
     CapabilityScaleDimension,
     CapabilityScaleLevel,
     CapabilityScaleVersion,
@@ -30,6 +31,7 @@ from app.models import (
     EvidenceRetraction,
     LearningSession,
     ProjectionInvalidation,
+    SemanticCompetencyDefinition,
     SessionContribution,
     VerificationEvidence,
     VerificationRecord,
@@ -43,10 +45,292 @@ from app.schemas import (
     EvidenceRedactionRequest,
     VerificationCreate,
 )
+from app.session_views import session_actuality_as_of
 from app.time_utils import datetime_to_epoch_ms, epoch_ms_to_rfc3339, utc_now_ms
 
 router = APIRouter(tags=["v2 evidence"])
 EVIDENCE_POLICY = "evidence-policy/v1"
+
+
+def create_project_outcome_evidence(
+    db: Session,
+    *,
+    activity_project_task_link_id: str,
+    opportunity_id: str,
+    title: str,
+    description: str | None,
+    occurred_at: int,
+    artifact_hash: str | None,
+    external_reference: str | None,
+    rubric_result: str | None,
+    idempotency_key: str,
+) -> Evidence:
+    """Create unified Evidence for an actual Project task outcome.
+
+    Authored opportunities constrain lineage and intended targets only. Actual strength,
+    independence, and confidence are derived by the versioned Evidence policy.
+    """
+    from app.projects.evidence_policy import (
+        PROJECT_EVIDENCE_POLICY,
+        derive_project_evidence_characteristics,
+    )
+    from app.projects.models import (
+        ActivityProjectTaskLink,
+        ProjectEvidenceOpportunity,
+        ProjectTarget,
+        ProjectTaskDefinition,
+        ProjectVersion,
+    )
+    from app.projects.service import activity_project_link_is_actual
+
+    command = {
+        "activityProjectTaskLinkId": activity_project_task_link_id,
+        "opportunityId": opportunity_id,
+        "title": title,
+        "description": description,
+        "occurredAt": occurred_at,
+        "artifactHash": artifact_hash,
+        "externalReference": external_reference,
+        "rubricResult": rubric_result,
+    }
+    command_digest = hashlib.sha256(_canonical_json(command).encode("utf-8")).hexdigest()
+
+    for candidate in db.scalars(
+        select(Evidence).where(Evidence.source_type == "activity_project_task_link")
+    ).all():
+        candidate_provenance = json.loads(candidate.provenance_json)
+        if candidate_provenance.get("idempotency_key") != idempotency_key:
+            continue
+        if candidate_provenance.get("command_hash") != command_digest:
+            raise AppError(409, "IDEMPOTENCY_KEY_REUSED", "The Project Evidence key was reused.")
+        return candidate
+
+    link = db.get(ActivityProjectTaskLink, activity_project_task_link_id)
+    opportunity = db.get(ProjectEvidenceOpportunity, opportunity_id)
+    task = db.get(ProjectTaskDefinition, link.task_definition_id) if link else None
+    version = db.get(ProjectVersion, task.project_version_id) if task else None
+    if (
+        link is None
+        or opportunity is None
+        or task is None
+        or version is None
+        or opportunity.project_version_id != version.id
+        or (opportunity.task_definition_id not in {None, task.id})
+    ):
+        raise AppError(
+            422,
+            "PROJECT_EVIDENCE_LINEAGE_INVALID",
+            "Project Evidence must reference an actual task link and compatible opportunity.",
+        )
+    activity = db.get(Activity, link.activity_id)
+    actual_at = (
+        activity.context_ended_at
+        if activity is not None and activity.context_ended_at is not None
+        else activity.occurred_at
+        if activity is not None and activity.occurred_at is not None
+        else activity.created_at
+        if activity is not None
+        else None
+    )
+    if (
+        not activity_project_link_is_actual(db, link, utc_now_ms() + 1)
+        or actual_at is None
+        or occurred_at < actual_at
+        or occurred_at > utc_now_ms()
+    ):
+        raise AppError(
+            422,
+            "PROJECT_EVIDENCE_ACTUALITY_INVALID",
+            "Project Evidence must follow an active actual Activity link.",
+        )
+    existing = db.scalar(
+        select(Evidence).where(
+            Evidence.source_type == "activity_project_task_link",
+            Evidence.source_id == link.id,
+            Evidence.source_role == opportunity.stable_key,
+            Evidence.policy_version == EVIDENCE_POLICY,
+        )
+    )
+    if existing is not None:
+        provenance = json.loads(existing.provenance_json)
+        if (
+            provenance.get("idempotency_key") != idempotency_key
+            or provenance.get("command_hash") != command_digest
+        ):
+            raise AppError(
+                409,
+                "PROJECT_EVIDENCE_EXISTS",
+                "Project Evidence already exists with another command.",
+            )
+        return existing
+    characteristics = json.loads(opportunity.intended_characteristics_json)
+    requires_artifact = bool(characteristics.get("requires_artifact"))
+    if requires_artifact and artifact_hash is None and external_reference is None:
+        raise AppError(
+            422,
+            "PROJECT_EVIDENCE_ARTIFACT_REQUIRED",
+            "This Project Evidence opportunity requires an artifact reference.",
+        )
+    if rubric_result is not None and opportunity.project_criterion_definition_id is None:
+        raise AppError(
+            422,
+            "PROJECT_EVIDENCE_RUBRIC_SCOPE_INVALID",
+            "A rubric result requires a ProjectCriterion-scoped Evidence opportunity.",
+        )
+    outcome = activity.outcome_classification if activity is not None else None
+    has_artifact = artifact_hash is not None or external_reference is not None
+    recorded_at = utc_now_ms()
+    sessions = db.scalars(
+        select(LearningSession).where(LearningSession.activity_id == link.activity_id)
+    ).all()
+    actual_sessions = [
+        item
+        for session in sessions
+        if (
+            item := session_actuality_as_of(
+                db, session_id=session.id, exclusive_cutoff_at=recorded_at + 1
+            )
+        )
+        is not None
+        and item.ended_at <= occurred_at
+    ]
+    derived = derive_project_evidence_characteristics(
+        activity_outcome=outcome,
+        has_artifact=has_artifact,
+        assistance_modes=tuple(sorted(item.assistance_mode for item in actual_sessions)),
+        attribution_provenance=link.provenance,
+        rubric_result=rubric_result,
+        has_project_criterion=opportunity.project_criterion_definition_id is not None,
+    )
+    intended_strengths = set(characteristics.get("intended_strengths", []))
+    intended_modes = set(characteristics.get("intended_independence_modes", []))
+    if (intended_strengths and derived.strength not in intended_strengths) or (
+        intended_modes and derived.independence not in intended_modes
+    ):
+        raise AppError(
+            422,
+            "PROJECT_EVIDENCE_CHARACTERISTICS_NOT_QUALIFYING",
+            "Actual execution characteristics do not satisfy this Evidence opportunity.",
+        )
+    targets = db.scalars(
+        select(ProjectTarget)
+        .where(
+            ProjectTarget.project_version_id == version.id,
+            (
+                (ProjectTarget.task_definition_id == task.id)
+                | (
+                    (ProjectTarget.task_definition_id.is_(None))
+                    & (ProjectTarget.project_criterion_definition_id.is_(None))
+                )
+                | (
+                    ProjectTarget.project_criterion_definition_id
+                    == opportunity.project_criterion_definition_id
+                )
+            ),
+        )
+        .order_by(ProjectTarget.order_index, ProjectTarget.id)
+    ).all()
+    if not targets:
+        raise AppError(
+            422,
+            "PROJECT_EVIDENCE_TARGET_MISSING",
+            "Project Evidence requires an exact authored competency target.",
+        )
+    provenance = {
+        "origin_kind": "local",
+        "creator_kind": "user",
+        "capture_method": "project_application_service",
+        "policy_version": EVIDENCE_POLICY,
+        "source_record_type": "activity_project_task_link",
+        "source_record_id": link.id,
+        "project_evidence_policy_version": PROJECT_EVIDENCE_POLICY,
+        "project_id": version.project_id,
+        "project_version_id": version.id,
+        "task_definition_id": task.id,
+        "activity_project_task_link_id": link.id,
+        "opportunity_id": opportunity.id,
+        "project_criterion_definition_id": opportunity.project_criterion_definition_id,
+        "idempotency_key": idempotency_key,
+        "command_hash": command_digest,
+        "derived_characteristics": {
+            "activityOutcome": outcome,
+            "assistanceModes": sorted(item.assistance_mode for item in actual_sessions),
+            "hasArtifact": has_artifact,
+            "rubricResult": rubric_result,
+        },
+    }
+    evidence = Evidence(
+        evidence_type=opportunity.evidence_kind,
+        source_type="activity_project_task_link",
+        source_id=link.id,
+        source_role=opportunity.stable_key,
+        title=title,
+        description=description,
+        strength=derived.strength,
+        strength_unknown_reason=derived.strength_unknown_reason,
+        independence=derived.independence,
+        independence_unknown_reason=derived.independence_unknown_reason,
+        source_confidence=derived.source_confidence,
+        source_confidence_unknown_reason=derived.source_confidence_unknown_reason,
+        occurred_at=occurred_at,
+        occurred_at_unknown_reason=None,
+        provenance_json=_canonical_json(provenance),
+        policy_version=EVIDENCE_POLICY,
+        schema_version=1,
+        artifact_hash=artifact_hash,
+        external_reference=external_reference,
+        authoritative_for_downgrade=False,
+        created_at=recorded_at,
+    )
+    db.add(evidence)
+    db.flush()
+    links: list[EvidenceLink] = []
+    linked_targets: set[tuple[str, str | None, str | None, str, str | None, str | None, str]] = (
+        set()
+    )
+    for target in targets:
+        definition = (
+            db.get(CriterionDefinition, target.criterion_definition_id)
+            if target.criterion_definition_id
+            else None
+        )
+        criterion = (
+            db.get(CriterionIdentity, definition.criterion_identity_id) if definition else None
+        )
+        semantic = db.get(SemanticCompetencyDefinition, target.semantic_definition_id)
+        assert semantic is not None
+        link_key = (
+            semantic.competency_identity_id,
+            criterion.id if criterion else None,
+            definition.id if definition else None,
+            target.scale_version_id,
+            target.dimension_id,
+            target.level_id,
+            target.role,
+        )
+        if link_key in linked_targets:
+            continue
+        linked_targets.add(link_key)
+        links.append(
+            _add_link(
+                db,
+                evidence,
+                EvidenceLinkCreate(
+                    competency_identity_id=semantic.competency_identity_id,
+                    criterion_identity_id=criterion.id if criterion else None,
+                    criterion_definition_id=definition.id if definition else None,
+                    scale_version_id=target.scale_version_id,
+                    dimension_id=target.dimension_id,
+                    level_id=target.level_id,
+                    effect="contradicts" if rubric_result == "not_met" else "supports",
+                    relevance=target.role,
+                ),
+                provenance=provenance,
+                idempotency_key=f"{idempotency_key}:{target.id}",
+            )
+        )
+    _queue_evidence_invalidations(db, source_fact_id=evidence.id, links=links)
+    return evidence
 
 
 def _canonical_json(value: Any) -> str:
@@ -85,6 +369,36 @@ def _queue_evidence_invalidations(
                     requested_at=now,
                 )
             )
+
+
+def invalidate_project_source_evidence(
+    db: Session, *, activity_project_task_link_id: str, reason: str
+) -> list[str]:
+    """Invalidate Evidence whose actual Project source attribution was corrected."""
+    invalidated: list[str] = []
+    items = db.scalars(
+        select(Evidence).where(
+            Evidence.source_type == "activity_project_task_link",
+            Evidence.source_id == activity_project_task_link_id,
+        )
+    ).all()
+    for item in items:
+        existing = db.scalar(
+            select(EvidenceInvalidation.id).where(EvidenceInvalidation.evidence_id == item.id)
+        )
+        if existing is not None:
+            continue
+        fact = EvidenceInvalidation(
+            evidence_id=item.id,
+            reason=reason,
+            actor_kind="system",
+        )
+        db.add(fact)
+        db.flush()
+        links = db.scalars(select(EvidenceLink).where(EvidenceLink.evidence_id == item.id)).all()
+        _queue_evidence_invalidations(db, source_fact_id=fact.id, links=links)
+        invalidated.append(item.id)
+    return invalidated
 
 
 def _validate_link(db: Session, payload: EvidenceLinkCreate) -> None:

@@ -8,7 +8,7 @@ import sqlite3
 import tempfile
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, cast
 
@@ -147,10 +147,42 @@ from app.portability.registry import (
     PORTABLE_V2_FOUNDATION_TABLES,
     PORTABLE_V2_MANIFEST,
     PORTABLE_V3_CURRICULUM_TABLES,
+    PORTABLE_V3_FORBIDDEN_TABLES,
     PORTABLE_V3_MANIFEST,
+    PORTABLE_V4_MANIFEST,
+    PORTABLE_V4_PROJECT_TABLES,
     supports_portable_schema,
     upgrade_v2_to_v3_tables,
+    upgrade_v3_to_v4_tables,
 )
+from app.projects.contracts import ProjectCatalogPublicDTO
+from app.projects.models import (
+    ActiveProjectVersionState,
+    ActivityProjectTaskLink,
+    ActivityProjectTaskLinkCorrection,
+    Project,
+    ProjectCriterionDefinition,
+    ProjectCriterionEvaluation,
+    ProjectCriterionEvaluationEvidence,
+    ProjectCriterionIdentity,
+    ProjectEvent,
+    ProjectEvidenceOpportunity,
+    ProjectGoalDefinition,
+    ProjectGoalIdentity,
+    ProjectMilestoneDefinition,
+    ProjectMilestoneIdentity,
+    ProjectRequirement,
+    ProjectTarget,
+    ProjectTaskDefinition,
+    ProjectTaskDependency,
+    ProjectTaskIdentity,
+    ProjectVersion,
+    ProjectVersionActivationEvent,
+    SessionProjectContribution,
+    SessionProjectContributionRetraction,
+)
+from app.projects.service import PROJECT_AVAILABILITY_POLICY
+from app.projects.service import build_catalog as build_project_catalog
 from app.schemas import (
     ExportRequest,
     ImportApplyRequest,
@@ -224,13 +256,34 @@ PORTABLE_MODELS = [
     AssessmentRubricDefinition,
     ActiveCurriculumVersionState,
     CurriculumActivationEvent,
+    Project,
+    ProjectVersion,
+    ProjectMilestoneIdentity,
+    ProjectMilestoneDefinition,
+    ProjectGoalIdentity,
+    ProjectGoalDefinition,
+    ProjectTaskIdentity,
+    ProjectTaskDefinition,
+    ProjectCriterionIdentity,
+    ProjectCriterionDefinition,
+    ProjectTarget,
+    ProjectRequirement,
+    ProjectTaskDependency,
+    ProjectEvidenceOpportunity,
+    ActiveProjectVersionState,
+    ProjectVersionActivationEvent,
+    ProjectEvent,
     ActivityCategoryVersion,
     Activity,
     ActivityCurriculumUnitLink,
     ActivityCurriculumLinkCorrection,
+    ActivityProjectTaskLink,
+    ActivityProjectTaskLinkCorrection,
     LearningSession,
     SessionContribution,
     ContributionRetraction,
+    SessionProjectContribution,
+    SessionProjectContributionRetraction,
     SessionCorrection,
     CompetencyState,
     VerificationRecord,
@@ -241,6 +294,8 @@ PORTABLE_MODELS = [
     EvidenceInvalidation,
     EvidenceLinkRetraction,
     EvidenceRedaction,
+    ProjectCriterionEvaluation,
+    ProjectCriterionEvaluationEvidence,
     CapabilityEvaluationRun,
     CriterionEvaluationResult,
     CapabilityStateEvent,
@@ -317,15 +372,182 @@ def _capability_projection_checkpoints(db: Session) -> list[dict[str, str]]:
     return checkpoints
 
 
-def _portable_payload(db: Session) -> dict[str, Any]:
+def _portable_payload(db: Session, project_ids: set[str] | None = None) -> dict[str, Any]:
     payload: dict[str, Any] = {
-        "manifest": PORTABLE_V3_MANIFEST,
+        "manifest": PORTABLE_V4_MANIFEST,
         "tables": {
             _table(model).name: [_row_dict(item) for item in db.scalars(select(model)).all()]
             for model in PORTABLE_MODELS
         },
     }
     tables = payload["tables"]
+    all_project_ids = {row["id"] for row in tables["projects"]}
+    if project_ids is not None and project_ids - all_project_ids:
+        raise AppError(
+            422,
+            "EXPORT_SCOPE_INVALID",
+            "A selected Project does not exist.",
+            {"unknownProjectIds": sorted(project_ids - all_project_ids)},
+        )
+    requested_project_ids = set(project_ids) if project_ids is not None else set(all_project_ids)
+    versions_by_id = {row["id"]: row for row in tables["project_versions"]}
+    task_defs_by_id = {row["id"]: row for row in tables["project_task_definitions"]}
+    project_links_by_id = {
+        row["id"]: row for row in tables["activity_project_task_links"]
+    }
+    project_criteria_by_identity = {
+        row["id"]: row for row in tables["project_criterion_identities"]
+    }
+    closure_project_ids: set[str] = set()
+    for row in tables["evidence"]:
+        if row["source_type"] != "activity_project_task_link":
+            continue
+        source_link = project_links_by_id.get(row["source_id"])
+        task = task_defs_by_id.get(source_link["task_definition_id"]) if source_link else None
+        version = versions_by_id.get(task["project_version_id"]) if task else None
+        if version is not None:
+            closure_project_ids.add(version["project_id"])
+    for row in tables["readiness_gate_predicates"]:
+        if row["predicate_type"] != "project_criterion_demonstrated":
+            continue
+        subject = json.loads(row["subject_json"])
+        identity = project_criteria_by_identity.get(subject.get("projectCriterionIdentityId"))
+        if identity is not None:
+            closure_project_ids.add(identity["project_id"])
+    included_project_ids = requested_project_ids | closure_project_ids
+    link_project_ids: dict[str, str] = {}
+    for link in tables["activity_project_task_links"]:
+        task = task_defs_by_id.get(link["task_definition_id"])
+        version = versions_by_id.get(task["project_version_id"]) if task else None
+        if version is not None:
+            link_project_ids[link["id"]] = version["project_id"]
+    contribution_project_ids = {
+        row["id"]: row["project_id"] for row in tables["session_project_contributions"]
+    }
+    changed = True
+    while changed:
+        changed = False
+        for correction in tables["activity_project_task_link_corrections"]:
+            original_project_id = link_project_ids.get(
+                correction["activity_project_task_link_id"]
+            )
+            replacement_project_id = link_project_ids.get(correction["replacement_link_id"])
+            if (
+                original_project_id in included_project_ids
+                and replacement_project_id is not None
+                and replacement_project_id not in included_project_ids
+            ):
+                included_project_ids.add(replacement_project_id)
+                changed = True
+        for retraction in tables["session_project_contribution_retractions"]:
+            original_project_id = contribution_project_ids.get(retraction["contribution_id"])
+            replacement_project_id = contribution_project_ids.get(
+                retraction["replacement_contribution_id"]
+            )
+            if (
+                original_project_id in included_project_ids
+                and replacement_project_id is not None
+                and replacement_project_id not in included_project_ids
+            ):
+                included_project_ids.add(replacement_project_id)
+                changed = True
+    closure_project_ids = included_project_ids - requested_project_ids
+
+    if included_project_ids != all_project_ids:
+        included_version_ids = {
+            row["id"]
+            for row in tables["project_versions"]
+            if row["project_id"] in included_project_ids
+        }
+        identity_tables = (
+            "project_goal_identities",
+            "project_task_identities",
+            "project_criterion_identities",
+            "project_milestone_identities",
+        )
+        for table_name in identity_tables:
+            tables[table_name] = [
+                row for row in tables[table_name] if row["project_id"] in included_project_ids
+            ]
+        definition_tables = (
+            "project_goal_definitions",
+            "project_task_definitions",
+            "project_criterion_definitions",
+            "project_milestone_definitions",
+            "project_targets",
+            "project_requirements",
+            "project_task_dependencies",
+            "project_evidence_opportunities",
+        )
+        for table_name in definition_tables:
+            tables[table_name] = [
+                row
+                for row in tables[table_name]
+                if row["project_version_id"] in included_version_ids
+            ]
+        included_task_definition_ids = {
+            row["id"] for row in tables["project_task_definitions"]
+        }
+        included_criterion_definition_ids = {
+            row["id"] for row in tables["project_criterion_definitions"]
+        }
+        tables["projects"] = [
+            row for row in tables["projects"] if row["id"] in included_project_ids
+        ]
+        tables["project_versions"] = [
+            row for row in tables["project_versions"] if row["id"] in included_version_ids
+        ]
+        tables["active_project_version_states"] = [
+            row
+            for row in tables["active_project_version_states"]
+            if row["project_id"] in included_project_ids
+        ]
+        for table_name in ("project_version_activation_events", "project_events"):
+            tables[table_name] = [
+                row for row in tables[table_name] if row["project_id"] in included_project_ids
+            ]
+        tables["activity_project_task_links"] = [
+            row
+            for row in tables["activity_project_task_links"]
+            if row["task_definition_id"] in included_task_definition_ids
+        ]
+        included_link_ids = {row["id"] for row in tables["activity_project_task_links"]}
+        tables["activity_project_task_link_corrections"] = [
+            row
+            for row in tables["activity_project_task_link_corrections"]
+            if row["activity_project_task_link_id"] in included_link_ids
+        ]
+        tables["session_project_contributions"] = [
+            row
+            for row in tables["session_project_contributions"]
+            if row["project_id"] in included_project_ids
+        ]
+        included_contribution_ids = {
+            row["id"] for row in tables["session_project_contributions"]
+        }
+        tables["session_project_contribution_retractions"] = [
+            row
+            for row in tables["session_project_contribution_retractions"]
+            if row["contribution_id"] in included_contribution_ids
+        ]
+        tables["project_criterion_evaluations"] = [
+            row
+            for row in tables["project_criterion_evaluations"]
+            if row["project_criterion_definition_id"] in included_criterion_definition_ids
+        ]
+        included_evaluation_ids = {
+            row["id"] for row in tables["project_criterion_evaluations"]
+        }
+        tables["project_criterion_evaluation_evidence"] = [
+            row
+            for row in tables["project_criterion_evaluation_evidence"]
+            if row["project_criterion_evaluation_id"] in included_evaluation_ids
+        ]
+    payload["portableScope"] = {
+        "requestedProjectIds": sorted(requested_project_ids),
+        "includedProjectIds": sorted(included_project_ids),
+        "closureAddedProjectIds": sorted(included_project_ids - requested_project_ids),
+    }
     evidence_by_id = {row["id"]: row for row in tables["evidence"]}
     verification_records = {row["id"]: row for row in tables["verification_records"]}
     verification_context = {row["id"]: row for row in tables["verification_evidence"]}
@@ -389,6 +611,38 @@ def _portable_payload(db: Session) -> dict[str, Any]:
     }
     checkpoint["inputHash"] = content_hash(checkpoint)
     payload["curriculumCatalogCheckpoint"] = checkpoint
+    project_cutoff = utc_now_ms() + 1
+    project_catalog = build_project_catalog(db, project_cutoff)
+    if included_project_ids != all_project_ids:
+        project_catalog = ProjectCatalogPublicDTO.build(
+            cutoff_at=project_catalog.cutoff_at,
+            active_version_references=tuple(
+                item
+                for item in project_catalog.active_version_references
+                if item.project_id in included_project_ids
+            ),
+            candidates=tuple(
+                item
+                for item in project_catalog.candidates
+                if item.project_id in included_project_ids
+            ),
+        )
+    project_references = [asdict(item) for item in project_catalog.active_version_references]
+    candidate_hashes = [
+        {"taskDefinitionId": item.task_definition_id, "inputHash": item.input_hash}
+        for item in project_catalog.candidates
+    ]
+    project_checkpoint = {
+        "cutoffAt": project_cutoff,
+        "cutoffSemantics": "exclusive",
+        "policyVersion": PROJECT_AVAILABILITY_POLICY,
+        "sourceHash": content_hash(project_references),
+        "catalogHash": project_catalog.input_hash,
+        "activeVersionReferences": project_references,
+        "candidateHashes": candidate_hashes,
+    }
+    project_checkpoint["inputHash"] = content_hash(project_checkpoint)
+    payload["projectCatalogCheckpoint"] = project_checkpoint
     return payload
 
 
@@ -512,6 +766,80 @@ def _assert_curriculum_checkpoint_parity(db: Session, checkpoint: dict[str, Any]
             422,
             "RESTORE_CURRICULUM_PARITY_FAILED",
             "The rebuilt Curriculum catalog does not match the exported checkpoint.",
+        )
+
+
+def _validate_project_checkpoint(payload: dict[str, Any], schema_version: int) -> None:
+    checkpoint = payload.get("projectCatalogCheckpoint")
+    if schema_version < 4:
+        if checkpoint is not None:
+            raise AppError(
+                422,
+                "PORTABLE_SCHEMA_INVALID",
+                "Portable schema versions before V4 cannot contain a Project checkpoint.",
+            )
+        return
+    expected = {
+        "cutoffAt",
+        "cutoffSemantics",
+        "policyVersion",
+        "sourceHash",
+        "catalogHash",
+        "activeVersionReferences",
+        "candidateHashes",
+        "inputHash",
+    }
+    if (
+        not isinstance(checkpoint, dict)
+        or set(checkpoint) != expected
+        or type(checkpoint["cutoffAt"]) is not int
+        or checkpoint["cutoffAt"] <= 0
+        or checkpoint["cutoffSemantics"] != "exclusive"
+        or checkpoint["policyVersion"] != PROJECT_AVAILABILITY_POLICY
+        or any(
+            not isinstance(checkpoint[key], str) or len(checkpoint[key]) != 64
+            for key in ("sourceHash", "catalogHash", "inputHash")
+        )
+        or not isinstance(checkpoint["activeVersionReferences"], list)
+        or not isinstance(checkpoint["candidateHashes"], list)
+        or checkpoint["sourceHash"] != content_hash(checkpoint["activeVersionReferences"])
+        or checkpoint["inputHash"]
+        != content_hash({key: value for key, value in checkpoint.items() if key != "inputHash"})
+    ):
+        raise AppError(422, "PORTABLE_SCHEMA_INVALID", "Project checkpoint is invalid.")
+    seen: set[str] = set()
+    for item in checkpoint["candidateHashes"]:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"taskDefinitionId", "inputHash"}
+            or not isinstance(item["taskDefinitionId"], str)
+            or item["taskDefinitionId"] in seen
+            or not isinstance(item["inputHash"], str)
+            or len(item["inputHash"]) != 64
+        ):
+            raise AppError(422, "PORTABLE_SCHEMA_INVALID", "Project checkpoint is invalid.")
+        seen.add(item["taskDefinitionId"])
+
+
+def _assert_project_checkpoint_parity(db: Session, checkpoint: dict[str, Any] | None) -> None:
+    if checkpoint is None:
+        return
+    restored = build_project_catalog(db, checkpoint["cutoffAt"])
+    references = [asdict(item) for item in restored.active_version_references]
+    candidate_hashes = [
+        {"taskDefinitionId": item.task_definition_id, "inputHash": item.input_hash}
+        for item in restored.candidates
+    ]
+    if (
+        restored.input_hash != checkpoint["catalogHash"]
+        or references != checkpoint["activeVersionReferences"]
+        or content_hash(references) != checkpoint["sourceHash"]
+        or candidate_hashes != checkpoint["candidateHashes"]
+    ):
+        raise AppError(
+            422,
+            "RESTORE_PROJECT_PARITY_FAILED",
+            "The rebuilt Project catalog does not match the exported checkpoint.",
         )
 
 
@@ -818,6 +1146,8 @@ def _insert_portable_tables(connection: Any, tables: dict[str, list[dict[str, An
     roadmap_pointers: list[tuple[str, str | None, str | None, bool]] = []
     parent_pointers: list[tuple[str, str | None]] = []
     curriculum_version_pointers: list[tuple[str, str | None]] = []
+    project_version_pointers: list[tuple[str, str | None]] = []
+    project_event_correction_pointers: list[tuple[str, str | None]] = []
     activity_supersession_pointers: list[tuple[str, str | None]] = []
     evidence_supersession_pointers: list[tuple[str, str | None]] = []
     evidence_replacement_pointers: list[tuple[str, str | None]] = []
@@ -846,6 +1176,14 @@ def _insert_portable_tables(connection: Any, tables: dict[str, list[dict[str, An
             for row in rows:
                 curriculum_version_pointers.append((row["id"], row.get("supersedes_version_id")))
                 row["supersedes_version_id"] = None
+        if model is ProjectVersion:
+            for row in rows:
+                project_version_pointers.append((row["id"], row.get("supersedes_version_id")))
+                row["supersedes_version_id"] = None
+        if model is ProjectEvent:
+            for row in rows:
+                project_event_correction_pointers.append((row["id"], row.get("corrects_event_id")))
+                row["corrects_event_id"] = None
         if model is Activity:
             for row in rows:
                 activity_supersession_pointers.append(
@@ -887,6 +1225,22 @@ def _insert_portable_tables(connection: Any, tables: dict[str, list[dict[str, An
                 .update()
                 .where(CurriculumVersion.id == curriculum_version_id)
                 .values(supersedes_version_id=supersedes_id)
+            )
+    for project_version_id, supersedes_id in project_version_pointers:
+        if supersedes_id:
+            connection.execute(
+                _table(ProjectVersion)
+                .update()
+                .where(ProjectVersion.id == project_version_id)
+                .values(supersedes_version_id=supersedes_id)
+            )
+    for project_event_id, corrects_id in project_event_correction_pointers:
+        if corrects_id:
+            connection.execute(
+                _table(ProjectEvent)
+                .update()
+                .where(ProjectEvent.id == project_event_id)
+                .values(corrects_event_id=corrects_id)
             )
     for activity_id, supersedes_id in activity_supersession_pointers:
         if supersedes_id:
@@ -986,6 +1340,34 @@ def _normalize_portable_tables(
         raise AppError(
             422, "PORTABLE_SCHEMA_INVALID", "The portable backup payload is invalid."
         ) from exc
+    if parsed.portableScope is not None:
+        scope = parsed.portableScope
+        expected_scope_keys = {
+            "requestedProjectIds",
+            "includedProjectIds",
+            "closureAddedProjectIds",
+        }
+        if (
+            schema_version < 4
+            or set(scope) != expected_scope_keys
+            or any(not isinstance(scope[key], list) for key in expected_scope_keys)
+            or any(
+                not all(isinstance(item, str) and item for item in scope[key])
+                for key in expected_scope_keys
+            )
+        ):
+            raise AppError(422, "PORTABLE_SCHEMA_INVALID", "Portable scope is invalid.")
+        requested = set(scope["requestedProjectIds"])
+        included = set(scope["includedProjectIds"])
+        closure = set(scope["closureAddedProjectIds"])
+        actual = {row.get("id") for row in parsed.tables.get("projects", [])}
+        if (
+            any(len(scope[key]) != len(set(scope[key])) for key in expected_scope_keys)
+            or not requested <= included
+            or closure != included - requested
+            or included != actual
+        ):
+            raise AppError(422, "PORTABLE_SCHEMA_INVALID", "Portable scope is inconsistent.")
     if schema_version == 2 and parsed.manifest != PORTABLE_V2_MANIFEST:
         raise AppError(
             422,
@@ -1001,6 +1383,12 @@ def _normalize_portable_tables(
             "PORTABLE_MANIFEST_INVALID",
             "The portable V3 manifest is missing or does not match the recovery contract.",
         )
+    if schema_version == 4 and parsed.manifest != PORTABLE_V4_MANIFEST:
+        raise AppError(
+            422,
+            "PORTABLE_MANIFEST_INVALID",
+            "The portable V4 manifest is missing or does not match the recovery contract.",
+        )
     if schema_version == 1 and parsed.manifest is not None:
         raise AppError(
             422, "PORTABLE_SCHEMA_INVALID", "A V1 portable package cannot contain a V2 manifest."
@@ -1014,15 +1402,21 @@ def _normalize_portable_tables(
         raise AppError(
             422, "PORTABLE_SCHEMA_INVALID", "A V2 portable package cannot contain V3 tables."
         )
+    if schema_version == 3 and set(tables) & set(PORTABLE_V3_FORBIDDEN_TABLES):
+        raise AppError(
+            422, "PORTABLE_SCHEMA_INVALID", "A V3 portable package cannot contain V4 tables."
+        )
     unknown = set(tables) - set(PORTABLE_BY_TABLE)
     v2_tables = set(PORTABLE_V2_FOUNDATION_TABLES)
     v3_tables = set(PORTABLE_V3_CURRICULUM_TABLES)
+    v4_tables = set(PORTABLE_V4_PROJECT_TABLES)
     missing = set(PORTABLE_BY_TABLE) - set(tables)
-    allowed_v1_missing = v2_tables | v3_tables | {"roadmap_scope_events"}
+    allowed_v1_missing = v2_tables | v3_tables | v4_tables | {"roadmap_scope_events"}
     legacy_without_scope_history = schema_version == 1 and "roadmap_scope_events" in missing
     valid_missing = (
         (schema_version == 1 and missing <= allowed_v1_missing)
-        or (schema_version == 2 and missing <= v3_tables)
+        or (schema_version == 2 and missing <= (v3_tables | v4_tables))
+        or (schema_version == 3 and missing <= v4_tables)
         or not missing
     )
     if unknown or not valid_missing:
@@ -1043,8 +1437,12 @@ def _normalize_portable_tables(
         for row in tables.get("recommendation_snapshots", []):
             row.setdefault("analysis_snapshot_id", None)
         upgrade_v2_to_v3_tables(tables)
+        upgrade_v3_to_v4_tables(tables)
     elif schema_version == 2:
         upgrade_v2_to_v3_tables(tables)
+        upgrade_v3_to_v4_tables(tables)
+    elif schema_version == 3:
+        upgrade_v3_to_v4_tables(tables)
     return tables, legacy_without_scope_history
 
 
@@ -1056,6 +1454,7 @@ def _validate_portable_payload(
     )
     _validate_capability_checkpoints(payload, tables)
     _validate_curriculum_checkpoint(payload, schema_version)
+    _validate_project_checkpoint(payload, schema_version)
     for table_name, rows in tables.items():
         if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
             raise AppError(422, "PORTABLE_SCHEMA_INVALID", f"Table {table_name} has invalid rows.")
@@ -1086,6 +1485,9 @@ def _validate_portable_payload(
                 with Session(bind=connection) as validation_db:
                     _assert_curriculum_checkpoint_parity(
                         validation_db, payload.get("curriculumCatalogCheckpoint")
+                    )
+                    _assert_project_checkpoint_parity(
+                        validation_db, payload.get("projectCatalogCheckpoint")
                     )
         finally:
             validation_engine.dispose()
@@ -1120,11 +1522,19 @@ def _validate_portable_payload(
             "nativeSemanticDefinitionsInferred": 0,
             "targetProfilesInferred": 0,
             "nativeCurriculaInferred": 0,
+            "nativeProjectsInferred": 0,
         }
     elif schema_version == 2:
         compatibility_conversions = {
             "initializedCurriculumTables": len(PORTABLE_V3_CURRICULUM_TABLES),
             "nativeCurriculaInferred": 0,
+            "initializedProjectTables": len(PORTABLE_V4_PROJECT_TABLES),
+            "nativeProjectsInferred": 0,
+        }
+    elif schema_version == 3:
+        compatibility_conversions = {
+            "initializedProjectTables": len(PORTABLE_V4_PROJECT_TABLES),
+            "nativeProjectsInferred": 0,
         }
     return tables, {
         "tableCounts": {name: len(rows) for name, rows in sorted(tables.items())},
@@ -1334,6 +1744,10 @@ def _delete_portable_state(db: Session) -> None:
     db.execute(_table(ProjectionInvalidation).delete())
     db.execute(_table(CompetencyReviewState).delete())
     db.execute(_table(CompetencyCapabilityState).delete())
+    db.execute(_table(CompetencyDefinition).update().values(parent_definition_id=None))
+    db.execute(_table(CurriculumVersion).update().values(supersedes_version_id=None))
+    db.execute(_table(ProjectVersion).update().values(supersedes_version_id=None))
+    db.execute(_table(ProjectEvent).update().values(corrects_event_id=None))
     db.execute(_table(Activity).update().values(supersedes_activity_id=None))
     db.execute(_table(Evidence).update().values(supersedes_evidence_id=None))
     db.execute(_table(EvidenceRetraction).update().values(replacement_evidence_id=None))
@@ -1367,6 +1781,7 @@ def _apply_portable_restore(
         for item in payload.get("capabilityProjectionCheckpoints", [])
     }
     curriculum_checkpoint = payload.get("curriculumCatalogCheckpoint")
+    project_checkpoint = payload.get("projectCatalogCheckpoint")
     tables, legacy_without_scope_history = _normalize_portable_tables(
         payload, package_id, schema_version
     )
@@ -1383,6 +1798,7 @@ def _apply_portable_restore(
     _insert_portable_tables(db.connection(), tables)
     db.flush()
     _assert_curriculum_checkpoint_parity(db, curriculum_checkpoint)
+    _assert_project_checkpoint_parity(db, project_checkpoint)
     restored_capability_baseline: dict[tuple[str, str], tuple[str, str]] = {}
     for run in db.scalars(
         select(CapabilityEvaluationRun).order_by(
@@ -1509,7 +1925,7 @@ async def export_data(
     if payload.purpose == "portable_logical_backup":
         result: Any = _envelope(
             payload.purpose,
-            _portable_payload(db),
+            _portable_payload(db, set(payload.project_ids) if payload.project_ids else None),
             schema_version=PORTABLE_SCHEMA_CURRENT,
         )
     else:

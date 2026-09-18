@@ -424,6 +424,8 @@ class SessionContributionCreate(StrictModel):
     target_type: Literal["competency", "project"] = "competency"
     competency_identity_id: str | None = None
     project_id: str | None = None
+    project_version_id: str | None = None
+    project_task_definition_id: str | None = None
     criterion_identity_id: str | None = None
     relevance: Literal["primary", "secondary", "supporting"]
     provenance: Literal["user_selected", "user_confirmed"] = "user_selected"
@@ -431,9 +433,18 @@ class SessionContributionCreate(StrictModel):
     @model_validator(mode="after")
     def contribution_target_is_explicit(self) -> SessionContributionCreate:
         if self.target_type == "project":
-            if self.project_id is None or self.competency_identity_id is not None:
-                raise ValueError("A project contribution requires only project_id.")
-        elif self.competency_identity_id is None or self.project_id is not None:
+            if (
+                self.project_id is None
+                or self.competency_identity_id is not None
+                or self.criterion_identity_id is not None
+            ):
+                raise ValueError("A project contribution requires Project references only.")
+        elif (
+            self.competency_identity_id is None
+            or self.project_id is not None
+            or self.project_version_id is not None
+            or self.project_task_definition_id is not None
+        ):
             raise ValueError("A competency contribution requires only competency_identity_id.")
         return self
 
@@ -557,7 +568,15 @@ class ExportRequest(StrictModel):
     current_phase_only: bool = False
     track_ids: list[str] = Field(default_factory=list)
     competency_identity_ids: list[str] = Field(default_factory=list)
+    project_ids: list[str] = Field(default_factory=list)
     categories: list[ExportCategory] = Field(default_factory=list)
+
+    @field_validator("project_ids")
+    @classmethod
+    def unique_project_ids(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)) or any(not item for item in value):
+            raise ValueError("project_ids must contain unique non-empty identifiers")
+        return value
 
     @model_validator(mode="after")
     def validate_combination(self) -> ExportRequest:
@@ -570,6 +589,8 @@ class ExportRequest(StrictModel):
             raise ValueError(f"{self.purpose} requires {expected} format")
         if self.range == "custom" and (not self.start_date or not self.end_date):
             raise ValueError("A custom range requires start_date and end_date")
+        if self.project_ids and self.purpose != "portable_logical_backup":
+            raise ValueError("project_ids is supported only for portable logical backups")
         return self
 
 
@@ -624,8 +645,10 @@ class StateUpdatePayload(StrictModel):
 class PortablePackagePayload(StrictModel):
     tables: dict[str, list[dict[str, Any]]]
     manifest: dict[str, Any] | None = None
+    portableScope: dict[str, Any] | None = None
     capabilityProjectionCheckpoints: list[dict[str, Any]] = Field(default_factory=list)
     curriculumCatalogCheckpoint: dict[str, Any] | None = None
+    projectCatalogCheckpoint: dict[str, Any] | None = None
 
 
 class ImportInspectRequest(StrictModel):

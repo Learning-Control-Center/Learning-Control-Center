@@ -6,6 +6,7 @@ from alembic import context
 from app import models  # noqa: F401
 from app.curriculum import models as curriculum_models  # noqa: F401
 from app.database import Base
+from app.projects import models as project_models  # noqa: F401
 from sqlalchemy import engine_from_config, pool
 
 config = context.config

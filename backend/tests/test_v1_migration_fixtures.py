@@ -351,7 +351,7 @@ def test_migration_creates_verified_backup_before_mutation(
     manifest = json.loads(manifest_path.read_text())
     assert manifest["checksumSha256"] == backup_digest
     assert manifest["sourceRevision"] == "0002_roadmap_scope_events"
-    assert manifest["targetRevision"] == "0011_curriculum_core"
+    assert manifest["targetRevision"] == "0012_project_core"
     assert os.stat(manifest_path).st_mode & 0o777 == 0o600
     original = sqlite3.connect(FIXTURES / "populated-0002.sqlite3")
     copied = sqlite3.connect(backup)
@@ -458,7 +458,7 @@ def test_partial_0003_is_refused_then_verified_v1_restore_can_upgrade(
     restored = sqlite3.connect(database_path)
     try:
         assert restored.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "0011_curriculum_core",
+            "0012_project_core",
         )
         assert restored.execute("SELECT credential_generation FROM users").fetchone() == (2,)
         assert restored.execute("SELECT revoked_at IS NOT NULL FROM auth_sessions").fetchone() == (

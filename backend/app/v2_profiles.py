@@ -42,6 +42,7 @@ from app.models import (
     TargetProfileVersion,
     new_id,
 )
+from app.projects.models import ProjectCriterionIdentity
 from app.schemas import (
     ActivationRequest,
     CompetencyIdentityCreate,
@@ -159,12 +160,6 @@ def _validate_gate_subject(
     target_identities: dict[str, ProfileTargetIdentity],
 ) -> None:
     subject = predicate.subject
-    if predicate.predicate_type == "project_criterion_demonstrated":
-        raise AppError(
-            422,
-            "FEATURE_NOT_AVAILABLE",
-            "Project readiness predicates are unavailable until the Projects domain exists.",
-        )
     expected: dict[str, set[str]] = {
         "capability_at_least": {
             "competencyIdentityId",
@@ -174,6 +169,7 @@ def _validate_gate_subject(
             "levelStableKey",
         },
         "criterion_demonstrated": {"criterionIdentityId"},
+        "project_criterion_demonstrated": {"projectCriterionIdentityId"},
         "evidence_present": {"evidencePolicyStableKey"},
     }
     if set(subject) != expected[predicate.predicate_type] or any(
@@ -201,6 +197,13 @@ def _validate_gate_subject(
     elif predicate.predicate_type == "criterion_demonstrated":
         if db.get(CriterionIdentity, subject["criterionIdentityId"]) is None:
             raise AppError(422, "READINESS_PREDICATE_INVALID", "The criterion does not exist.")
+    elif predicate.predicate_type == "project_criterion_demonstrated":
+        if db.get(ProjectCriterionIdentity, subject["projectCriterionIdentityId"]) is None:
+            raise AppError(
+                422,
+                "READINESS_PREDICATE_INVALID",
+                "The ProjectCriterion does not exist.",
+            )
 
 
 def _serialize_scale(db: Session, scale: CapabilityScaleVersion) -> dict[str, Any]:

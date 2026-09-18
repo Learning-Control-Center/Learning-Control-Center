@@ -233,6 +233,31 @@ def _assert_known_migration_source(
         "activity_curriculum_unit_links",
         "activity_curriculum_link_corrections",
     }
+    project_tables = {
+        "projects",
+        "project_versions",
+        "project_goal_identities",
+        "project_goal_definitions",
+        "project_task_identities",
+        "project_task_definitions",
+        "project_criterion_identities",
+        "project_criterion_definitions",
+        "project_milestone_identities",
+        "project_milestone_definitions",
+        "project_targets",
+        "project_requirements",
+        "project_task_dependencies",
+        "project_evidence_opportunities",
+        "active_project_version_states",
+        "project_version_activation_events",
+        "project_events",
+        "activity_project_task_links",
+        "activity_project_task_link_corrections",
+        "session_project_contributions",
+        "session_project_contribution_retractions",
+        "project_criterion_evaluations",
+        "project_criterion_evaluation_evidence",
+    }
     projection_columns = {
         row[1] for row in connection.execute("PRAGMA table_info(projection_invalidations)")
     }
@@ -341,6 +366,13 @@ def _assert_known_migration_source(
     ):
         raise RuntimeError(
             "Database has an ambiguously partial Curriculum migration; restore its verified "
+            "pre-migration backup before retrying."
+        )
+    if revision == "0011_curriculum_core" and (
+        bool(project_tables & tables) or any(name.startswith("_alembic_tmp_") for name in tables)
+    ):
+        raise RuntimeError(
+            "Database has an ambiguously partial Project migration; restore its verified "
             "pre-migration backup before retrying."
         )
 
