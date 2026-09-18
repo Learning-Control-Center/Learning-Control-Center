@@ -120,7 +120,7 @@ Import inspection validates exact table/column coverage, strict canonical scalar
 
 The restore inspection response includes `replacementDiff`, which compares current and incoming portable state by table and by portable domain. It reports existing and incoming row counts plus rows that will be added, modified, or removed, identifies every affected domain, and states that authentication is preserved and merge restore is unsupported.
 
-Current application-produced portable backups use `schemaVersion: 2` and include immutable analysis, profile, semantic competency, activation, legacy-criterion lineage, Activity, Session attribution, unified Evidence, EvidenceLink, lifecycle, redaction, capability-evaluation, criterion-result, capability-event, and review-event history. Capability runs retain their canonical input payload and hashes. The payload also carries `capabilityProjectionCheckpoints`, which bind each exported current subject/scope projection to its immutable run, Evidence-set hash, and expected output hash. Their manifest explicitly omits current capability/review projections and `projection_invalidations`; restore clears the queue, validates retained run lineage against canonical Evidence at each cutoff, deterministically rebuilds the projections, and requires checkpoint output parity before commit. Frozen V1 portable backups remain accepted through a dedicated schema-version dispatch: built-in Technical/CEFR scale facts are added deterministically, every legacy criterion receives one unknown-preserving assertion, every legacy Session receives one deterministic Activity, a non-null legacy competency attribution receives one Primary SessionContribution, and qualifying legacy Session/Verification sources receive provenance-bearing Evidence without inferred strength, source confidence, criterion scope, or capability. Other absent V2 tables are initialized empty, and legacy recommendation rows retain a null analysis link. The inspection summary reports row counts and source/result hashes for those conversions and confirms that no semantic definition, target profile, or capability was inferred. Older valid V1 backups that also lack `roadmap_scope_events` are identified with `portableCompatibility: "legacy_scope_baseline"`; restore creates at most one deterministic current-scope baseline from the current roadmap pointers and that roadmap row's `updated_at`. It never invents earlier phase changes. A current-format restore preserves imported history and records a `portable_restore` event only when it changes the local current scope.
+Current application-produced portable backups use `schemaVersion: 3`. In addition to the V2 foundation, V3 includes canonical Curriculum identities, immutable versions, objectives, learning units, exact semantic targets, typed requirements, Evidence-opportunity definitions, assessment rubrics, activation events, and Activity/Curriculum link-correction history. Curriculum availability is explicitly rebuildable and is never exported as capability truth. Capability runs retain their canonical input payload and hashes. The payload carries `capabilityProjectionCheckpoints` and a `curriculumCatalogCheckpoint`; these bind rebuildable state to immutable lineage, an exclusive cutoff, explicit policy versions, source/catalog hashes, active-version references, and per-unit availability hashes. The manifest explicitly omits current capability/review projections, Curriculum availability, and `projection_invalidations`; restore clears the queue, validates retained lineage, deterministically rebuilds projections, and requires checkpoint parity before commit. Frozen V1 and V2 portable backups remain accepted through linear schema-version dispatch. V1 conversion adds built-in Technical/CEFR scale facts, unknown-preserving legacy assertions, deterministic Activities/SessionContribution, and provenance-bearing Evidence without inferred strength, source confidence, criterion scope, Curriculum, or capability. The V2-to-V3 adapter initializes the Curriculum tables empty and never fabricates mappings from legacy titles, notes, exit criteria, or Roadmap structure. Older valid V1 backups that also lack `roadmap_scope_events` are identified with `portableCompatibility: "legacy_scope_baseline"`; restore creates at most one deterministic current-scope baseline and never invents earlier phase changes.
 
 ### Representative empty portable package
 
@@ -128,19 +128,20 @@ This valid package represents an empty portable learning state. Non-empty export
 
 ```json
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "packageType": "portable_logical_backup",
-  "packageId": "example-empty-portable-v2",
+  "packageId": "example-empty-portable-v3",
   "appVersion": "1.0.0",
   "createdAt": "2026-09-04T18:30:00.000Z",
   "payload": {
     "manifest": {
-      "includedCanonicalDomains": ["learning_state", "target_profiles", "semantic_competency_definitions", "capability_scales", "legacy_criterion_assertions", "activities", "session_contributions", "evidence", "evidence_links"],
-      "includedImmutableHistory": ["analysis_runs", "analysis_snapshots", "target_profile_activation_events", "competency_definition_activation_events", "migration_backfill_runs", "contribution_retractions", "session_corrections", "evidence_retractions", "evidence_invalidations", "evidence_link_retractions", "evidence_redactions", "capability_evaluation_runs", "criterion_evaluation_results", "capability_state_events", "review_events"],
-      "omittedRebuildableState": ["competency_capability_states", "competency_review_states", "projection_invalidations"],
-      "restoreActions": ["clear_projection_invalidations", "rebuild_capability_states", "rebuild_review_states", "verify_projection_hash_parity"]
+      "includedCanonicalDomains": ["learning_state", "target_profiles", "semantic_competency_definitions", "capability_scales", "legacy_criterion_assertions", "activities", "session_contributions", "evidence", "evidence_links", "curriculum", "curriculum_activity_links"],
+      "includedImmutableHistory": ["analysis_runs", "analysis_snapshots", "target_profile_activation_events", "competency_definition_activation_events", "migration_backfill_runs", "contribution_retractions", "session_corrections", "evidence_retractions", "evidence_invalidations", "evidence_link_retractions", "evidence_redactions", "capability_evaluation_runs", "criterion_evaluation_results", "capability_state_events", "review_events", "curriculum_versions", "curriculum_activation_events", "activity_curriculum_link_corrections"],
+      "omittedRebuildableState": ["competency_capability_states", "competency_review_states", "projection_invalidations", "curriculum_availability"],
+      "restoreActions": ["clear_projection_invalidations", "rebuild_capability_states", "rebuild_review_states", "verify_projection_hash_parity", "rebuild_curriculum_availability", "verify_curriculum_catalog_hash_parity"]
     },
     "capabilityProjectionCheckpoints": [],
+    "curriculumCatalogCheckpoint": {"cutoffAt":1788912000001,"cutoffSemantics":"exclusive","policyVersion":"curriculum-availability-policy/v1","sourceHash":"4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945","catalogHash":"61b6254101fd15086e67911ab858b340167acff86d66edc82431399e61c1b615","activeVersionReferences":[],"availabilityHashes":[],"inputHash":"cf23256f777851e3cef3ef46370ae4d274c11c2aa9f998e334a91668aee84593"},
     "tables": {
       "roadmaps": [],
       "roadmap_versions": [],
@@ -198,6 +199,21 @@ This valid package represents an empty portable learning state. Non-empty export
       "active_competency_definition_states": [],
       "competency_definition_activation_events": [],
       "legacy_criterion_assertions": [],
+      "curricula": [],
+      "curriculum_versions": [],
+      "curriculum_objective_identities": [],
+      "curriculum_objective_definitions": [],
+      "learning_unit_identities": [],
+      "learning_unit_definitions": [],
+      "learning_unit_targets": [],
+      "learning_unit_requirements": [],
+      "curriculum_evidence_opportunities": [],
+      "assessment_rubric_identities": [],
+      "assessment_rubric_definitions": [],
+      "active_curriculum_version_states": [],
+      "curriculum_activation_events": [],
+      "activity_curriculum_unit_links": [],
+      "activity_curriculum_link_corrections": [],
       "migration_backfill_runs": [{"id":"dd3eef0d-c7ee-5f65-9911-f27d07743d2d","policy_key":"legacy-backfill-policy/v1","source_kind":"v1_exit_criteria","source_row_count":0,"result_row_count":0,"source_hash":"4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945","result_hash":"4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945","recorded_at":1788912000000},{"id":"62bbb6ce-c7bf-517d-83c5-27b02b370af4","policy_key":"activity-legacy-backfill-policy/v1","source_kind":"v1_learning_sessions","source_row_count":0,"result_row_count":0,"source_hash":"4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945","result_hash":"4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945","recorded_at":1788912000000},{"id":"9e14f409-7920-5a86-b5c8-dc180085b933","policy_key":"unified-evidence-legacy-backfill/v1","source_kind":"v1_evidence_sources","source_row_count":0,"result_row_count":0,"source_hash":"4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945","result_hash":"4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945","recorded_at":1788912000000}],
       "daily_reflections": [],
       "generated_reports": [],
@@ -332,7 +348,7 @@ This synthetic package is for demonstrations and populated-state testing, not a 
 
 | Name | JSON type | Required | Allowed value/semantics | Example |
 | --- | --- | --- | --- | --- |
-| `schemaVersion` | integer | yes | `1` for V1 packages; portable backup/restore also accepts and exports `2` | `2` |
+| `schemaVersion` | integer | yes | `1` for V1 packages; portable backup/restore accepts `1` through `3` and exports `3` | `3` |
 | `packageType` | string | yes | One accepted import type listed above; exports use `analysis_snapshot` or `portable_logical_backup` | `roadmap_update` |
 | `packageId` | string | yes | Non-empty, at most 255 characters; must not have been applied before | `example-package-001` |
 | `appVersion` | string | yes | Producer application version; recorded, not semantically compared | `1.0.0` |

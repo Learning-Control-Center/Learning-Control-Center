@@ -625,6 +625,7 @@ class PortablePackagePayload(StrictModel):
     tables: dict[str, list[dict[str, Any]]]
     manifest: dict[str, Any] | None = None
     capabilityProjectionCheckpoints: list[dict[str, Any]] = Field(default_factory=list)
+    curriculumCatalogCheckpoint: dict[str, Any] | None = None
 
 
 class ImportInspectRequest(StrictModel):

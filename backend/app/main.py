@@ -17,6 +17,8 @@ from app.auth import router as auth_router
 from app.capability import drain_projection_invalidations
 from app.capability import router as capability_router
 from app.config import get_settings, is_strong_operator_secret
+from app.curriculum import models as curriculum_models  # noqa: F401
+from app.curriculum.api import router as curriculum_router
 from app.database import SessionLocal, initialize_database, run_migrations
 from app.errors import install_error_handlers
 from app.evidence import router as evidence_router
@@ -152,3 +154,4 @@ app.include_router(v2_profile_router, prefix="/api/v2")
 app.include_router(v2_activity_router, prefix="/api/v2")
 app.include_router(evidence_router, prefix="/api/v2")
 app.include_router(capability_router, prefix="/api/v2")
+app.include_router(curriculum_router, prefix="/api/v2")

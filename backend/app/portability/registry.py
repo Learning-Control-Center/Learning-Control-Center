@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-PORTABLE_SCHEMA_CURRENT = 2
-PORTABLE_SCHEMA_READABLE = frozenset({1, 2})
+PORTABLE_SCHEMA_CURRENT = 3
+PORTABLE_SCHEMA_READABLE = frozenset({1, 2, 3})
 PORTABLE_V2_FOUNDATION_TABLES = frozenset(
     {
         "analysis_runs",
@@ -92,6 +92,62 @@ PORTABLE_V2_MANIFEST = {
         "verify_projection_hash_parity",
     ],
 }
+
+PORTABLE_V3_CURRICULUM_TABLES = frozenset(
+    {
+        "curricula",
+        "curriculum_versions",
+        "curriculum_objective_identities",
+        "curriculum_objective_definitions",
+        "learning_unit_identities",
+        "learning_unit_definitions",
+        "learning_unit_targets",
+        "learning_unit_requirements",
+        "curriculum_evidence_opportunities",
+        "assessment_rubric_identities",
+        "assessment_rubric_definitions",
+        "active_curriculum_version_states",
+        "curriculum_activation_events",
+        "activity_curriculum_unit_links",
+        "activity_curriculum_link_corrections",
+    }
+)
+PORTABLE_V1_FORBIDDEN_TABLES = frozenset(
+    set(PORTABLE_V1_FORBIDDEN_TABLES) | set(PORTABLE_V3_CURRICULUM_TABLES)
+)
+PORTABLE_V2_FORBIDDEN_TABLES = PORTABLE_V3_CURRICULUM_TABLES
+PORTABLE_V3_MANIFEST = {
+    "includedCanonicalDomains": [
+        *PORTABLE_V2_MANIFEST["includedCanonicalDomains"],
+        "curriculum",
+        "curriculum_activity_links",
+    ],
+    "includedImmutableHistory": [
+        *PORTABLE_V2_MANIFEST["includedImmutableHistory"],
+        "curriculum_versions",
+        "curriculum_activation_events",
+        "activity_curriculum_link_corrections",
+    ],
+    "omittedRebuildableState": [
+        *PORTABLE_V2_MANIFEST["omittedRebuildableState"],
+        "curriculum_availability",
+    ],
+    "restoreActions": [
+        *PORTABLE_V2_MANIFEST["restoreActions"],
+        "rebuild_curriculum_availability",
+        "verify_curriculum_catalog_hash_parity",
+    ],
+}
+
+
+def upgrade_v2_to_v3_tables(tables: dict[str, list[dict[str, object]]]) -> dict[str, int]:
+    """Apply the lossless v2-to-v3 empty Curriculum-domain adapter in place."""
+    created = 0
+    for table_name in sorted(PORTABLE_V3_CURRICULUM_TABLES):
+        if table_name not in tables:
+            tables[table_name] = []
+            created += 1
+    return {"initializedCurriculumTables": created}
 
 
 def supports_portable_schema(version: int) -> bool:

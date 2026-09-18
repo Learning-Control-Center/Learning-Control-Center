@@ -18,6 +18,7 @@ from app.models import (
     RecommendationSnapshot,
     Roadmap,
 )
+from app.portability.registry import PORTABLE_SCHEMA_CURRENT
 from httpx import AsyncClient
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -25,7 +26,7 @@ from sqlalchemy.orm import Session
 
 def _package(db: Session, package_id: str) -> dict[str, Any]:
     return {
-        "schemaVersion": 2,
+        "schemaVersion": PORTABLE_SCHEMA_CURRENT,
         "packageType": "portable_logical_backup",
         "packageId": package_id,
         "appVersion": "1.0.0",
@@ -220,6 +221,6 @@ def test_post_restore_domain_failure_rolls_back_replacement(
 
     with pytest.raises(AppError) as raised:
         with db.begin():
-            _apply_portable_restore(db, package["payload"], replace_existing=True, schema_version=2)
+            _apply_portable_restore(db, package["payload"], replace_existing=True, schema_version=3)
     assert raised.value.code == "PORTABLE_COMPETENCY_STATE_INVALID"
     assert db.scalar(select(func.count()).select_from(Roadmap)) == roadmap_count

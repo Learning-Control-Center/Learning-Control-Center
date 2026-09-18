@@ -24,13 +24,21 @@ export class ApiError extends Error {
 }
 
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+  return apiVersioned<T>('/api/v1', path, init)
+}
+
+export async function apiV2<T>(path: string, init: RequestInit = {}): Promise<T> {
+  return apiVersioned<T>('/api/v2', path, init)
+}
+
+async function apiVersioned<T>(prefix: string, path: string, init: RequestInit): Promise<T> {
   const method = (init.method ?? 'GET').toUpperCase()
   const headers = new Headers(init.headers)
   if (init.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
   if (!['GET', 'HEAD', 'OPTIONS'].includes(method) && csrfToken) {
     headers.set('X-CSRF-Token', csrfToken)
   }
-  const response = await fetch(`/api/v1${path}`, {
+  const response = await fetch(`${prefix}${path}`, {
     ...init,
     headers,
     credentials: 'include',

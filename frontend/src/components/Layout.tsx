@@ -2,6 +2,7 @@ import {
   Activity,
   BarChart3,
   BookOpenCheck,
+  LibraryBig,
   CalendarClock,
   FileOutput,
   LogOut,
@@ -20,6 +21,7 @@ import { useAuth } from '../auth'
 const navigation = [
   { to: '/', label: 'Today', icon: Sparkles },
   { to: '/roadmap', label: 'Roadmap', icon: Map },
+  { to: '/curriculum', label: 'Curriculum', icon: LibraryBig },
   { to: '/sessions', label: 'Log & sessions', icon: CalendarClock },
   { to: '/analytics', label: 'Analytics', icon: BarChart3 },
   { to: '/reports', label: 'Reports', icon: BookOpenCheck },

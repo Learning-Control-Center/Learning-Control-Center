@@ -18,6 +18,7 @@ from sqlalchemy import Engine, Table, insert, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.analysis.contracts import content_hash
 from app.analytics import build_analytics
 from app.api_serialization import serialize_api_instants
 from app.auth import AuthContext, get_auth_context, require_csrf
@@ -34,6 +35,29 @@ from app.compatibility.v1.portable import (
     upgrade_v1_profile_competency_tables,
 )
 from app.config import Settings, get_settings_dependency
+from app.curriculum.models import (
+    ActiveCurriculumVersionState,
+    ActivityCurriculumLinkCorrection,
+    ActivityCurriculumUnitLink,
+    AssessmentRubricDefinition,
+    AssessmentRubricIdentity,
+    Curriculum,
+    CurriculumActivationEvent,
+    CurriculumObjectiveDefinition,
+    CurriculumObjectiveIdentity,
+    CurriculumVersion,
+    EvidenceOpportunityDefinition,
+    LearningUnitDefinition,
+    LearningUnitIdentity,
+    LearningUnitRequirement,
+    LearningUnitTarget,
+)
+from app.curriculum.service import (
+    CURRICULUM_AVAILABILITY_POLICY,
+    build_catalog,
+    build_unit_availability,
+    serialize_catalog,
+)
 from app.database import create_database_engine, get_db, run_migrations
 from app.domain import transition_status
 from app.domain_integrity import (
@@ -119,9 +143,13 @@ from app.models import (
 from app.portability.registry import (
     PORTABLE_SCHEMA_CURRENT,
     PORTABLE_V1_FORBIDDEN_TABLES,
+    PORTABLE_V2_FORBIDDEN_TABLES,
     PORTABLE_V2_FOUNDATION_TABLES,
     PORTABLE_V2_MANIFEST,
+    PORTABLE_V3_CURRICULUM_TABLES,
+    PORTABLE_V3_MANIFEST,
     supports_portable_schema,
+    upgrade_v2_to_v3_tables,
 )
 from app.schemas import (
     ExportRequest,
@@ -183,8 +211,23 @@ PORTABLE_MODELS = [
     ActiveCompetencyDefinitionState,
     CompetencyDefinitionActivationEvent,
     LegacyCriterionAssertion,
+    Curriculum,
+    CurriculumVersion,
+    CurriculumObjectiveIdentity,
+    CurriculumObjectiveDefinition,
+    LearningUnitIdentity,
+    LearningUnitDefinition,
+    LearningUnitTarget,
+    LearningUnitRequirement,
+    EvidenceOpportunityDefinition,
+    AssessmentRubricIdentity,
+    AssessmentRubricDefinition,
+    ActiveCurriculumVersionState,
+    CurriculumActivationEvent,
     ActivityCategoryVersion,
     Activity,
+    ActivityCurriculumUnitLink,
+    ActivityCurriculumLinkCorrection,
     LearningSession,
     SessionContribution,
     ContributionRetraction,
@@ -276,7 +319,7 @@ def _capability_projection_checkpoints(db: Session) -> list[dict[str, str]]:
 
 def _portable_payload(db: Session) -> dict[str, Any]:
     payload: dict[str, Any] = {
-        "manifest": PORTABLE_V2_MANIFEST,
+        "manifest": PORTABLE_V3_MANIFEST,
         "tables": {
             _table(model).name: [_row_dict(item) for item in db.scalars(select(model)).all()]
             for model in PORTABLE_MODELS
@@ -317,6 +360,35 @@ def _portable_payload(db: Session) -> dict[str, Any]:
                 if "external_reference" in fields:
                     source["reference"] = "[redacted]"
     payload["capabilityProjectionCheckpoints"] = _capability_projection_checkpoints(db)
+    curriculum_cutoff = utc_now_ms() + 1
+    curriculum_catalog = build_catalog(db, curriculum_cutoff)
+    references = serialize_catalog(curriculum_catalog)["activeVersionReferences"]
+    availability_hashes: list[dict[str, str]] = []
+    for item in curriculum_catalog.units:
+        unit = db.get(LearningUnitDefinition, item.unit_definition_id)
+        if unit is None:
+            raise AppError(
+                500,
+                "CURRICULUM_HISTORY_INVALID",
+                "The active Curriculum catalog references a missing unit.",
+            )
+        availability_hashes.append(
+            {
+                "unitDefinitionId": unit.id,
+                "inputHash": build_unit_availability(db, unit, curriculum_cutoff).input_hash,
+            }
+        )
+    checkpoint = {
+        "cutoffAt": curriculum_cutoff,
+        "cutoffSemantics": "exclusive",
+        "policyVersion": CURRICULUM_AVAILABILITY_POLICY,
+        "sourceHash": content_hash(references),
+        "catalogHash": curriculum_catalog.input_hash,
+        "activeVersionReferences": references,
+        "availabilityHashes": availability_hashes,
+    }
+    checkpoint["inputHash"] = content_hash(checkpoint)
+    payload["curriculumCatalogCheckpoint"] = checkpoint
     return payload
 
 
@@ -354,6 +426,93 @@ def _validate_capability_checkpoints(
                 "Capability projection checkpoint is disconnected from immutable history.",
             )
         seen.add(key)
+
+
+def _validate_curriculum_checkpoint(payload: dict[str, Any], schema_version: int) -> None:
+    checkpoint = payload.get("curriculumCatalogCheckpoint")
+    if schema_version < 3:
+        if checkpoint is not None:
+            raise AppError(
+                422,
+                "PORTABLE_SCHEMA_INVALID",
+                "Portable schema versions before V3 cannot contain a Curriculum checkpoint.",
+            )
+        return
+    expected_keys = {
+        "cutoffAt",
+        "cutoffSemantics",
+        "policyVersion",
+        "sourceHash",
+        "catalogHash",
+        "activeVersionReferences",
+        "availabilityHashes",
+        "inputHash",
+    }
+    if (
+        not isinstance(checkpoint, dict)
+        or set(checkpoint) != expected_keys
+        or type(checkpoint["cutoffAt"]) is not int
+        or checkpoint["cutoffAt"] <= 0
+        or checkpoint["cutoffSemantics"] != "exclusive"
+        or checkpoint["policyVersion"] != CURRICULUM_AVAILABILITY_POLICY
+        or not isinstance(checkpoint["inputHash"], str)
+        or len(checkpoint["inputHash"]) != 64
+        or not isinstance(checkpoint["sourceHash"], str)
+        or len(checkpoint["sourceHash"]) != 64
+        or not isinstance(checkpoint["catalogHash"], str)
+        or len(checkpoint["catalogHash"]) != 64
+        or not isinstance(checkpoint["activeVersionReferences"], list)
+        or not isinstance(checkpoint["availabilityHashes"], list)
+        or checkpoint["sourceHash"] != content_hash(checkpoint["activeVersionReferences"])
+        or checkpoint["inputHash"]
+        != content_hash({key: value for key, value in checkpoint.items() if key != "inputHash"})
+    ):
+        raise AppError(422, "PORTABLE_SCHEMA_INVALID", "Curriculum checkpoint is invalid.")
+    availability_keys: set[str] = set()
+    for item in checkpoint["availabilityHashes"]:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"unitDefinitionId", "inputHash"}
+            or not isinstance(item["unitDefinitionId"], str)
+            or item["unitDefinitionId"] in availability_keys
+            or not isinstance(item["inputHash"], str)
+            or len(item["inputHash"]) != 64
+        ):
+            raise AppError(422, "PORTABLE_SCHEMA_INVALID", "Curriculum checkpoint is invalid.")
+        availability_keys.add(item["unitDefinitionId"])
+
+
+def _assert_curriculum_checkpoint_parity(db: Session, checkpoint: dict[str, Any] | None) -> None:
+    if checkpoint is None:
+        return
+    restored_catalog = build_catalog(db, checkpoint["cutoffAt"])
+    restored_references = serialize_catalog(restored_catalog)["activeVersionReferences"]
+    restored_availability: list[dict[str, str]] = []
+    for item in restored_catalog.units:
+        unit = db.get(LearningUnitDefinition, item.unit_definition_id)
+        if unit is None:
+            raise AppError(
+                422,
+                "RESTORE_CURRICULUM_PARITY_FAILED",
+                "The restored Curriculum catalog references a missing unit.",
+            )
+        restored_availability.append(
+            {
+                "unitDefinitionId": unit.id,
+                "inputHash": build_unit_availability(db, unit, checkpoint["cutoffAt"]).input_hash,
+            }
+        )
+    if (
+        restored_catalog.input_hash != checkpoint["catalogHash"]
+        or restored_references != checkpoint["activeVersionReferences"]
+        or content_hash(restored_references) != checkpoint["sourceHash"]
+        or restored_availability != checkpoint["availabilityHashes"]
+    ):
+        raise AppError(
+            422,
+            "RESTORE_CURRICULUM_PARITY_FAILED",
+            "The rebuilt Curriculum catalog does not match the exported checkpoint.",
+        )
 
 
 def _resolve_export_scope(db: Session, request: ExportRequest) -> ResolvedExportScope:
@@ -658,6 +817,7 @@ def create_operational_backup(
 def _insert_portable_tables(connection: Any, tables: dict[str, list[dict[str, Any]]]) -> None:
     roadmap_pointers: list[tuple[str, str | None, str | None, bool]] = []
     parent_pointers: list[tuple[str, str | None]] = []
+    curriculum_version_pointers: list[tuple[str, str | None]] = []
     activity_supersession_pointers: list[tuple[str, str | None]] = []
     evidence_supersession_pointers: list[tuple[str, str | None]] = []
     evidence_replacement_pointers: list[tuple[str, str | None]] = []
@@ -682,6 +842,10 @@ def _insert_portable_tables(connection: Any, tables: dict[str, list[dict[str, An
             for row in rows:
                 parent_pointers.append((row["id"], row.get("parent_definition_id")))
                 row["parent_definition_id"] = None
+        if model is CurriculumVersion:
+            for row in rows:
+                curriculum_version_pointers.append((row["id"], row.get("supersedes_version_id")))
+                row["supersedes_version_id"] = None
         if model is Activity:
             for row in rows:
                 activity_supersession_pointers.append(
@@ -716,6 +880,14 @@ def _insert_portable_tables(connection: Any, tables: dict[str, list[dict[str, An
                 .where(CompetencyDefinition.id == definition_id)
                 .values(parent_definition_id=parent_id)
             )
+    for curriculum_version_id, supersedes_id in curriculum_version_pointers:
+        if supersedes_id:
+            connection.execute(
+                _table(CurriculumVersion)
+                .update()
+                .where(CurriculumVersion.id == curriculum_version_id)
+                .values(supersedes_version_id=supersedes_id)
+            )
     for activity_id, supersedes_id in activity_supersession_pointers:
         if supersedes_id:
             connection.execute(
@@ -748,12 +920,16 @@ def _insert_portable_tables(connection: Any, tables: dict[str, list[dict[str, An
                 .where(EvidenceLinkRetraction.id == retraction_id)
                 .values(replacement_link_id=replacement_id)
             )
-    for roadmap_id, version_id, phase_id, is_current in roadmap_pointers:
+    for roadmap_id, roadmap_version_id, phase_id, is_current in roadmap_pointers:
         connection.execute(
             _table(Roadmap)
             .update()
             .where(Roadmap.id == roadmap_id)
-            .values(active_version_id=version_id, current_phase_id=phase_id, is_current=is_current)
+            .values(
+                active_version_id=roadmap_version_id,
+                current_phase_id=phase_id,
+                is_current=is_current,
+            )
         )
 
 
@@ -819,6 +995,12 @@ def _normalize_portable_tables(
                 "recovery contract."
             ),
         )
+    if schema_version == 3 and parsed.manifest != PORTABLE_V3_MANIFEST:
+        raise AppError(
+            422,
+            "PORTABLE_MANIFEST_INVALID",
+            "The portable V3 manifest is missing or does not match the recovery contract.",
+        )
     if schema_version == 1 and parsed.manifest is not None:
         raise AppError(
             422, "PORTABLE_SCHEMA_INVALID", "A V1 portable package cannot contain a V2 manifest."
@@ -828,12 +1010,21 @@ def _normalize_portable_tables(
         raise AppError(
             422, "PORTABLE_SCHEMA_INVALID", "A V1 portable package cannot contain V2 tables."
         )
+    if schema_version == 2 and set(tables) & set(PORTABLE_V2_FORBIDDEN_TABLES):
+        raise AppError(
+            422, "PORTABLE_SCHEMA_INVALID", "A V2 portable package cannot contain V3 tables."
+        )
     unknown = set(tables) - set(PORTABLE_BY_TABLE)
     v2_tables = set(PORTABLE_V2_FOUNDATION_TABLES)
+    v3_tables = set(PORTABLE_V3_CURRICULUM_TABLES)
     missing = set(PORTABLE_BY_TABLE) - set(tables)
-    allowed_v1_missing = v2_tables | {"roadmap_scope_events"}
+    allowed_v1_missing = v2_tables | v3_tables | {"roadmap_scope_events"}
     legacy_without_scope_history = schema_version == 1 and "roadmap_scope_events" in missing
-    valid_missing = (schema_version == 1 and missing <= allowed_v1_missing) or not missing
+    valid_missing = (
+        (schema_version == 1 and missing <= allowed_v1_missing)
+        or (schema_version == 2 and missing <= v3_tables)
+        or not missing
+    )
     if unknown or not valid_missing:
         raise AppError(
             422,
@@ -851,6 +1042,9 @@ def _normalize_portable_tables(
             tables[table_name] = []
         for row in tables.get("recommendation_snapshots", []):
             row.setdefault("analysis_snapshot_id", None)
+        upgrade_v2_to_v3_tables(tables)
+    elif schema_version == 2:
+        upgrade_v2_to_v3_tables(tables)
     return tables, legacy_without_scope_history
 
 
@@ -861,6 +1055,7 @@ def _validate_portable_payload(
         payload, package_id, schema_version
     )
     _validate_capability_checkpoints(payload, tables)
+    _validate_curriculum_checkpoint(payload, schema_version)
     for table_name, rows in tables.items():
         if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
             raise AppError(422, "PORTABLE_SCHEMA_INVALID", f"Table {table_name} has invalid rows.")
@@ -888,6 +1083,10 @@ def _validate_portable_payload(
                         "Portable backup values violate the canonical data model.",
                     ) from exc
                 validate_domain_integrity(connection)
+                with Session(bind=connection) as validation_db:
+                    _assert_curriculum_checkpoint_parity(
+                        validation_db, payload.get("curriculumCatalogCheckpoint")
+                    )
         finally:
             validation_engine.dispose()
     backfill_runs = {row["source_kind"]: row for row in tables["migration_backfill_runs"]}
@@ -920,6 +1119,12 @@ def _validate_portable_payload(
             "legacyEvidenceResultHash": evidence_backfill["result_hash"],
             "nativeSemanticDefinitionsInferred": 0,
             "targetProfilesInferred": 0,
+            "nativeCurriculaInferred": 0,
+        }
+    elif schema_version == 2:
+        compatibility_conversions = {
+            "initializedCurriculumTables": len(PORTABLE_V3_CURRICULUM_TABLES),
+            "nativeCurriculaInferred": 0,
         }
     return tables, {
         "tableCounts": {name: len(rows) for name, rows in sorted(tables.items())},
@@ -1161,6 +1366,7 @@ def _apply_portable_restore(
         (item["competencyIdentityId"], item["scopeKey"]): item["outputHash"]
         for item in payload.get("capabilityProjectionCheckpoints", [])
     }
+    curriculum_checkpoint = payload.get("curriculumCatalogCheckpoint")
     tables, legacy_without_scope_history = _normalize_portable_tables(
         payload, package_id, schema_version
     )
@@ -1175,6 +1381,8 @@ def _apply_portable_restore(
         )
     _delete_portable_state(db)
     _insert_portable_tables(db.connection(), tables)
+    db.flush()
+    _assert_curriculum_checkpoint_parity(db, curriculum_checkpoint)
     restored_capability_baseline: dict[tuple[str, str], tuple[str, str]] = {}
     for run in db.scalars(
         select(CapabilityEvaluationRun).order_by(

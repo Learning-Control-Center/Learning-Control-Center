@@ -216,6 +216,23 @@ def _assert_known_migration_source(
         "competency_review_states",
         "review_events",
     }
+    curriculum_tables = {
+        "curricula",
+        "curriculum_versions",
+        "curriculum_objective_identities",
+        "curriculum_objective_definitions",
+        "learning_unit_identities",
+        "learning_unit_definitions",
+        "learning_unit_targets",
+        "learning_unit_requirements",
+        "curriculum_evidence_opportunities",
+        "assessment_rubric_identities",
+        "assessment_rubric_definitions",
+        "active_curriculum_version_states",
+        "curriculum_activation_events",
+        "activity_curriculum_unit_links",
+        "activity_curriculum_link_corrections",
+    }
     projection_columns = {
         row[1] for row in connection.execute("PRAGMA table_info(projection_invalidations)")
     }
@@ -317,6 +334,13 @@ def _assert_known_migration_source(
     ):
         raise RuntimeError(
             "Database has an ambiguously partial capability migration; restore its verified "
+            "pre-migration backup before retrying."
+        )
+    if revision == "0010_capability_evaluation" and (
+        bool(curriculum_tables & tables) or any(name.startswith("_alembic_tmp_") for name in tables)
+    ):
+        raise RuntimeError(
+            "Database has an ambiguously partial Curriculum migration; restore its verified "
             "pre-migration backup before retrying."
         )
 

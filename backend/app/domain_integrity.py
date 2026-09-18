@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from collections import defaultdict
+from datetime import datetime
 from typing import Any, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -26,6 +27,24 @@ from app.compatibility.v1.profile_competency_backfill import (
     POLICY_KEY,
     RUN_ID,
     canonical_rows_hash,
+)
+from app.curriculum.contracts import CurriculumVersionInput
+from app.curriculum.models import (
+    ActiveCurriculumVersionState,
+    ActivityCurriculumLinkCorrection,
+    ActivityCurriculumUnitLink,
+    AssessmentRubricDefinition,
+    AssessmentRubricIdentity,
+    Curriculum,
+    CurriculumActivationEvent,
+    CurriculumObjectiveDefinition,
+    CurriculumObjectiveIdentity,
+    CurriculumVersion,
+    EvidenceOpportunityDefinition,
+    LearningUnitDefinition,
+    LearningUnitIdentity,
+    LearningUnitRequirement,
+    LearningUnitTarget,
 )
 from app.domain import has_required_dependency_cycle
 from app.errors import AppError
@@ -96,6 +115,7 @@ from app.models import (
     VerificationRecord,
 )
 from app.schemas import validate_external_reference
+from app.time_utils import datetime_to_epoch_ms
 
 
 def validate_portable_row_types(
@@ -148,6 +168,12 @@ def _validate_json_columns(connection: Any) -> None:
         (EvidenceLink, "provenance_json"),
         (EvidenceRedaction, "redacted_fields_json"),
         (CapabilityEvaluationRun, "input_payload_json"),
+        (LearningUnitDefinition, "action_payload_json"),
+        (CurriculumVersion, "definition_payload_json"),
+        (LearningUnitRequirement, "subject_json"),
+        (EvidenceOpportunityDefinition, "possible_characteristics_json"),
+        (EvidenceOpportunityDefinition, "required_characteristics_json"),
+        (AssessmentRubricDefinition, "rubric_json"),
     )
     for model, column_name in json_columns:
         column = getattr(model, column_name)
@@ -1959,6 +1985,7 @@ def validate_domain_integrity(connection: Any) -> None:
     _validate_activity_sessions(connection)
     _validate_evidence(connection)
     _validate_capability_history(connection)
+    _validate_curriculum(connection)
     for timezone_name in connection.execute(select(DisciplineProfile.timezone)).scalars():
         try:
             ZoneInfo(timezone_name)
@@ -1968,6 +1995,709 @@ def validate_domain_integrity(connection: Any) -> None:
                 "PORTABLE_TIMEZONE_INVALID",
                 "The discipline timezone is not a valid IANA timezone.",
             ) from exc
+
+
+def _validate_curriculum(connection: Any) -> None:
+    curricula = {
+        item.id: item for item in connection.execute(select(*Curriculum.__table__.c)).all()
+    }
+    versions = {
+        item.id: item for item in connection.execute(select(*CurriculumVersion.__table__.c)).all()
+    }
+    objective_identities = {
+        item.id: item
+        for item in connection.execute(select(*CurriculumObjectiveIdentity.__table__.c)).all()
+    }
+    unit_identities = {
+        item.id: item
+        for item in connection.execute(select(*LearningUnitIdentity.__table__.c)).all()
+    }
+    rubric_identities = {
+        item.id: item
+        for item in connection.execute(select(*AssessmentRubricIdentity.__table__.c)).all()
+    }
+    for curriculum in curricula.values():
+        if (curriculum.retired_at is None) != (curriculum.retirement_reason is None):
+            raise AppError(
+                422,
+                "PORTABLE_CURRICULUM_INVALID",
+                "Curriculum retirement metadata must be complete.",
+            )
+    versions_by_curriculum: dict[str, list[Any]] = defaultdict(list)
+    for version in versions.values():
+        if (
+            version.curriculum_id not in curricula
+            or version.content_hash != content_hash(json.loads(version.definition_payload_json))
+            or version.schema_version != "curriculum-schema/v1"
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_CURRICULUM_INVALID",
+                "A Curriculum version has invalid lineage or policy metadata.",
+            )
+        if version.supersedes_version_id is not None:
+            previous = versions.get(version.supersedes_version_id)
+            if (
+                previous is None
+                or previous.curriculum_id != version.curriculum_id
+                or previous.version >= version.version
+            ):
+                raise AppError(
+                    422,
+                    "PORTABLE_CURRICULUM_INVALID",
+                    "A Curriculum supersession reference is inconsistent.",
+                )
+        versions_by_curriculum[version.curriculum_id].append(version)
+    for curriculum_id, items in versions_by_curriculum.items():
+        ordered = sorted(items, key=lambda item: item.version)
+        if [item.version for item in ordered] != list(range(1, len(ordered) + 1)):
+            raise AppError(
+                422,
+                "PORTABLE_CURRICULUM_INVALID",
+                "Curriculum versions must be contiguous per aggregate.",
+            )
+        for index, version in enumerate(ordered):
+            expected = None if index == 0 else ordered[index - 1].id
+            if version.supersedes_version_id != expected:
+                raise AppError(
+                    422,
+                    "PORTABLE_CURRICULUM_INVALID",
+                    "Curriculum supersession must reference the immediately prior version.",
+                    {"curriculumId": curriculum_id, "versionId": version.id},
+                )
+    objective_definitions = connection.execute(
+        select(*CurriculumObjectiveDefinition.__table__.c)
+    ).all()
+    objective_definitions_by_pair: set[tuple[str, str]] = set()
+    for definition in objective_definitions:
+        identity = objective_identities.get(definition.objective_identity_id)
+        version = versions.get(definition.curriculum_version_id)
+        if identity is None or version is None or identity.curriculum_id != version.curriculum_id:
+            raise AppError(
+                422,
+                "PORTABLE_CURRICULUM_INVALID",
+                "An objective identity belongs to another Curriculum.",
+            )
+        objective_definitions_by_pair.add(
+            (definition.curriculum_version_id, definition.objective_identity_id)
+        )
+    unit_definitions = {
+        item.id: item
+        for item in connection.execute(select(*LearningUnitDefinition.__table__.c)).all()
+    }
+    for definition in unit_definitions.values():
+        identity = unit_identities.get(definition.unit_identity_id)
+        version = versions.get(definition.curriculum_version_id)
+        objective = objective_identities.get(definition.objective_identity_id)
+        duration = (
+            definition.minimum_useful_duration_ms,
+            definition.preferred_duration_ms,
+            definition.maximum_useful_duration_ms,
+        )
+        duration_valid = all(value is None for value in duration) or (
+            all(type(value) is int and value > 0 and value % 300_000 == 0 for value in duration)
+            and duration[0] <= duration[1] <= duration[2]
+        )
+        if (
+            identity is None
+            or version is None
+            or identity.curriculum_id != version.curriculum_id
+            or (objective is not None and objective.curriculum_id != version.curriculum_id)
+            or (
+                objective is not None
+                and (version.id, objective.id) not in objective_definitions_by_pair
+            )
+            or definition.status not in {"active", "archived"}
+            or not definition.provenance
+            or not duration_valid
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_CURRICULUM_INVALID",
+                "A learning-unit definition has inconsistent identity or duration lineage.",
+            )
+    semantic_definitions = {
+        item.id: item
+        for item in connection.execute(select(*SemanticCompetencyDefinition.__table__.c)).all()
+    }
+    criteria = {
+        item.id: item for item in connection.execute(select(*CriterionDefinition.__table__.c)).all()
+    }
+    levels = {
+        item.id: item
+        for item in connection.execute(select(*CapabilityScaleLevel.__table__.c)).all()
+    }
+    scales = {
+        item.id: item
+        for item in connection.execute(select(*CapabilityScaleVersion.__table__.c)).all()
+    }
+    dimensions = {
+        item.id: item
+        for item in connection.execute(select(*CapabilityScaleDimension.__table__.c)).all()
+    }
+    enabled_dimensions = {
+        (item.semantic_definition_id, item.scale_dimension_id)
+        for item in connection.execute(select(*SemanticDefinitionDimension.__table__.c)).all()
+    }
+    targets = connection.execute(select(*LearningUnitTarget.__table__.c)).all()
+    requirements = connection.execute(select(*LearningUnitRequirement.__table__.c)).all()
+    opportunities = connection.execute(select(*EvidenceOpportunityDefinition.__table__.c)).all()
+    rubrics = connection.execute(select(*AssessmentRubricDefinition.__table__.c)).all()
+    for target in targets:
+        definition = semantic_definitions.get(target.semantic_definition_id)
+        criterion = criteria.get(target.criterion_definition_id)
+        minimum = levels.get(target.minimum_level_id)
+        maximum = levels.get(target.maximum_level_id)
+        dimension = dimensions.get(target.dimension_id)
+        if (
+            target.learning_unit_definition_id not in unit_definitions
+            or definition is None
+            or definition.scale_version_id != target.scale_version_id
+            or (criterion is not None and criterion.semantic_definition_id != definition.id)
+            or (target.criterion_definition_id is not None and criterion is None)
+            or (minimum is not None and minimum.scale_version_id != target.scale_version_id)
+            or (maximum is not None and maximum.scale_version_id != target.scale_version_id)
+            or (
+                target.dimension_id is not None
+                and (
+                    dimension is None
+                    or dimension.scale_version_id != target.scale_version_id
+                    or (definition.id, target.dimension_id) not in enabled_dimensions
+                )
+            )
+            or (criterion is not None and criterion.dimension_id != target.dimension_id)
+            or (target.minimum_level_id is not None and minimum is None)
+            or (target.maximum_level_id is not None and maximum is None)
+            or not target.intended_learning_outcome
+            or (
+                minimum is not None
+                and maximum is not None
+                and minimum.ordinal_rank > maximum.ordinal_rank
+            )
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_CURRICULUM_TARGET_INVALID",
+                "A Curriculum target is not exact-scale compatible.",
+            )
+    requirement_subject_keys = {
+        "capability_at_least": {
+            "semanticDefinitionId",
+            "scaleVersionId",
+            "levelId",
+            "dimensionId",
+        },
+        "criterion_demonstrated": {"criterionDefinitionId"},
+        "learning_unit_completed": {"learningUnitStableKey"},
+        "resource_available": {"resourceKey"},
+        "user_constraint": {"constraintKey", "expectedValue"},
+    }
+    requirement_scopes = {
+        "capability_at_least": "learner",
+        "criterion_demonstrated": "learner",
+        "learning_unit_completed": "curriculum",
+        "resource_available": "environment",
+        "user_constraint": "user",
+    }
+    hard_dependencies: dict[str, set[str]] = defaultdict(set)
+    for requirement in requirements:
+        subject = json.loads(requirement.subject_json)
+        keys = requirement_subject_keys.get(requirement.requirement_type)
+        if (
+            requirement.learning_unit_definition_id not in unit_definitions
+            or requirement.policy_version != "curriculum-requirement-policy/v1"
+            or not isinstance(subject, dict)
+            or keys is None
+            or set(subject) != keys
+            or requirement.scope != requirement_scopes.get(requirement.requirement_type)
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_CURRICULUM_REQUIREMENT_INVALID",
+                "A Curriculum requirement is malformed or uses an unknown policy.",
+            )
+        if requirement.requirement_type == "capability_at_least":
+            semantic_definition = semantic_definitions.get(subject["semanticDefinitionId"])
+            scale = scales.get(subject["scaleVersionId"])
+            level = levels.get(subject["levelId"])
+            dimension = dimensions.get(subject["dimensionId"])
+            if (
+                semantic_definition is None
+                or scale is None
+                or semantic_definition.scale_version_id != scale.id
+                or level is None
+                or level.scale_version_id != scale.id
+                or (
+                    subject["dimensionId"] is not None
+                    and (
+                        dimension is None
+                        or dimension.scale_version_id != scale.id
+                        or (semantic_definition.id, dimension.id) not in enabled_dimensions
+                    )
+                )
+            ):
+                raise AppError(
+                    422,
+                    "PORTABLE_CURRICULUM_REQUIREMENT_INVALID",
+                    "A capability requirement has incompatible pinned references.",
+                )
+        elif requirement.requirement_type == "criterion_demonstrated":
+            if criteria.get(subject["criterionDefinitionId"]) is None:
+                raise AppError(
+                    422,
+                    "PORTABLE_CURRICULUM_REQUIREMENT_INVALID",
+                    "A criterion requirement references a missing definition.",
+                )
+        elif requirement.requirement_type == "learning_unit_completed":
+            source_unit = unit_definitions[requirement.learning_unit_definition_id]
+            source_version = versions[source_unit.curriculum_version_id]
+            referenced_unit = next(
+                (
+                    item
+                    for item in unit_definitions.values()
+                    if item.curriculum_version_id == source_version.id
+                    and unit_identities[item.unit_identity_id].stable_key
+                    == subject["learningUnitStableKey"]
+                ),
+                None,
+            )
+            if referenced_unit is None:
+                raise AppError(
+                    422,
+                    "PORTABLE_CURRICULUM_REQUIREMENT_INVALID",
+                    "A learning-unit requirement references another Curriculum or a missing unit.",
+                )
+            if requirement.effect == "hard":
+                hard_dependencies[source_unit.id].add(referenced_unit.id)
+        elif requirement.requirement_type == "resource_available":
+            if not isinstance(subject["resourceKey"], str) or not subject["resourceKey"]:
+                raise AppError(
+                    422,
+                    "PORTABLE_CURRICULUM_REQUIREMENT_INVALID",
+                    "A resource requirement has an invalid stable key.",
+                )
+        elif requirement.requirement_type == "user_constraint" and (
+            not isinstance(subject["constraintKey"], str) or not subject["constraintKey"]
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_CURRICULUM_REQUIREMENT_INVALID",
+                "A user-constraint requirement has an invalid stable key.",
+            )
+    visiting_units: set[str] = set()
+    visited_units: set[str] = set()
+
+    def visit_unit(unit_id: str) -> None:
+        if unit_id in visiting_units:
+            raise AppError(
+                422,
+                "PORTABLE_CURRICULUM_REQUIREMENT_INVALID",
+                "Hard learning-unit requirements must form a DAG.",
+            )
+        if unit_id in visited_units:
+            return
+        visiting_units.add(unit_id)
+        for dependency_id in sorted(hard_dependencies.get(unit_id, set())):
+            visit_unit(dependency_id)
+        visiting_units.remove(unit_id)
+        visited_units.add(unit_id)
+
+    for unit_id in sorted(unit_definitions):
+        visit_unit(unit_id)
+    for opportunity in opportunities:
+        possible = json.loads(opportunity.possible_characteristics_json)
+        required = json.loads(opportunity.required_characteristics_json)
+        if (
+            opportunity.learning_unit_definition_id not in unit_definitions
+            or opportunity.policy_version != "curriculum-evidence-opportunity-policy/v1"
+            or not isinstance(possible, dict)
+            or set(possible) != {"intendedIndependenceModes", "intendedStrengths"}
+            or not isinstance(required, dict)
+            or set(required) != {"actualActivity", "artifact"}
+            or opportunity.evidence_kind
+            not in {
+                "session",
+                "verification",
+                "project",
+                "code",
+                "assessment",
+                "manual",
+                "review",
+            }
+            or not isinstance(possible["intendedStrengths"], list)
+            or any(not isinstance(item, str) for item in possible["intendedStrengths"])
+            or len(possible["intendedStrengths"]) != len(set(possible["intendedStrengths"]))
+            or any(
+                item not in {"weak", "moderate", "strong"} for item in possible["intendedStrengths"]
+            )
+            or not isinstance(possible["intendedIndependenceModes"], list)
+            or any(not isinstance(item, str) for item in possible["intendedIndependenceModes"])
+            or len(possible["intendedIndependenceModes"])
+            != len(set(possible["intendedIndependenceModes"]))
+            or any(
+                item not in {"guided", "assisted", "independent", "not_applicable"}
+                for item in possible["intendedIndependenceModes"]
+            )
+            or type(required["actualActivity"]) is not bool
+            or type(required["artifact"]) is not bool
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_CURRICULUM_OPPORTUNITY_INVALID",
+                "An Evidence opportunity is a malformed definition.",
+            )
+    for rubric in rubrics:
+        version = versions.get(rubric.curriculum_version_id)
+        identity = rubric_identities.get(rubric.rubric_identity_id)
+        definition = semantic_definitions.get(rubric.semantic_definition_id)
+        criterion = criteria.get(rubric.criterion_definition_id)
+        if (
+            version is None
+            or identity is None
+            or identity.curriculum_id != version.curriculum_id
+            or definition is None
+            or (rubric.criterion_definition_id is not None and criterion is None)
+            or (criterion is not None and criterion.semantic_definition_id != definition.id)
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_ASSESSMENT_RUBRIC_INVALID",
+                "An assessment rubric has inconsistent exact target lineage.",
+            )
+    for version in versions.values():
+        try:
+            payload = json.loads(version.definition_payload_json)
+            validated_payload = CurriculumVersionInput.model_validate(payload).model_dump(
+                mode="json"
+            )
+            effective_at = datetime.fromisoformat(payload["effective_at"].replace("Z", "+00:00"))
+            actual_objectives = sorted(
+                (
+                    {
+                        "stable_key": objective_identities[item.objective_identity_id].stable_key,
+                        "title": item.title,
+                        "description": item.description,
+                        "order_index": item.order_index,
+                    }
+                    for item in objective_definitions
+                    if item.curriculum_version_id == version.id
+                ),
+                key=lambda item: (item["order_index"], item["stable_key"]),
+            )
+            actual_units: list[dict[str, Any]] = []
+            for unit in sorted(
+                (
+                    item
+                    for item in unit_definitions.values()
+                    if item.curriculum_version_id == version.id
+                ),
+                key=lambda item: (
+                    item.order_index,
+                    unit_identities[item.unit_identity_id].stable_key,
+                ),
+            ):
+                objective_key = (
+                    objective_identities[unit.objective_identity_id].stable_key
+                    if unit.objective_identity_id is not None
+                    else None
+                )
+                actual_units.append(
+                    {
+                        "stable_key": unit_identities[unit.unit_identity_id].stable_key,
+                        "objective_stable_key": objective_key,
+                        "kind": unit.kind,
+                        "title": unit.title,
+                        "description": unit.description,
+                        "action": json.loads(unit.action_payload_json),
+                        "status": unit.status,
+                        "provenance": unit.provenance,
+                        "order_index": unit.order_index,
+                        "minimum_useful_duration_ms": unit.minimum_useful_duration_ms,
+                        "preferred_duration_ms": unit.preferred_duration_ms,
+                        "maximum_useful_duration_ms": unit.maximum_useful_duration_ms,
+                        "targets": [
+                            {
+                                "semantic_definition_id": item.semantic_definition_id,
+                                "criterion_definition_id": item.criterion_definition_id,
+                                "scale_version_id": item.scale_version_id,
+                                "dimension_id": item.dimension_id,
+                                "intended_learning_outcome": item.intended_learning_outcome,
+                                "minimum_level_id": item.minimum_level_id,
+                                "maximum_level_id": item.maximum_level_id,
+                                "supports_unassessed": bool(item.supports_unassessed),
+                                "role": item.role,
+                                "order_index": item.order_index,
+                            }
+                            for item in sorted(
+                                (
+                                    item
+                                    for item in targets
+                                    if item.learning_unit_definition_id == unit.id
+                                ),
+                                key=lambda item: (item.order_index, item.semantic_definition_id),
+                            )
+                        ],
+                        "requirements": [
+                            {
+                                "stable_key": item.stable_key,
+                                "requirement_type": item.requirement_type,
+                                "effect": item.effect,
+                                "scope": item.scope,
+                                "subject": json.loads(item.subject_json),
+                                "order_index": item.order_index,
+                            }
+                            for item in sorted(
+                                (
+                                    item
+                                    for item in requirements
+                                    if item.learning_unit_definition_id == unit.id
+                                ),
+                                key=lambda item: (item.order_index, item.stable_key),
+                            )
+                        ],
+                        "evidence_opportunities": [
+                            {
+                                "stable_key": item.stable_key,
+                                "evidence_kind": item.evidence_kind,
+                                "intended_strengths": json.loads(
+                                    item.possible_characteristics_json
+                                )["intendedStrengths"],
+                                "intended_independence_modes": json.loads(
+                                    item.possible_characteristics_json
+                                )["intendedIndependenceModes"],
+                                "requires_actual_activity": json.loads(
+                                    item.required_characteristics_json
+                                )["actualActivity"],
+                                "requires_artifact": json.loads(item.required_characteristics_json)[
+                                    "artifact"
+                                ],
+                                "order_index": item.order_index,
+                            }
+                            for item in sorted(
+                                (
+                                    item
+                                    for item in opportunities
+                                    if item.learning_unit_definition_id == unit.id
+                                ),
+                                key=lambda item: (item.order_index, item.stable_key),
+                            )
+                        ],
+                    }
+                )
+            actual_rubrics = sorted(
+                (
+                    {
+                        "stable_key": rubric_identities[item.rubric_identity_id].stable_key,
+                        "title": item.title,
+                        "instructions": item.instructions,
+                        "rubric": json.loads(item.rubric_json),
+                        "semantic_definition_id": item.semantic_definition_id,
+                        "criterion_definition_id": item.criterion_definition_id,
+                    }
+                    for item in rubrics
+                    if item.curriculum_version_id == version.id
+                ),
+                key=lambda item: item["stable_key"],
+            )
+            parity_matches = (
+                payload == validated_payload
+                and payload["title"] == version.title
+                and payload["description"] == version.description
+                and payload["creation_source"] == version.creation_source
+                and datetime_to_epoch_ms(effective_at) == version.effective_at
+                and payload["objectives"] == actual_objectives
+                and payload["units"] == actual_units
+                and payload["assessment_rubrics"] == actual_rubrics
+            )
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            raise AppError(
+                422,
+                "PORTABLE_CURRICULUM_INVALID",
+                "A Curriculum version definition envelope is malformed.",
+            ) from exc
+        if not parity_matches:
+            raise AppError(
+                422,
+                "PORTABLE_CURRICULUM_INVALID",
+                "A Curriculum version definition envelope does not match its immutable rows.",
+            )
+    definitions_by_unit_identity: dict[str, list[Any]] = defaultdict(list)
+    for unit in unit_definitions.values():
+        definitions_by_unit_identity[unit.unit_identity_id].append(unit)
+    for identity_id, items in definitions_by_unit_identity.items():
+        signatures: set[tuple[str, tuple[tuple[str, str | None], ...]]] = set()
+        for unit in items:
+            primary_targets = []
+            for target in targets:
+                if target.learning_unit_definition_id != unit.id or target.role != "primary":
+                    continue
+                definition = semantic_definitions[target.semantic_definition_id]
+                criterion = criteria.get(target.criterion_definition_id)
+                primary_targets.append(
+                    (
+                        definition.competency_identity_id,
+                        criterion.criterion_identity_id if criterion is not None else None,
+                    )
+                )
+            signatures.add(
+                (
+                    unit.kind,
+                    tuple(sorted(primary_targets, key=lambda item: (item[0], item[1] or ""))),
+                )
+            )
+        if len(signatures) != 1:
+            raise AppError(
+                422,
+                "PORTABLE_CURRICULUM_INVALID",
+                "A stable learning-unit identity changes kind or primary semantic meaning.",
+                {"unitIdentityId": identity_id},
+            )
+    rubrics_by_identity: dict[str, set[tuple[str, str | None]]] = defaultdict(set)
+    for rubric in rubrics:
+        definition = semantic_definitions[rubric.semantic_definition_id]
+        criterion = criteria.get(rubric.criterion_definition_id)
+        rubrics_by_identity[rubric.rubric_identity_id].add(
+            (
+                definition.competency_identity_id,
+                criterion.criterion_identity_id if criterion is not None else None,
+            )
+        )
+    if any(len(signatures) != 1 for signatures in rubrics_by_identity.values()):
+        raise AppError(
+            422,
+            "PORTABLE_ASSESSMENT_RUBRIC_INVALID",
+            "A stable rubric identity changes semantic meaning.",
+        )
+    events_by_curriculum: dict[str, list[Any]] = defaultdict(list)
+    for event in connection.execute(select(*CurriculumActivationEvent.__table__.c)).all():
+        version = versions.get(event.to_curriculum_version_id)
+        previous = versions.get(event.from_curriculum_version_id)
+        if (
+            version is None
+            or version.curriculum_id != event.curriculum_id
+            or curricula[event.curriculum_id].created_at > event.activated_at
+            or version.created_at > event.activated_at
+            or (previous is not None and previous.curriculum_id != event.curriculum_id)
+            or (event.from_curriculum_version_id is not None and previous is None)
+            or version.effective_at > event.activated_at
+            or (previous is not None and previous.version >= version.version)
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_CURRICULUM_ACTIVATION_INVALID",
+                "Curriculum activation history is inconsistent.",
+            )
+        events_by_curriculum[event.curriculum_id].append(event)
+    states = {
+        item.curriculum_id: item
+        for item in connection.execute(select(*ActiveCurriculumVersionState.__table__.c)).all()
+    }
+    for state in states.values():
+        version = versions.get(state.curriculum_version_id)
+        events = events_by_curriculum.get(state.curriculum_id, [])
+        latest = max(
+            events, key=lambda item: (item.activated_at, item.event_sequence, item.id), default=None
+        )
+        if (
+            version is None
+            or version.curriculum_id != state.curriculum_id
+            or latest is None
+            or latest.to_curriculum_version_id != state.curriculum_version_id
+            or latest.activated_at != state.activated_at
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_CURRICULUM_ACTIVATION_INVALID",
+                "Current Curriculum state does not match immutable activation history.",
+            )
+    for _curriculum_id, events in events_by_curriculum.items():
+        ordered = sorted(events, key=lambda item: item.event_sequence)
+        if [item.event_sequence for item in ordered] != list(range(1, len(ordered) + 1)):
+            raise AppError(
+                422,
+                "PORTABLE_CURRICULUM_ACTIVATION_INVALID",
+                "Curriculum activation sequences must be contiguous per aggregate.",
+            )
+        if _curriculum_id not in states:
+            raise AppError(
+                422,
+                "PORTABLE_CURRICULUM_ACTIVATION_INVALID",
+                "Every activation chain must have a current-state row.",
+            )
+        previous_id = None
+        previous_activated_at: int | None = None
+        for event in ordered:
+            if event.from_curriculum_version_id != previous_id or (
+                previous_activated_at is not None and event.activated_at < previous_activated_at
+            ):
+                raise AppError(
+                    422,
+                    "PORTABLE_CURRICULUM_ACTIVATION_INVALID",
+                    "Curriculum activation lineage must form one ordered chain.",
+                )
+            previous_id = event.to_curriculum_version_id
+            previous_activated_at = event.activated_at
+    links = {
+        item.id: item
+        for item in connection.execute(select(*ActivityCurriculumUnitLink.__table__.c)).all()
+    }
+    activities = {item.id: item for item in connection.execute(select(*Activity.__table__.c)).all()}
+    for item in links.values():
+        activity = activities.get(item.activity_id)
+        unit = unit_definitions.get(item.learning_unit_definition_id)
+        version = versions.get(unit.curriculum_version_id) if unit is not None else None
+        if (
+            item.provenance not in {"user_selected", "user_confirmed", "imported_asserted"}
+            or activity is None
+            or version is None
+            or item.created_at < activity.created_at
+            or item.created_at < version.created_at
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_CURRICULUM_LINK_INVALID",
+                "A Curriculum Activity link has invalid provenance or chronology.",
+            )
+    replacement_edges: dict[str, str] = {}
+    for correction in connection.execute(
+        select(*ActivityCurriculumLinkCorrection.__table__.c)
+    ).all():
+        original = links.get(correction.activity_curriculum_unit_link_id)
+        replacement = links.get(correction.replacement_link_id)
+        if (
+            original is None
+            or correction.replacement_link_id == correction.activity_curriculum_unit_link_id
+            or (
+                correction.replacement_link_id is not None
+                and (
+                    replacement is None
+                    or replacement.activity_id != original.activity_id
+                    or replacement.created_at > correction.corrected_at
+                )
+            )
+            or (original is not None and correction.corrected_at < original.created_at)
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_CURRICULUM_LINK_INVALID",
+                "A Curriculum Activity-link correction is inconsistent.",
+            )
+        if correction.replacement_link_id is not None:
+            replacement_edges[correction.activity_curriculum_unit_link_id] = (
+                correction.replacement_link_id
+            )
+    for link_id in replacement_edges:
+        seen: set[str] = set()
+        current: str | None = link_id
+        while current is not None:
+            if current in seen:
+                raise AppError(
+                    422,
+                    "PORTABLE_CURRICULUM_LINK_INVALID",
+                    "Curriculum Activity-link corrections must not form cycles.",
+                )
+            seen.add(current)
+            current = replacement_edges.get(current)
 
 
 def _validate_capability_history(connection: Any) -> None:

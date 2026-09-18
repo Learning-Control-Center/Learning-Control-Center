@@ -13,6 +13,7 @@ const AnalyticsPage = lazy(() => import('./pages/AnalyticsPage').then((module) =
 const ReportsPage = lazy(() => import('./pages/ReportsPage').then((module) => ({ default: module.ReportsPage })))
 const TransferPage = lazy(() => import('./pages/TransferPage').then((module) => ({ default: module.TransferPage })))
 const SettingsPage = lazy(() => import('./pages/SettingsPage').then((module) => ({ default: module.SettingsPage })))
+const CurriculumPage = lazy(() => import('./pages/CurriculumPage').then((module) => ({ default: module.CurriculumPage })))
 
 export function App() {
   const { session, loading } = useAuth()
@@ -30,6 +31,7 @@ export function App() {
         <Route element={<Layout />}>
           <Route index element={<TodayPage />} />
           <Route path="roadmap" element={<RoadmapPage />} />
+          <Route path="curriculum" element={<CurriculumPage />} />
           <Route path="sessions" element={<SessionsPage />} />
           <Route path="analytics" element={<AnalyticsPage />} />
           <Route path="reports" element={<ReportsPage />} />
