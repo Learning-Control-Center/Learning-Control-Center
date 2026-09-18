@@ -464,6 +464,18 @@ def activate_version(
             requested_at=now,
         )
     )
+    db.add(
+        ProjectionInvalidation(
+            projection_kind="analysis",
+            subject_type="learning_graph",
+            subject_id=graph.id,
+            source_fact_id=item.id,
+            target_policy_version="analysis-policy/v3.0",
+            status="pending",
+            attempt_count=0,
+            requested_at=now,
+        )
+    )
     db.commit()
     return item
 

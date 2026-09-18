@@ -1,6 +1,7 @@
 import {
   Activity,
   BarChart3,
+  BrainCircuit,
   BookOpenCheck,
   LibraryBig,
   FolderKanban,
@@ -28,6 +29,7 @@ const navigation = [
   { to: '/projects', label: 'Projects', icon: FolderKanban },
   { to: '/sessions', label: 'Log & sessions', icon: CalendarClock },
   { to: '/analytics', label: 'Analytics', icon: BarChart3 },
+  { to: '/analysis', label: 'Analysis V3', icon: BrainCircuit },
   { to: '/reports', label: 'Reports', icon: BookOpenCheck },
   { to: '/transfer', label: 'Import / Export', icon: FileOutput },
   { to: '/settings', label: 'Settings', icon: Settings },

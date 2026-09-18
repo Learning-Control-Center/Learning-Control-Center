@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models import (
+    CapabilityScaleDimension,
     CapabilityScaleLevel,
     CompetencyDefinitionActivationEvent,
     CompetencyIdentity,
@@ -14,6 +15,10 @@ from app.models import (
     ProfileMilestoneTarget,
     ProfileTarget,
     ProfileTargetIdentity,
+    ReadinessGate,
+    ReadinessGateIdentity,
+    ReadinessGatePredicate,
+    ReadinessGateTarget,
     SemanticCompetencyDefinition,
     TargetProfile,
     TargetProfileActivationEvent,
@@ -43,14 +48,19 @@ class ProfileDomainPublicDTO:
 class ProfileTargetProjectionPublicDTO:
     id: str
     target_identity_id: str
+    stable_key: str
     competency_identity_id: str
     dimension_key: str | None
+    dimension_id: str | None
     profile_domain_id: str
+    scale_version_id: str
     target_level_id: str
     target_level_ordinal: int
     priority: str
     target_date: str | None
     target_month: str | None
+    freshness_override_days: int | None
+    activated_at: int
 
 
 @dataclass(frozen=True)
@@ -64,6 +74,28 @@ class ProfileMilestonePublicDTO:
 
 
 @dataclass(frozen=True)
+class ReadinessPredicatePublicDTO:
+    id: str
+    predicate_type: str
+    requirement_type: str
+    subject_json: str
+    order_index: int
+
+
+@dataclass(frozen=True)
+class ReadinessGatePublicDTO:
+    id: str
+    identity_id: str
+    stable_key: str
+    title: str
+    effect: str
+    milestone_id: str | None
+    target_ids: tuple[str, ...]
+    predicates: tuple[ReadinessPredicatePublicDTO, ...]
+    order_index: int
+
+
+@dataclass(frozen=True)
 class ActiveProfileProjectionPublicDTO:
     profile_id: str
     profile_version_id: str
@@ -74,6 +106,7 @@ class ActiveProfileProjectionPublicDTO:
     domains: tuple[ProfileDomainPublicDTO, ...]
     targets: tuple[ProfileTargetProjectionPublicDTO, ...]
     milestones: tuple[ProfileMilestonePublicDTO, ...]
+    readiness_gates: tuple[ReadinessGatePublicDTO, ...]
 
 
 @dataclass(frozen=True)
@@ -193,18 +226,45 @@ def active_profile_projection_as_of(
         level = db.get(CapabilityScaleLevel, item.target_level_id)
         if level is None:
             return None
+        dimension_id = None
+        if identity.dimension_key is not None:
+            dimension_id = db.scalar(
+                select(CapabilityScaleDimension.id).where(
+                    CapabilityScaleDimension.scale_version_id == item.scale_version_id,
+                    CapabilityScaleDimension.stable_key == identity.dimension_key,
+                )
+            )
         targets.append(
             ProfileTargetProjectionPublicDTO(
                 item.id,
                 item.target_identity_id,
+                identity.stable_key,
                 identity.competency_identity_id,
                 identity.dimension_key,
+                dimension_id,
                 item.profile_domain_id,
+                item.scale_version_id,
                 item.target_level_id,
                 level.ordinal_rank,
                 item.priority,
                 item.target_date,
                 item.target_month,
+                item.freshness_override_days,
+                int(
+                    db.scalar(
+                        select(func.min(TargetProfileActivationEvent.activated_at))
+                        .join(
+                            ProfileTarget,
+                            ProfileTarget.profile_version_id
+                            == TargetProfileActivationEvent.to_profile_version_id,
+                        )
+                        .where(
+                            ProfileTarget.target_identity_id == item.target_identity_id,
+                            TargetProfileActivationEvent.activated_at < exclusive_cutoff_at,
+                        )
+                    )
+                    or event.activated_at
+                ),
             )
         )
     milestones = tuple(
@@ -230,6 +290,55 @@ def active_profile_projection_as_of(
             .order_by(ProfileMilestone.order_index, ProfileMilestone.id)
         ).all()
     )
+    gates = db.scalars(
+        select(ReadinessGate)
+        .where(ReadinessGate.profile_version_id == version.id)
+        .order_by(ReadinessGate.order_index, ReadinessGate.id)
+    ).all()
+    gate_identities = {
+        item.id: item
+        for item in db.scalars(
+            select(ReadinessGateIdentity).where(
+                ReadinessGateIdentity.id.in_([gate.gate_identity_id for gate in gates])
+            )
+        ).all()
+    }
+    gate_targets: dict[str, list[str]] = {gate.id: [] for gate in gates}
+    for gate_id, target_id in db.execute(
+        select(ReadinessGateTarget.gate_id, ReadinessGateTarget.profile_target_id).where(
+            ReadinessGateTarget.gate_id.in_([gate.id for gate in gates])
+        )
+    ).all():
+        gate_targets[gate_id].append(target_id)
+    predicates: dict[str, list[ReadinessPredicatePublicDTO]] = {gate.id: [] for gate in gates}
+    for predicate_row in db.scalars(
+        select(ReadinessGatePredicate)
+        .where(ReadinessGatePredicate.gate_id.in_([gate.id for gate in gates]))
+        .order_by(ReadinessGatePredicate.order_index, ReadinessGatePredicate.id)
+    ).all():
+        predicates[predicate_row.gate_id].append(
+            ReadinessPredicatePublicDTO(
+                predicate_row.id,
+                predicate_row.predicate_type,
+                predicate_row.requirement_type,
+                predicate_row.subject_json,
+                predicate_row.order_index,
+            )
+        )
+    readiness_gates = tuple(
+        ReadinessGatePublicDTO(
+            gate.id,
+            gate.gate_identity_id,
+            gate_identities[gate.gate_identity_id].stable_key,
+            gate.title,
+            gate.effect,
+            gate.milestone_id,
+            tuple(sorted(gate_targets[gate.id])),
+            tuple(predicates[gate.id]),
+            gate.order_index,
+        )
+        for gate in gates
+    )
     return ActiveProfileProjectionPublicDTO(
         profile.id,
         version.id,
@@ -240,6 +349,7 @@ def active_profile_projection_as_of(
         domains,
         tuple(targets),
         milestones,
+        readiness_gates,
     )
 
 

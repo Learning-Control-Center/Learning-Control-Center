@@ -353,7 +353,7 @@ def _queue_evidence_invalidations(
             ("criterion_evaluation", "criterion", criterion_id, "criterion-evaluation-policy/v1"),
             ("capability", "competency", competency_id, "capability-policy/v1"),
             ("review", "competency", competency_id, "freshness-policy/v1"),
-            ("analysis", "competency", competency_id, "analysis-policy/v1"),
+            ("analysis", "competency", competency_id, "analysis-policy/v3.0"),
         ):
             if subject_id is None:
                 continue

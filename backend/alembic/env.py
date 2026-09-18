@@ -4,6 +4,7 @@ from logging.config import fileConfig
 
 from alembic import context
 from app import models  # noqa: F401
+from app.analysis.v3 import models as analysis_v3_models  # noqa: F401
 from app.curriculum import models as curriculum_models  # noqa: F401
 from app.database import Base
 from app.learning_graph import models as learning_graph_models  # noqa: F401

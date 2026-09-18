@@ -29,7 +29,7 @@ from app.models import (
     ReviewEvent,
     SemanticCompetencyDefinition,
 )
-from app.portability.registry import PORTABLE_V5_MANIFEST
+from app.portability.registry import PORTABLE_V6_MANIFEST
 from app.roadmap_projection import service as projection_service
 from app.roadmap_projection.models import LegacyRoadmapActiveState, RoadmapNodePositionOverride
 from httpx import AsyncClient
@@ -887,23 +887,23 @@ async def test_singleton_graph_selection_and_historical_rebuild_do_not_poison_cu
     assert reselected.json()["fromVersionId"] == second_version.json()["id"]
 
 
-async def test_graph_projection_portable_v5_and_legacy_compatibility_are_separate(
+async def test_graph_projection_portable_v6_and_legacy_compatibility_are_separate(
     configured_client: tuple[AsyncClient, str, dict[str, object]], db: Session
 ) -> None:
     client, csrf, roadmap = configured_client
     graph, _version, _first, _second = await _setup_native_graph(client, csrf)
     package = _portable_payload(db)
-    assert package["manifest"] == PORTABLE_V5_MANIFEST
+    assert package["manifest"] == PORTABLE_V6_MANIFEST
     assert package["roadmapProjectionCheckpoint"]["configured"] is True
-    _validate_portable_payload(package, "graph-projection-v5", schema_version=5)
+    _validate_portable_payload(package, "graph-projection-v6", schema_version=6)
     tampered = copy.deepcopy(package)
     tampered["tables"]["learning_graph_versions"][0]["content_hash"] = "0" * 64
     with pytest.raises(AppError, match="Graph policy lineage or content hash"):
-        _validate_portable_payload(tampered, "graph-projection-tampered", schema_version=5)
+        _validate_portable_payload(tampered, "graph-projection-tampered", schema_version=6)
     activation_tamper = copy.deepcopy(package)
     activation_tamper["tables"]["learning_graph_activation_events"][0]["event_sequence"] = 2
     with pytest.raises(AppError, match="Graph activation history"):
-        _validate_portable_payload(activation_tamper, "graph-activation-tampered", schema_version=5)
+        _validate_portable_payload(activation_tamper, "graph-activation-tampered", schema_version=6)
 
     compatibility = await client.get(
         f"/api/v2/roadmap-projection/legacy-roadmap-graph/{roadmap['activeVersion']['id']}"

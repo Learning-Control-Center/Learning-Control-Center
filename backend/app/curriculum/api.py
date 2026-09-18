@@ -52,7 +52,7 @@ def _queue_curriculum_invalidations(
     for projection_kind, policy in (
         ("curriculum_availability", "curriculum-availability-policy/v1"),
         ("roadmap_projection_v2", "roadmap-projection/v2.0"),
-        ("analysis", "analysis-policy/v3"),
+        ("analysis", "analysis-policy/v3.0"),
     ):
         db.add(
             ProjectionInvalidation(

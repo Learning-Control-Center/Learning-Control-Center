@@ -3,12 +3,23 @@ from __future__ import annotations
 import json
 import re
 from collections import defaultdict
+from dataclasses import asdict
 from datetime import datetime
 from typing import Any, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import Boolean, Integer, String, Table, Text, func, select, text
+from sqlalchemy.orm import Session
 
+from app.analysis.v3.models import (
+    AnalysisV3CompetencyGap,
+    AnalysisV3CurrentState,
+    AnalysisV3NormalizedFact,
+    AnalysisV3RunLineage,
+    AnalysisV3Signal,
+    AnalysisV3SnapshotDetail,
+    AnalysisV3UnknownMarker,
+)
 from app.capability_scales import builtin_scale_tables
 from app.compatibility.v1.activity_backfill import (
     POLICY_KEY as ACTIVITY_POLICY_KEY,
@@ -45,7 +56,7 @@ from app.curriculum.models import (
     LearningUnitRequirement,
     LearningUnitTarget,
 )
-from app.determinism import content_hash
+from app.determinism import canonical_json, content_hash
 from app.domain import has_required_dependency_cycle
 from app.errors import AppError
 from app.learning_graph.models import (
@@ -85,6 +96,7 @@ from app.models import (
     CriterionDefinition,
     CriterionEvaluationResult,
     CriterionIdentity,
+    DisciplineConfigurationEvent,
     DisciplineProfile,
     Evidence,
     EvidenceInvalidation,
@@ -211,6 +223,13 @@ def _validate_json_columns(connection: Any) -> None:
         (AnalysisSnapshot, "normalized_facts_json"),
         (AnalysisSnapshot, "signals_json"),
         (AnalysisSnapshot, "unknown_markers_json"),
+        (AnalysisV3RunLineage, "analyzer_bundle_json"),
+        (AnalysisV3NormalizedFact, "payload_json"),
+        (AnalysisV3CompetencyGap, "payload_json"),
+        (AnalysisV3CompetencyGap, "input_lineage_json"),
+        (AnalysisV3Signal, "reason_codes_json"),
+        (AnalysisV3Signal, "decisive_facts_json"),
+        (DisciplineConfigurationEvent, "configuration_json"),
         (ReadinessGatePredicate, "subject_json"),
         (CriterionDefinition, "demonstration_rule_json"),
         (Evidence, "provenance_json"),
@@ -584,6 +603,7 @@ def _validate_analysis_history(connection: Any) -> None:
             AnalysisSnapshot.id,
             AnalysisSnapshot.run_id,
             AnalysisSnapshot.purpose,
+            AnalysisSnapshot.schema_version,
             AnalysisSnapshot.generated_at,
             AnalysisSnapshot.cutoff_at,
             AnalysisSnapshot.cutoff_semantics,
@@ -621,11 +641,12 @@ def _validate_analysis_history(connection: Any) -> None:
             and run.input_hash == snapshot.input_hash
             and run.application_version == snapshot.application_version
         )
+        is_v3 = snapshot.schema_version == 3
         structures_valid = (
             snapshot.cutoff_semantics == "exclusive"
-            and snapshot.cutoff_at > snapshot.generated_at
-            and isinstance(lineage, list)
-            and isinstance(normalized, dict)
+            and (is_v3 or snapshot.cutoff_at > snapshot.generated_at)
+            and isinstance(lineage, dict if is_v3 else list)
+            and isinstance(normalized, list if is_v3 else dict)
             and isinstance(signals, list)
             and isinstance(unknown, list)
             and isinstance(semantic_references, list)
@@ -633,18 +654,33 @@ def _validate_analysis_history(connection: Any) -> None:
             and isinstance(policy_versions, dict)
             and all(
                 isinstance(marker, dict)
-                and all(isinstance(marker.get(key), str) for key in ("code", "path", "reason"))
+                and all(
+                    isinstance(marker.get(key), str)
+                    for key in (
+                        ("field_path", "subject_type", "subject_id", "reason_code")
+                        if is_v3
+                        else ("code", "path", "reason")
+                    )
+                )
                 for marker in unknown
             )
         )
-        expected_input = content_hash({"lineage": lineage, "normalizedFacts": normalized})
-        expected_output = content_hash(
-            {
-                "normalizedFacts": normalized,
-                "signals": signals,
-                "completeness": snapshot.completeness,
-                "unknownMarkers": unknown,
-            }
+        expected_input = (
+            snapshot.input_hash
+            if is_v3
+            else content_hash({"lineage": lineage, "normalizedFacts": normalized})
+        )
+        expected_output = (
+            snapshot.output_hash
+            if is_v3
+            else content_hash(
+                {
+                    "normalizedFacts": normalized,
+                    "signals": signals,
+                    "completeness": snapshot.completeness,
+                    "unknownMarkers": unknown,
+                }
+            )
         )
         if (
             not matching
@@ -681,6 +717,408 @@ def _validate_analysis_history(connection: Any) -> None:
             "PORTABLE_ANALYSIS_INVALID",
             "Recommendation analysis lineage is invalid.",
         )
+
+
+def _validate_analysis_v3(connection: Any) -> None:
+    from app.analysis.v3.policy import analysis_policy_bundle, analyze_normalized_facts
+
+    config_events = sorted(
+        connection.execute(select(*DisciplineConfigurationEvent.__table__.c)).all(),
+        key=lambda row: (row.event_sequence, row.id),
+    )
+    for expected_sequence, item in enumerate(config_events, start=1):
+        payload = json.loads(item.configuration_json)
+        if item.event_sequence != expected_sequence or item.configuration_hash != content_hash(
+            payload
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_ANALYSIS_V3_INVALID",
+                "Discipline configuration history is not replayable.",
+            )
+
+    runs = {row.id: row for row in connection.execute(select(*AnalysisRun.__table__.c)).all()}
+    snapshots = {
+        row.id: row for row in connection.execute(select(*AnalysisSnapshot.__table__.c)).all()
+    }
+    snapshots_by_run = {row.run_id: row for row in snapshots.values()}
+    lineages = connection.execute(select(*AnalysisV3RunLineage.__table__.c)).all()
+    lineage_by_run = {row.run_id: row for row in lineages}
+    expected_v3_run_ids = {
+        row.id
+        for row in runs.values()
+        if row.purpose in {"learning_control", "candidate_readiness"}
+    }
+    if set(lineage_by_run) != expected_v3_run_ids:
+        raise AppError(
+            422,
+            "PORTABLE_ANALYSIS_V3_INVALID",
+            "Analysis V3 run-lineage membership is incomplete.",
+        )
+    details = {
+        row.snapshot_id: row
+        for row in connection.execute(select(*AnalysisV3SnapshotDetail.__table__.c)).all()
+    }
+
+    def ordered_rows(model: Any, snapshot_id: str) -> list[Any]:
+        rows = list(
+            connection.execute(
+                select(*model.__table__.c).where(model.snapshot_id == snapshot_id)
+            ).all()
+        )
+        rows.sort(key=lambda row: row.ordinal)
+        if [row.ordinal for row in rows] != list(range(len(rows))):
+            raise AppError(
+                422,
+                "PORTABLE_ANALYSIS_V3_INVALID",
+                "Analysis V3 child ordinals are not contiguous.",
+            )
+        return rows
+
+    v3_snapshot_ids: set[str] = set()
+    for lineage in lineages:
+        run = runs.get(lineage.run_id)
+        snapshot = snapshots_by_run.get(lineage.run_id)
+        replay_lineage = (
+            lineage_by_run.get(lineage.replay_of_run_id) if lineage.replay_of_run_id else None
+        )
+        if run is None or (lineage.replay_of_run_id and replay_lineage is None):
+            raise AppError(
+                422,
+                "PORTABLE_ANALYSIS_V3_INVALID",
+                "Analysis V3 run lineage is disconnected.",
+            )
+        policy_bundle = json.loads(lineage.analyzer_bundle_json)
+        configuration = next(
+            (item for item in config_events if item.id == run.configuration_reference), None
+        )
+        configuration_valid = (
+            run.configuration_reference == "missing"
+            and run.configuration_hash == content_hash({"missing": True})
+            or configuration is not None
+            and configuration.configuration_hash == run.configuration_hash
+            and configuration.recorded_at < run.cutoff_at
+        )
+        if (
+            run.purpose not in {"learning_control", "candidate_readiness"}
+            or run.algorithm_version != lineage.analysis_algorithm_version
+            or policy_bundle.get("algorithm") != lineage.analysis_algorithm_version
+            or policy_bundle.get("analysis") != lineage.analysis_policy_version
+            or policy_bundle.get("normalization") != lineage.normalization_schema_version
+            or lineage.policy_bundle_hash != content_hash(policy_bundle)
+            or run.input_hash != content_hash(json.loads(run.input_lineage_json))
+            or not configuration_valid
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_ANALYSIS_V3_INVALID",
+                "Analysis V3 producer lineage or input hashes are inconsistent.",
+            )
+        if policy_bundle != analysis_policy_bundle():
+            raise AppError(
+                422,
+                "PORTABLE_ANALYSIS_V3_POLICY_UNAVAILABLE",
+                "The Analysis V3 producer policy bundle is not supported for exact replay.",
+            )
+        has_snapshot = snapshot is not None
+        if (run.status in {"completed", "partial"}) != has_snapshot:
+            raise AppError(
+                422,
+                "PORTABLE_ANALYSIS_V3_INVALID",
+                "Analysis V3 run and snapshot lifecycle is inconsistent.",
+            )
+        if not has_snapshot:
+            continue
+        assert snapshot is not None
+        if lineage.replay_of_run_id:
+            replay_snapshot = snapshots_by_run.get(lineage.replay_of_run_id)
+            replay_run = runs.get(lineage.replay_of_run_id)
+            replay_policy = (
+                json.loads(replay_snapshot.policy_versions_json) if replay_snapshot else None
+            )
+            if (
+                replay_snapshot is None
+                or replay_run is None
+                or replay_snapshot.purpose != snapshot.purpose
+                or replay_snapshot.cutoff_at != snapshot.cutoff_at
+                or replay_snapshot.input_hash != snapshot.input_hash
+                or replay_snapshot.output_hash != snapshot.output_hash
+                or replay_policy != policy_bundle
+            ):
+                raise AppError(
+                    422,
+                    "PORTABLE_ANALYSIS_V3_INVALID",
+                    "Analysis V3 replay lineage does not reproduce its source snapshot.",
+                )
+        detail = details.get(snapshot.id)
+        if (
+            snapshot.schema_version != 3
+            or run.algorithm_version != lineage.analysis_algorithm_version
+            or detail is None
+            or snapshot.input_hash != run.input_hash
+            or snapshot.cutoff_at != run.cutoff_at
+            or snapshot.purpose != run.purpose
+            or snapshot.discipline_configuration_reference != run.configuration_reference
+            or snapshot.configuration_hash != run.configuration_hash
+            or snapshot.application_version != run.application_version
+            or snapshot.input_lineage_json != run.input_lineage_json
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_ANALYSIS_V3_INVALID",
+                "Analysis V3 producer lineage is inconsistent.",
+            )
+        if json.loads(snapshot.policy_versions_json) != policy_bundle:
+            raise AppError(
+                422,
+                "PORTABLE_ANALYSIS_V3_INVALID",
+                "Analysis V3 policy or input hashes are inconsistent.",
+            )
+        from app.analysis.v3.service import build_analysis_inputs
+
+        if isinstance(connection, Session):
+            (
+                reconstructed_facts,
+                reconstructed_unknowns,
+                reconstructed_lineage,
+            ) = build_analysis_inputs(connection, snapshot.cutoff_at, snapshot.purpose)
+        else:
+            with Session(bind=connection, autoflush=False) as validation_db:
+                (
+                    reconstructed_facts,
+                    reconstructed_unknowns,
+                    reconstructed_lineage,
+                ) = build_analysis_inputs(
+                    validation_db, snapshot.cutoff_at, snapshot.purpose
+                )
+        frozen_lineage = json.loads(run.input_lineage_json)
+        if content_hash(frozen_lineage) != content_hash(reconstructed_lineage):
+            raise AppError(
+                422,
+                "PORTABLE_ANALYSIS_V3_INVALID",
+                "Analysis V3 frozen inputs do not match cutoff-correct canonical history.",
+            )
+        profile_version = (
+            connection.execute(
+                select(TargetProfileVersion.target_profile_id).where(
+                    TargetProfileVersion.id == snapshot.target_profile_version_id
+                )
+            ).scalar_one_or_none()
+            if snapshot.target_profile_version_id
+            else None
+        )
+        semantic_references = json.loads(snapshot.semantic_definition_references_json)
+        scale_references = json.loads(snapshot.capability_scale_version_references_json)
+        frozen_profile = frozen_lineage.get("profile") or {}
+        frozen_graph = frozen_lineage.get("graph") or {}
+        expected_semantic_references = sorted(
+            {
+                item.payload["semanticDefinitionId"]
+                for item in reconstructed_facts
+                if item.fact_type == "target_state"
+                and item.payload["semanticDefinitionId"] is not None
+            }
+        )
+        expected_scale_references = sorted(
+            {
+                item.payload["scaleVersionId"]
+                for item in reconstructed_facts
+                if item.fact_type == "target_state"
+            }
+        )
+        if (
+            (snapshot.target_profile_version_id is None) != (snapshot.target_profile_id is None)
+            or (
+                snapshot.target_profile_version_id is not None
+                and profile_version != snapshot.target_profile_id
+            )
+            or snapshot.target_profile_id != frozen_profile.get("profile_id")
+            or snapshot.target_profile_version_id != frozen_profile.get("profile_version_id")
+            or snapshot.learning_graph_reference != frozen_graph.get("learning_graph_version_id")
+            or snapshot.curriculum_reference != content_hash(frozen_lineage["curriculumCatalog"])
+            or semantic_references != expected_semantic_references
+            or scale_references != expected_scale_references
+            or (
+                snapshot.learning_graph_reference is not None
+                and connection.execute(
+                    select(LearningGraphVersion.id).where(
+                        LearningGraphVersion.id == snapshot.learning_graph_reference
+                    )
+                ).scalar_one_or_none()
+                is None
+            )
+            or set(semantic_references)
+            - set(connection.execute(select(SemanticCompetencyDefinition.id)).scalars())
+            or set(scale_references)
+            - set(connection.execute(select(CapabilityScaleVersion.id)).scalars())
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_ANALYSIS_V3_INVALID",
+                "Analysis V3 canonical references are disconnected.",
+            )
+        if detail.purpose_matrix_version != policy_bundle.get("purposeMatrix"):
+            raise AppError(
+                422,
+                "PORTABLE_ANALYSIS_V3_INVALID",
+                "Analysis V3 purpose-matrix lineage is inconsistent.",
+            )
+        fact_rows = ordered_rows(AnalysisV3NormalizedFact, snapshot.id)
+        gap_rows = ordered_rows(AnalysisV3CompetencyGap, snapshot.id)
+        signal_rows = ordered_rows(AnalysisV3Signal, snapshot.id)
+        unknown_rows = ordered_rows(AnalysisV3UnknownMarker, snapshot.id)
+        if any(item.generated_cutoff_at != snapshot.cutoff_at for item in signal_rows):
+            raise AppError(
+                422,
+                "PORTABLE_ANALYSIS_V3_INVALID",
+                "Analysis V3 signal cutoff lineage is inconsistent.",
+            )
+        facts = [
+            {
+                "stable_key": row.stable_key,
+                "fact_type": row.fact_type,
+                "subject_type": row.subject_type,
+                "subject_id": row.subject_id,
+                "payload": json.loads(row.payload_json),
+            }
+            for row in fact_rows
+        ]
+        gaps = [
+            {
+                "stable_key": row.stable_key,
+                "competency_identity_id": row.competency_identity_id,
+                "dimension_key": row.dimension_key,
+                "severity": row.severity,
+                "comparison_status": row.comparison_status,
+                "payload": json.loads(row.payload_json),
+                "input_lineage": json.loads(row.input_lineage_json),
+            }
+            for row in gap_rows
+        ]
+        signals = [
+            {
+                "stable_key": row.stable_key,
+                "signal_type": row.signal_type,
+                "subject_type": row.subject_type,
+                "subject_id": row.subject_id,
+                "dimension_key": row.dimension_key,
+                "severity": row.severity,
+                "reason_codes": json.loads(row.reason_codes_json),
+                "decisive_facts": json.loads(row.decisive_facts_json),
+                "analyzer_policy_version": row.analyzer_policy_version,
+                "generated_cutoff_at": row.generated_cutoff_at,
+            }
+            for row in signal_rows
+        ]
+        unknowns = [
+            {
+                "field_path": row.field_path,
+                "subject_type": row.subject_type,
+                "subject_id": row.subject_id,
+                "reason_code": row.reason_code,
+            }
+            for row in unknown_rows
+        ]
+        recomputed = analyze_normalized_facts(
+            reconstructed_facts,
+            reconstructed_unknowns,
+            generated_cutoff_at=snapshot.cutoff_at,
+        )
+        recomputed_facts = json.loads(canonical_json([asdict(item) for item in recomputed.facts]))
+        recomputed_gaps = json.loads(canonical_json([asdict(item) for item in recomputed.gaps]))
+        recomputed_signals = json.loads(
+            canonical_json([asdict(item) for item in recomputed.signals])
+        )
+        recomputed_unknowns = json.loads(
+            canonical_json([asdict(item) for item in recomputed.unknown_markers])
+        )
+        hash_projection = {
+            "purpose": snapshot.purpose,
+            "cutoffAt": snapshot.cutoff_at,
+            "inputHash": snapshot.input_hash,
+            "policyBundle": policy_bundle,
+            "facts": facts,
+            "gaps": gaps,
+            "signals": signals,
+            "unknownMarkers": unknowns,
+            "completeness": snapshot.completeness,
+            "envelopeReferences": {
+                "targetProfileId": snapshot.target_profile_id,
+                "targetProfileVersionId": snapshot.target_profile_version_id,
+                "learningGraphReference": snapshot.learning_graph_reference,
+                "curriculumReference": snapshot.curriculum_reference,
+                "semanticDefinitionReferences": semantic_references,
+                "capabilityScaleVersionReferences": scale_references,
+            },
+        }
+        if (
+            json.loads(snapshot.normalized_facts_json) != facts
+            or json.loads(snapshot.signals_json) != signals
+            or json.loads(snapshot.unknown_markers_json) != unknowns
+            or detail.facts_hash != content_hash(facts)
+            or detail.gaps_hash != content_hash(gaps)
+            or detail.signals_hash != content_hash(signals)
+            or detail.unknowns_hash != content_hash(unknowns)
+            or facts != recomputed_facts
+            or gaps != recomputed_gaps
+            or signals != recomputed_signals
+            or unknowns != recomputed_unknowns
+            or snapshot.completeness != recomputed.completeness
+            or snapshot.output_hash != content_hash(hash_projection)
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_ANALYSIS_V3_INVALID",
+                "Analysis V3 typed children do not match the immutable snapshot.",
+            )
+        v3_snapshot_ids.add(snapshot.id)
+
+    if set(details) != v3_snapshot_ids:
+        raise AppError(
+            422,
+            "PORTABLE_ANALYSIS_V3_INVALID",
+            "Analysis V3 snapshot details are disconnected.",
+        )
+    schema_v3_snapshot_ids = {item.id for item in snapshots.values() if item.schema_version == 3}
+    if schema_v3_snapshot_ids != v3_snapshot_ids:
+        raise AppError(
+            422,
+            "PORTABLE_ANALYSIS_V3_INVALID",
+            "Analysis V3 snapshot membership is incomplete.",
+        )
+    for child_model in (
+        AnalysisV3NormalizedFact,
+        AnalysisV3CompetencyGap,
+        AnalysisV3Signal,
+        AnalysisV3UnknownMarker,
+    ):
+        child_snapshot_ids = set(connection.execute(select(child_model.snapshot_id)).scalars())
+        if not child_snapshot_ids <= v3_snapshot_ids:
+            raise AppError(
+                422,
+                "PORTABLE_ANALYSIS_V3_INVALID",
+                "Analysis V3 typed children are disconnected.",
+            )
+    for current in connection.execute(select(*AnalysisV3CurrentState.__table__.c)).all():
+        snapshot = snapshots.get(current.snapshot_id)
+        lineage = next((item for item in lineages if item.run_id == current.run_id), None)
+        if (
+            snapshot is None
+            or snapshot.run_id != current.run_id
+            or current.scope_key != "learning-control"
+            or current.purpose not in {"learning_control", "candidate_readiness"}
+            or snapshot.purpose != current.purpose
+            or lineage is None
+            or current.input_hash != snapshot.input_hash
+            or current.policy_bundle_hash != lineage.policy_bundle_hash
+            or current.exclusive_cutoff_at != snapshot.cutoff_at
+            or current.source_generation != lineage.source_generation
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_ANALYSIS_V3_INVALID",
+                "Analysis V3 current state is disconnected from immutable history.",
+            )
 
 
 def _validate_v2_profile_competency(connection: Any) -> None:
@@ -2038,6 +2476,7 @@ def validate_domain_integrity(connection: Any) -> None:
         )
     _validate_json_columns(connection)
     _validate_analysis_history(connection)
+    _validate_analysis_v3(connection)
     _validate_roadmap_scope(connection)
     _validate_roadmap_scope_history(connection)
     _validate_versioned_roadmap(connection)

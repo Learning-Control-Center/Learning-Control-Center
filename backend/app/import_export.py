@@ -11,6 +11,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, cast
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import ValidationError
@@ -18,6 +19,18 @@ from sqlalchemy import Engine, Table, insert, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.analysis.v3.models import (
+    AnalysisV3CompetencyGap,
+    AnalysisV3CurrentState,
+    AnalysisV3NormalizedFact,
+    AnalysisV3RunLineage,
+    AnalysisV3Signal,
+    AnalysisV3SnapshotDetail,
+    AnalysisV3UnknownMarker,
+)
+from app.analysis.v3.policy import ANALYSIS_POLICY_VERSION, analysis_policy_bundle
+from app.analysis.v3.service import build_analysis_inputs
+from app.analysis_sources import analysis_source_generation
 from app.analytics import build_analytics
 from app.api_serialization import serialize_api_instants
 from app.auth import AuthContext, get_auth_context, require_csrf
@@ -105,6 +118,7 @@ from app.models import (
     CriterionEvaluationResult,
     CriterionIdentity,
     DailyReflection,
+    DisciplineConfigurationEvent,
     DisciplineProfile,
     Evidence,
     EvidenceInvalidation,
@@ -161,12 +175,16 @@ from app.portability.registry import (
     PORTABLE_V4_FORBIDDEN_TABLES,
     PORTABLE_V4_MANIFEST,
     PORTABLE_V4_PROJECT_TABLES,
+    PORTABLE_V5_FORBIDDEN_TABLES,
     PORTABLE_V5_GRAPH_PROJECTION_TABLES,
     PORTABLE_V5_MANIFEST,
+    PORTABLE_V6_ANALYSIS_TABLES,
+    PORTABLE_V6_MANIFEST,
     supports_portable_schema,
     upgrade_v2_to_v3_tables,
     upgrade_v3_to_v4_tables,
     upgrade_v4_to_v5_tables,
+    upgrade_v5_to_v6_tables,
 )
 from app.projects.contracts import ProjectCatalogPublicDTO
 from app.projects.models import (
@@ -341,8 +359,15 @@ PORTABLE_MODELS = [
     GeneratedReport,
     AnalysisRun,
     AnalysisSnapshot,
+    AnalysisV3RunLineage,
+    AnalysisV3SnapshotDetail,
+    AnalysisV3NormalizedFact,
+    AnalysisV3CompetencyGap,
+    AnalysisV3Signal,
+    AnalysisV3UnknownMarker,
     RecommendationSnapshot,
     DisciplineProfile,
+    DisciplineConfigurationEvent,
     ImportRecord,
     ExportRecord,
     ApplicationSetting,
@@ -409,7 +434,7 @@ def _capability_projection_checkpoints(db: Session) -> list[dict[str, str]]:
 
 def _portable_payload(db: Session, project_ids: set[str] | None = None) -> dict[str, Any]:
     payload: dict[str, Any] = {
-        "manifest": PORTABLE_V5_MANIFEST,
+        "manifest": PORTABLE_V6_MANIFEST,
         "tables": {
             _table(model).name: [_row_dict(item) for item in db.scalars(select(model)).all()]
             for model in PORTABLE_MODELS
@@ -432,6 +457,19 @@ def _portable_payload(db: Session, project_ids: set[str] | None = None) -> dict[
         row["id"]: row for row in tables["project_criterion_identities"]
     }
     closure_project_ids: set[str] = set()
+    analysis_runs_by_id = {row["id"]: row for row in tables["analysis_runs"]}
+    for lineage in tables["analysis_v3_run_lineages"]:
+        run = analysis_runs_by_id.get(lineage["run_id"])
+        if run is None:
+            continue
+        frozen_inputs = json.loads(run["input_lineage_json"])
+        project_catalog = frozen_inputs.get("projectCatalog", {})
+        closure_project_ids.update(
+            str(item["project_id"]) for item in project_catalog.get("active_version_references", [])
+        )
+        closure_project_ids.update(
+            str(item["project_id"]) for item in project_catalog.get("candidates", [])
+        )
     for row in tables["evidence"]:
         if row["source_type"] != "activity_project_task_link":
             continue
@@ -686,6 +724,29 @@ def _portable_payload(db: Session, project_ids: set[str] | None = None) -> dict[
     }
     projection_checkpoint["inputHash"] = content_hash(projection_checkpoint)
     payload["roadmapProjectionCheckpoint"] = projection_checkpoint
+    analysis_checkpoint: dict[str, Any] = {
+        "states": [
+            {
+                "scopeKey": item.scope_key,
+                "purpose": item.purpose,
+                "runId": item.run_id,
+                "snapshotId": item.snapshot_id,
+                "status": item.status,
+                "exclusiveCutoffAt": item.exclusive_cutoff_at,
+                "sourceGeneration": item.source_generation,
+                "inputHash": item.input_hash,
+                "policyBundleHash": item.policy_bundle_hash,
+                "updatedAt": item.updated_at,
+            }
+            for item in db.scalars(
+                select(AnalysisV3CurrentState).order_by(
+                    AnalysisV3CurrentState.scope_key, AnalysisV3CurrentState.purpose
+                )
+            ).all()
+        ]
+    }
+    analysis_checkpoint["checkpointHash"] = content_hash(analysis_checkpoint)
+    payload["analysisV3CurrentCheckpoint"] = analysis_checkpoint
     return payload
 
 
@@ -786,6 +847,90 @@ def _assert_roadmap_projection_checkpoint_parity(
             "PORTABLE_ROADMAP_PROJECTION_PARITY_FAILED",
             "Restored canonical facts do not reproduce the Roadmap Projection checkpoint.",
         )
+
+
+def _validate_analysis_v3_checkpoint(
+    payload: dict[str, Any], tables: dict[str, list[dict[str, Any]]], schema_version: int
+) -> None:
+    checkpoint = payload.get("analysisV3CurrentCheckpoint")
+    if schema_version < 6:
+        if checkpoint is not None:
+            raise AppError(
+                422,
+                "PORTABLE_SCHEMA_INVALID",
+                "Portable schema versions before V6 cannot contain an Analysis V3 checkpoint.",
+            )
+        return
+    if not isinstance(checkpoint, dict) or "checkpointHash" not in checkpoint:
+        raise AppError(
+            422, "PORTABLE_ANALYSIS_CHECKPOINT_INVALID", "The Analysis V3 checkpoint is invalid."
+        )
+    if checkpoint["checkpointHash"] != content_hash(
+        {key: value for key, value in checkpoint.items() if key != "checkpointHash"}
+    ):
+        raise AppError(
+            422,
+            "PORTABLE_ANALYSIS_CHECKPOINT_INVALID",
+            "The Analysis V3 checkpoint hash is invalid.",
+        )
+    if set(checkpoint) != {"states", "checkpointHash"} or not isinstance(
+        checkpoint.get("states"), list
+    ):
+        raise AppError(
+            422, "PORTABLE_ANALYSIS_CHECKPOINT_INVALID", "The Analysis V3 checkpoint is invalid."
+        )
+    expected = {
+        "scopeKey",
+        "purpose",
+        "runId",
+        "snapshotId",
+        "status",
+        "exclusiveCutoffAt",
+        "sourceGeneration",
+        "inputHash",
+        "policyBundleHash",
+        "updatedAt",
+    }
+    runs = {row["id"]: row for row in tables.get("analysis_runs", [])}
+    snapshots = {row["id"]: row for row in tables.get("analysis_snapshots", [])}
+    lineages = {row["run_id"]: row for row in tables.get("analysis_v3_run_lineages", [])}
+    seen: set[tuple[str, str]] = set()
+    for state in checkpoint["states"]:
+        if not isinstance(state, dict):
+            raise AppError(
+                422,
+                "PORTABLE_ANALYSIS_CHECKPOINT_INVALID",
+                "The Analysis V3 checkpoint is invalid.",
+            )
+        snapshot = snapshots.get(state.get("snapshotId"))
+        lineage = lineages.get(state.get("runId"))
+        run = runs.get(state.get("runId"))
+        key = (str(state.get("scopeKey")), str(state.get("purpose")))
+        if (
+            set(state) != expected
+            or key in seen
+            or state.get("status") not in {"current", "stale", "pending", "failed"}
+            or state.get("scopeKey") != "learning-control"
+            or state.get("purpose") not in {"learning_control", "candidate_readiness"}
+            or type(state.get("updatedAt")) is not int
+            or run is None
+            or state.get("updatedAt", -1) < run["generated_at"]
+            or run["purpose"] != state.get("purpose")
+            or snapshot is None
+            or snapshot["run_id"] != state.get("runId")
+            or snapshot["purpose"] != state.get("purpose")
+            or snapshot["cutoff_at"] != state.get("exclusiveCutoffAt")
+            or snapshot["input_hash"] != state.get("inputHash")
+            or lineage is None
+            or lineage["policy_bundle_hash"] != state.get("policyBundleHash")
+            or lineage["source_generation"] != state.get("sourceGeneration")
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_ANALYSIS_CHECKPOINT_INVALID",
+                "The Analysis V3 checkpoint is disconnected from immutable history.",
+            )
+        seen.add(key)
 
 
 def _validate_curriculum_checkpoint(payload: dict[str, Any], schema_version: int) -> None:
@@ -1411,6 +1556,7 @@ def _insert_portable_tables(connection: Any, tables: dict[str, list[dict[str, An
 def _clear_migration_seeded_portable_state(connection: Any) -> None:
     """Remove built-ins seeded by migrations before logical backup insertion."""
     connection.execute(_table(MigrationBackfillRun).delete())
+    connection.execute(_table(DisciplineConfigurationEvent).delete())
     connection.execute(_table(ActivityCategoryVersion).delete())
     connection.execute(_table(CapabilityScaleLevel).delete())
     connection.execute(_table(CapabilityScaleDimension).delete())
@@ -1516,6 +1662,12 @@ def _normalize_portable_tables(
             "PORTABLE_MANIFEST_INVALID",
             "The portable V5 manifest is missing or does not match the recovery contract.",
         )
+    if schema_version == 6 and parsed.manifest != PORTABLE_V6_MANIFEST:
+        raise AppError(
+            422,
+            "PORTABLE_MANIFEST_INVALID",
+            "The portable V6 manifest is missing or does not match the recovery contract.",
+        )
     if schema_version == 1 and parsed.manifest is not None:
         raise AppError(
             422, "PORTABLE_SCHEMA_INVALID", "A V1 portable package cannot contain a V2 manifest."
@@ -1537,19 +1689,27 @@ def _normalize_portable_tables(
         raise AppError(
             422, "PORTABLE_SCHEMA_INVALID", "A V4 portable package cannot contain V5 tables."
         )
+    if schema_version == 5 and set(tables) & set(PORTABLE_V5_FORBIDDEN_TABLES):
+        raise AppError(
+            422, "PORTABLE_SCHEMA_INVALID", "A V5 portable package cannot contain V6 tables."
+        )
     unknown = set(tables) - set(PORTABLE_BY_TABLE)
     v2_tables = set(PORTABLE_V2_FOUNDATION_TABLES)
     v3_tables = set(PORTABLE_V3_CURRICULUM_TABLES)
     v4_tables = set(PORTABLE_V4_PROJECT_TABLES)
     v5_tables = set(PORTABLE_V5_GRAPH_PROJECTION_TABLES)
+    v6_tables = set(PORTABLE_V6_ANALYSIS_TABLES)
     missing = set(PORTABLE_BY_TABLE) - set(tables)
-    allowed_v1_missing = v2_tables | v3_tables | v4_tables | v5_tables | {"roadmap_scope_events"}
+    allowed_v1_missing = (
+        v2_tables | v3_tables | v4_tables | v5_tables | v6_tables | {"roadmap_scope_events"}
+    )
     legacy_without_scope_history = schema_version == 1 and "roadmap_scope_events" in missing
     valid_missing = (
         (schema_version == 1 and missing <= allowed_v1_missing)
-        or (schema_version == 2 and missing <= (v3_tables | v4_tables | v5_tables))
-        or (schema_version == 3 and missing <= (v4_tables | v5_tables))
-        or (schema_version == 4 and missing <= v5_tables)
+        or (schema_version == 2 and missing <= (v3_tables | v4_tables | v5_tables | v6_tables))
+        or (schema_version == 3 and missing <= (v4_tables | v5_tables | v6_tables))
+        or (schema_version == 4 and missing <= (v5_tables | v6_tables))
+        or (schema_version == 5 and missing <= v6_tables)
         or not missing
     )
     if unknown or not valid_missing:
@@ -1572,15 +1732,21 @@ def _normalize_portable_tables(
         upgrade_v2_to_v3_tables(tables)
         upgrade_v3_to_v4_tables(tables)
         upgrade_v4_to_v5_tables(tables)
+        upgrade_v5_to_v6_tables(tables)
     elif schema_version == 2:
         upgrade_v2_to_v3_tables(tables)
         upgrade_v3_to_v4_tables(tables)
         upgrade_v4_to_v5_tables(tables)
+        upgrade_v5_to_v6_tables(tables)
     elif schema_version == 3:
         upgrade_v3_to_v4_tables(tables)
         upgrade_v4_to_v5_tables(tables)
+        upgrade_v5_to_v6_tables(tables)
     elif schema_version == 4:
         upgrade_v4_to_v5_tables(tables)
+        upgrade_v5_to_v6_tables(tables)
+    elif schema_version == 5:
+        upgrade_v5_to_v6_tables(tables)
     return tables, legacy_without_scope_history
 
 
@@ -1594,6 +1760,7 @@ def _validate_portable_payload(
     _validate_curriculum_checkpoint(payload, schema_version)
     _validate_project_checkpoint(payload, schema_version)
     _validate_roadmap_projection_checkpoint(payload, schema_version)
+    _validate_analysis_v3_checkpoint(payload, tables, schema_version)
     for table_name, rows in tables.items():
         if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
             raise AppError(422, "PORTABLE_SCHEMA_INVALID", f"Table {table_name} has invalid rows.")
@@ -1674,6 +1841,8 @@ def _validate_portable_payload(
             "nativeProjectsInferred": 0,
             "initializedLearningGraphProjectionTables": len(PORTABLE_V5_GRAPH_PROJECTION_TABLES),
             "nativeLearningGraphsInferred": 0,
+            "initializedAnalysisV3Tables": len(PORTABLE_V6_ANALYSIS_TABLES),
+            "nativeAnalysisHistoryInferred": 0,
         }
     elif schema_version == 3:
         compatibility_conversions = {
@@ -1681,11 +1850,20 @@ def _validate_portable_payload(
             "nativeProjectsInferred": 0,
             "initializedLearningGraphProjectionTables": len(PORTABLE_V5_GRAPH_PROJECTION_TABLES),
             "nativeLearningGraphsInferred": 0,
+            "initializedAnalysisV3Tables": len(PORTABLE_V6_ANALYSIS_TABLES),
+            "nativeAnalysisHistoryInferred": 0,
         }
     elif schema_version == 4:
         compatibility_conversions = {
             "initializedLearningGraphProjectionTables": len(PORTABLE_V5_GRAPH_PROJECTION_TABLES),
             "nativeLearningGraphsInferred": 0,
+            "initializedAnalysisV3Tables": len(PORTABLE_V6_ANALYSIS_TABLES),
+            "nativeAnalysisHistoryInferred": 0,
+        }
+    elif schema_version == 5:
+        compatibility_conversions = {
+            "initializedAnalysisV3Tables": len(PORTABLE_V6_ANALYSIS_TABLES),
+            "nativeAnalysisHistoryInferred": 0,
         }
     return tables, {
         "tableCounts": {name: len(rows) for name, rows in sorted(tables.items())},
@@ -1906,6 +2084,10 @@ def _delete_portable_state(db: Session) -> None:
     db.execute(_table(EvidenceLinkRetraction).update().values(replacement_link_id=None))
     db.execute(_table(RoadmapProjectionCheckpoint).delete())
     db.execute(_table(RoadmapProjectionCache).delete())
+    for item in list(db.identity_map.values()):
+        if isinstance(item, AnalysisV3CurrentState):
+            db.expunge(item)
+    db.execute(_table(AnalysisV3CurrentState).delete())
     for model in reversed(PORTABLE_MODELS):
         db.execute(_table(model).delete())
     db.flush()
@@ -1933,6 +2115,7 @@ def _apply_portable_restore(
     curriculum_checkpoint = payload.get("curriculumCatalogCheckpoint")
     project_checkpoint = payload.get("projectCatalogCheckpoint")
     roadmap_projection_checkpoint = payload.get("roadmapProjectionCheckpoint")
+    analysis_checkpoint = payload.get("analysisV3CurrentCheckpoint")
     tables, legacy_without_scope_history = _normalize_portable_tables(
         payload, package_id, schema_version
     )
@@ -1947,6 +2130,59 @@ def _apply_portable_restore(
         )
     _delete_portable_state(db)
     _insert_portable_tables(db.connection(), tables)
+    db.flush()
+    restored_analysis_states = (
+        analysis_checkpoint.get("states", []) if isinstance(analysis_checkpoint, dict) else []
+    )
+    rebuild_purposes: set[str] = set()
+    for state in restored_analysis_states:
+        restored_snapshot = db.get(AnalysisSnapshot, state["snapshotId"])
+        assert restored_snapshot is not None
+        expected_completed_through = (
+            datetime.now(ZoneInfo(restored_snapshot.timezone)).date() - timedelta(days=1)
+        ).isoformat()
+        _facts, _unknowns, restored_inputs = build_analysis_inputs(
+            db, restored_snapshot.cutoff_at, str(state["purpose"])
+        )
+        exact_live_match = (
+            state["status"] == "current"
+            and state["sourceGeneration"] == analysis_source_generation(db)
+            and restored_snapshot.completed_through_date == expected_completed_through
+            and state["policyBundleHash"] == content_hash(analysis_policy_bundle())
+            and restored_snapshot.input_hash == content_hash(restored_inputs)
+        )
+        pointer_status = "current" if exact_live_match else "stale"
+        if pointer_status != "current":
+            rebuild_purposes.add(str(state["purpose"]))
+        db.add(
+            AnalysisV3CurrentState(
+                scope_key="learning-control",
+                purpose=state["purpose"],
+                run_id=state["runId"],
+                snapshot_id=state["snapshotId"],
+                status=pointer_status,
+                exclusive_cutoff_at=restored_snapshot.cutoff_at,
+                source_generation=state["sourceGeneration"],
+                input_hash=restored_snapshot.input_hash,
+                policy_bundle_hash=state["policyBundleHash"],
+                updated_at=state["updatedAt"] if exact_live_match else utc_now_ms(),
+            )
+        )
+    if not restored_analysis_states:
+        rebuild_purposes.add("learning_control")
+    for purpose in sorted(rebuild_purposes):
+        db.add(
+            ProjectionInvalidation(
+                projection_kind="analysis",
+                subject_type="analysis_scope",
+                subject_id=f"learning-control:{purpose}",
+                source_fact_id=f"portable-restore:{package_id}:{purpose}",
+                target_policy_version=ANALYSIS_POLICY_VERSION,
+                status="pending",
+                attempt_count=0,
+                requested_at=utc_now_ms(),
+            )
+        )
     db.flush()
     _assert_curriculum_checkpoint_parity(db, curriculum_checkpoint)
     _assert_project_checkpoint_parity(db, project_checkpoint)

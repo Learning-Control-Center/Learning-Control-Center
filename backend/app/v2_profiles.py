@@ -63,7 +63,7 @@ def _queue_definition_invalidations(
         ("criterion_evaluation", "criterion-evaluation-policy/v1"),
         ("capability", "capability-policy/v1"),
         ("review", "freshness-policy/v1"),
-        ("analysis", "analysis-policy/v1"),
+        ("analysis", "analysis-policy/v3.0"),
         ("roadmap_projection_v2", "roadmap-projection/v2.0"),
     ):
         db.add(
@@ -89,7 +89,7 @@ def _queue_profile_analysis_invalidation(
             subject_type="target_profile_version",
             subject_id=profile_version_id,
             source_fact_id=source_fact_id,
-            target_policy_version="analysis-policy/v1",
+            target_policy_version="analysis-policy/v3.0",
             status="pending",
             attempt_count=0,
             requested_at=requested_at,

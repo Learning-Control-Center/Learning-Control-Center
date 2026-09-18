@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
+READINESS_POLICY_VERSION = "readiness-policy/v1"
+
 
 class RequirementState(StrEnum):
     MET = "met"

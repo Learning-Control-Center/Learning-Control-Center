@@ -12,6 +12,9 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.responses import JSONResponse
 
 from app import models  # noqa: F401
+from app.analysis.v3 import models as analysis_v3_models  # noqa: F401
+from app.analysis.v3.api import router as analysis_v3_router
+from app.analysis.v3.service import drain_analysis_invalidations, initialize_analysis_v3
 from app.analytics import router as analytics_router
 from app.auth import router as auth_router
 from app.capability import drain_projection_invalidations
@@ -59,6 +62,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             backfill_reports(db)
             drain_projection_invalidations(db, recover_running=True)
             drain_roadmap_projection_invalidations(db, recover_running=True)
+            initialize_analysis_v3(db)
+            drain_analysis_invalidations(db, recover_running=True)
         stop_event = asyncio.Event()
         scheduler_task = asyncio.create_task(report_scheduler(stop_event))
         try:
@@ -170,3 +175,4 @@ app.include_router(project_router, prefix="/api/v2")
 app.include_router(learning_graph_router, prefix="/api/v2")
 app.include_router(roadmap_projection_router, prefix="/api/v2")
 app.include_router(legacy_roadmap_graph_router, prefix="/api/v2")
+app.include_router(analysis_v3_router, prefix="/api/v2")

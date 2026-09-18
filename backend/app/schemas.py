@@ -650,6 +650,7 @@ class PortablePackagePayload(StrictModel):
     curriculumCatalogCheckpoint: dict[str, Any] | None = None
     projectCatalogCheckpoint: dict[str, Any] | None = None
     roadmapProjectionCheckpoint: dict[str, Any] | None = None
+    analysisV3CurrentCheckpoint: dict[str, Any] | None = None
 
 
 class ImportInspectRequest(StrictModel):

@@ -669,7 +669,7 @@ async def set_exit_criterion_state(
             subject_type="criterion_identity",
             subject_id=canonical.id,
             source_fact_id=assertion.id,
-            target_policy_version="analysis-policy/v1",
+            target_policy_version="analysis-policy/v3.0",
             status="pending",
             attempt_count=0,
             requested_at=now,

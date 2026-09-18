@@ -356,11 +356,7 @@ def build_projection(
         )
     satisfaction = {
         item.edge_definition_id: {
-            **{
-                key: value
-                for key, value in asdict(item).items()
-                if key != "criterion_states"
-            },
+            **{key: value for key, value in asdict(item).items() if key != "criterion_states"},
             "criterion_states": [
                 {
                     "criterionDefinitionId": criterion.criterion_definition_id,

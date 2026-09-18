@@ -3,8 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 
-PORTABLE_SCHEMA_CURRENT = 5
-PORTABLE_SCHEMA_READABLE = frozenset({1, 2, 3, 4, 5})
+PORTABLE_SCHEMA_CURRENT = 6
+PORTABLE_SCHEMA_READABLE = frozenset({1, 2, 3, 4, 5, 6})
 PORTABLE_V2_FOUNDATION_TABLES = frozenset(
     {
         "analysis_runs",
@@ -255,6 +255,52 @@ PORTABLE_V5_MANIFEST = {
     ],
 }
 
+PORTABLE_V6_ANALYSIS_TABLES = frozenset(
+    {
+        "discipline_configuration_events",
+        "analysis_v3_run_lineages",
+        "analysis_v3_snapshot_details",
+        "analysis_v3_normalized_facts",
+        "analysis_v3_competency_gaps",
+        "analysis_v3_signals",
+        "analysis_v3_unknown_markers",
+    }
+)
+PORTABLE_V1_FORBIDDEN_TABLES = frozenset(
+    set(PORTABLE_V1_FORBIDDEN_TABLES) | set(PORTABLE_V6_ANALYSIS_TABLES)
+)
+PORTABLE_V2_FORBIDDEN_TABLES = frozenset(
+    set(PORTABLE_V2_FORBIDDEN_TABLES) | set(PORTABLE_V6_ANALYSIS_TABLES)
+)
+PORTABLE_V3_FORBIDDEN_TABLES = frozenset(
+    set(PORTABLE_V3_FORBIDDEN_TABLES) | set(PORTABLE_V6_ANALYSIS_TABLES)
+)
+PORTABLE_V4_FORBIDDEN_TABLES = frozenset(
+    set(PORTABLE_V4_FORBIDDEN_TABLES) | set(PORTABLE_V6_ANALYSIS_TABLES)
+)
+PORTABLE_V5_FORBIDDEN_TABLES = PORTABLE_V6_ANALYSIS_TABLES
+PORTABLE_V6_MANIFEST = {
+    "includedCanonicalDomains": [
+        *PORTABLE_V5_MANIFEST["includedCanonicalDomains"],
+        "discipline_configuration_history",
+        "analysis_v3_diagnostics",
+    ],
+    "includedImmutableHistory": [
+        *PORTABLE_V5_MANIFEST["includedImmutableHistory"],
+        "discipline_configuration_events",
+        "analysis_v3_runs_snapshots_facts_gaps_signals_unknowns",
+    ],
+    "omittedRebuildableState": [
+        *PORTABLE_V5_MANIFEST["omittedRebuildableState"],
+        "analysis_v3_current_state",
+    ],
+    "restoreActions": [
+        *PORTABLE_V5_MANIFEST["restoreActions"],
+        "rebuild_analysis_v3_current_pointer",
+        "verify_analysis_v3_history_hash_parity",
+    ],
+}
+
 
 def upgrade_v2_to_v3_tables(tables: dict[str, list[dict[str, object]]]) -> dict[str, int]:
     """Apply the lossless v2-to-v3 empty Curriculum-domain adapter in place."""
@@ -309,6 +355,46 @@ def upgrade_v4_to_v5_tables(tables: dict[str, list[dict[str, object]]]) -> dict[
                 tables[table_name] = []
             created += 1
     return {"initializedLearningGraphProjectionTables": created}
+
+
+def upgrade_v5_to_v6_tables(tables: dict[str, list[dict[str, object]]]) -> dict[str, int]:
+    """Add empty V3 history plus an exact compatibility configuration baseline."""
+    created = 0
+    for table_name in sorted(PORTABLE_V6_ANALYSIS_TABLES):
+        if table_name not in tables:
+            if table_name == "discipline_configuration_events":
+                profiles = tables.get("discipline_profiles", [])
+                rows: list[dict[str, object]] = []
+                if profiles:
+                    profile = profiles[0]
+                    adaptation = json.loads(str(profile.get("adaptation_phase_config_json", "{}")))
+                    payload = {
+                        "adaptationPhaseConfig": adaptation,
+                        "targetDurationMsPerActiveDay": profile.get(
+                            "target_duration_ms_per_active_day"
+                        ),
+                        "timezone": profile.get("timezone"),
+                        "weeklyTargetActiveDays": profile.get("weekly_target_active_days"),
+                    }
+                    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+                    rows.append(
+                        {
+                            "id": "portable-v5-discipline-baseline",
+                            "event_sequence": 1,
+                            "idempotency_key": "portable-v5-discipline-baseline",
+                            "configuration_json": encoded,
+                            "configuration_hash": hashlib.sha256(
+                                encoded.encode("utf-8")
+                            ).hexdigest(),
+                            "recorded_at": profile.get("updated_at"),
+                            "source": "portable_v5_compatibility_baseline",
+                        }
+                    )
+                tables[table_name] = rows
+            else:
+                tables[table_name] = []
+            created += 1
+    return {"initializedAnalysisV3Tables": created}
 
 
 def supports_portable_schema(version: int) -> bool:

@@ -81,7 +81,7 @@ def _invalidate_session(db: Session, item: LearningSession, source_fact_id: str)
             subject_type="learning_session",
             subject_id=item.id,
             source_fact_id=source_fact_id,
-            target_policy_version="analysis-policy/v1",
+            target_policy_version="analysis-policy/v3.0",
             status="pending",
             attempt_count=0,
             requested_at=utc_now_ms(),

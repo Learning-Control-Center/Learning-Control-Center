@@ -274,6 +274,16 @@ def _assert_known_migration_source(
         "roadmap_projection_caches",
         "roadmap_projection_checkpoints",
     }
+    analysis_v3_tables = {
+        "discipline_configuration_events",
+        "analysis_v3_run_lineages",
+        "analysis_v3_snapshot_details",
+        "analysis_v3_normalized_facts",
+        "analysis_v3_competency_gaps",
+        "analysis_v3_signals",
+        "analysis_v3_unknown_markers",
+        "analysis_v3_current_states",
+    }
     if revision in {"0013_learning_graph", "0014_roadmap_projection_state"} and not (
         learning_graph_tables <= tables
     ):
@@ -455,6 +465,19 @@ def _assert_known_migration_source(
         raise RuntimeError(
             "Database has an ambiguously partial Roadmap Projection migration; restore its "
             "verified pre-migration backup before retrying."
+        )
+    if (
+        revision == "0014_roadmap_projection_state"
+        and (
+            bool(analysis_v3_tables & tables)
+            or any(name.startswith("_alembic_tmp_") for name in tables)
+        )
+        or revision == "0015_analysis_v3"
+        and not analysis_v3_tables <= tables
+    ):
+        raise RuntimeError(
+            "Database has an ambiguously partial Analysis V3 migration; restore its verified "
+            "pre-migration backup before retrying."
         )
 
 

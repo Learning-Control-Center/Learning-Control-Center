@@ -1712,7 +1712,8 @@ class ProjectionInvalidation(Base):
         CheckConstraint("attempt_count >= 0", name="ck_projection_attempt_count"),
         CheckConstraint("subject_sequence > 0", name="ck_projection_subject_sequence"),
         CheckConstraint(
-            "status IN ('pending','running','completed','permanent_failure')",
+            "status IN ('pending','running','completed','permanent_failure',"
+            "'superseded_no_handler')",
             name="ck_projection_invalidation_status",
         ),
         Index("ix_projection_invalidation_drain", "status", "requested_at"),
@@ -1799,6 +1800,27 @@ class DisciplineProfile(Base):
     updated_at: Mapped[int] = mapped_column(
         Integer, default=utc_now_ms, onupdate=utc_now_ms, nullable=False
     )
+
+
+class DisciplineConfigurationEvent(Base):
+    __tablename__ = "discipline_configuration_events"
+    __table_args__ = (
+        UniqueConstraint("event_sequence", name="uq_discipline_config_sequence"),
+        UniqueConstraint("idempotency_key", name="uq_discipline_config_idempotency"),
+        CheckConstraint("event_sequence > 0", name="ck_discipline_config_sequence"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    event_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    configuration_json: Mapped[str] = mapped_column(Text, nullable=False)
+    configuration_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    recorded_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+event.listen(DisciplineConfigurationEvent, "before_update", _reject_v2_semantic_history_mutation)
+event.listen(DisciplineConfigurationEvent, "before_delete", _reject_v2_semantic_history_mutation)
 
 
 class ImportRecord(Base):

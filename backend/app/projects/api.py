@@ -95,7 +95,7 @@ def _queue(db: Session, *, project_id: str, source_fact_id: str, requested_at: i
     for kind, policy in (
         ("project_availability", PROJECT_AVAILABILITY_POLICY),
         ("roadmap_projection_v2", "roadmap-projection/v2.0"),
-        ("analysis", "analysis-policy/v3"),
+        ("analysis", "analysis-policy/v3.0"),
     ):
         db.add(
             ProjectionInvalidation(
@@ -322,9 +322,7 @@ async def list_projects(
             "lifecycleState": project_lifecycle_as_of(db, item.id, cutoff),
         }
         for item in db.scalars(
-            select(Project)
-            .where(Project.created_at < cutoff)
-            .order_by(Project.stable_key)
+            select(Project).where(Project.created_at < cutoff).order_by(Project.stable_key)
         ).all()
     ]
 

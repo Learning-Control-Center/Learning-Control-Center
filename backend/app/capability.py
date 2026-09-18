@@ -136,6 +136,7 @@ def _active_evidence_facts(db: Session, competency_id: str, cutoff_at: int) -> l
         .where(
             EvidenceLink.competency_identity_id == competency_id,
             Evidence.created_at <= cutoff_at,
+            EvidenceLink.created_at <= cutoff_at,
         )
         .order_by(Evidence.created_at, Evidence.id, EvidenceLink.id)
     ).all()
@@ -191,12 +192,15 @@ def _support_qualifies(
         item
         for item in supports
         if _STRENGTH[item.evidence.strength] >= 2
+        and _SOURCE_CONFIDENCE[item.evidence.source_confidence] >= 2
         and item.evidence.independence in {"guided", "assisted", "independent"}
     ]
     independent_moderate = [
         item
         for item in supports
-        if _STRENGTH[item.evidence.strength] >= 2 and item.evidence.independence == "independent"
+        if _STRENGTH[item.evidence.strength] >= 2
+        and _SOURCE_CONFIDENCE[item.evidence.source_confidence] >= 2
+        and item.evidence.independence == "independent"
     ]
     independent_strong = [
         item for item in independent_moderate if item.evidence.strength == "strong"
@@ -263,6 +267,27 @@ def _evaluate_criterion(
     rule = str(json.loads(definition.demonstration_rule_json)["rule"])
     demonstrated, support_ids = _support_qualifies(rule, relevant, definition)
     supports = [item for item in relevant if item.link.effect == "supports"]
+    meaningful_supports = [
+        item
+        for item in supports
+        if _STRENGTH[item.evidence.strength] >= 2
+        and _SOURCE_CONFIDENCE[item.evidence.source_confidence] >= 2
+    ]
+    independence_allowed = {
+        "guided",
+        "assisted",
+        "independent",
+        "not_applicable",
+    }
+    if rule in {
+        "independent_performance",
+        "repeated_independent_performance",
+        "authoritative_assessment",
+    }:
+        independence_allowed = {"independent"}
+    independence_compatible_supports = [
+        item for item in meaningful_supports if item.evidence.independence in independence_allowed
+    ]
     attempts = [
         item
         for item in relevant
@@ -316,6 +341,12 @@ def _evaluate_criterion(
         facts={
             "rule": rule,
             "supportOccurrenceCount": len({item.occurrence_key for item in supports}),
+            "meaningfulSupportOccurrenceCount": len(
+                {item.occurrence_key for item in meaningful_supports}
+            ),
+            "independenceCompatibleSupportOccurrenceCount": len(
+                {item.occurrence_key for item in independence_compatible_supports}
+            ),
             "qualifyingAttemptCount": len({item.occurrence_key for item in attempts}),
             "unresolvedContradictionIds": sorted(contradiction_ids),
             "decisiveLinkIds": sorted(decisive_link_ids),
@@ -649,6 +680,8 @@ def _prior_state_at(
             CapabilityStateEvent.competency_identity_id == competency_id,
             CapabilityStateEvent.scope_key == scope_key,
             CapabilityEvaluationRun.cutoff_at <= cutoff,
+            CapabilityEvaluationRun.generated_at <= cutoff,
+            CapabilityStateEvent.created_at <= cutoff,
         )
         .order_by(
             CapabilityEvaluationRun.cutoff_at.desc(),
@@ -920,6 +953,18 @@ def evaluate_capability(
                 subject_id=competency_id,
                 source_fact_id=run.id,
                 target_policy_version="roadmap-projection/v2.0",
+                status="pending",
+                attempt_count=0,
+                requested_at=run.generated_at,
+            )
+        )
+        db.add(
+            ProjectionInvalidation(
+                projection_kind="analysis",
+                subject_type="competency_capability",
+                subject_id=competency_id,
+                source_fact_id=run.id,
+                target_policy_version="analysis-policy/v3.0",
                 status="pending",
                 attempt_count=0,
                 requested_at=run.generated_at,

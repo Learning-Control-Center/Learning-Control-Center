@@ -16,6 +16,7 @@ const TransferPage = lazy(() => import('./pages/TransferPage').then((module) => 
 const SettingsPage = lazy(() => import('./pages/SettingsPage').then((module) => ({ default: module.SettingsPage })))
 const CurriculumPage = lazy(() => import('./pages/CurriculumPage').then((module) => ({ default: module.CurriculumPage })))
 const ProjectsPage = lazy(() => import('./pages/ProjectsPage').then((module) => ({ default: module.ProjectsPage })))
+const AnalysisPage = lazy(() => import('./pages/AnalysisPage').then((module) => ({ default: module.AnalysisPage })))
 
 export function App() {
   const { session, loading } = useAuth()
@@ -38,6 +39,7 @@ export function App() {
           <Route path="projects" element={<ProjectsPage />} />
           <Route path="sessions" element={<SessionsPage />} />
           <Route path="analytics" element={<AnalyticsPage />} />
+          <Route path="analysis" element={<AnalysisPage />} />
           <Route path="reports" element={<ReportsPage />} />
           <Route path="transfer" element={<TransferPage />} />
           <Route path="settings" element={<SettingsPage />} />
