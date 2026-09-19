@@ -295,6 +295,15 @@ def _assert_known_migration_source(
         "recommendation_v2_recommendations",
         "recommendation_v2_reasons",
     }
+    today_v2_tables = {
+        "today_generations",
+        "today_suggestions",
+        "today_interactions",
+        "today_interaction_corrections",
+        "suggestion_activity_relations",
+        "suggestion_activity_relation_corrections",
+        "today_suggestion_current_states",
+    }
     if revision in {"0013_learning_graph", "0014_roadmap_projection_state"} and not (
         learning_graph_tables <= tables
     ):
@@ -491,6 +500,21 @@ def _assert_known_migration_source(
             "pre-migration backup before retrying."
         )
     if (
+        revision == "0016_recommendation_v2"
+        and (
+            bool(today_v2_tables & tables)
+            or any(
+                name.startswith("_alembic_tmp_today_")
+                or name.startswith("_alembic_tmp_suggestion_")
+                for name in tables
+            )
+        )
+    ):
+        raise RuntimeError(
+            "Database has an ambiguously partial Today V2 migration; restore its verified "
+            "pre-migration backup before retrying."
+        )
+    if (
         revision == "0015_analysis_v3"
         and (
             bool(recommendation_v2_tables & tables)
@@ -505,6 +529,14 @@ def _assert_known_migration_source(
         raise RuntimeError(
             "Database has an ambiguously partial Recommendation V2 migration; restore its "
             "verified pre-migration backup before retrying."
+        )
+    if revision == "0017_today_v2" and (
+        not today_v2_tables <= tables
+        or any(name.startswith("_alembic_tmp_") for name in tables)
+    ):
+        raise RuntimeError(
+            "Database has an ambiguously partial Today V2 migration; restore its verified "
+            "pre-migration backup before retrying."
         )
 
 

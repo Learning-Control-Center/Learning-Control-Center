@@ -508,6 +508,7 @@ def record_failed_recommendation_run(
     replay_of_run_id: str | None,
     error: Exception,
     frozen_input: dict[str, Any] | None = None,
+    context_costs: tuple[tuple[str, str, str], ...] = (),
     policy_registry_version: str = POLICY_REGISTRY_VERSION,
 ) -> RecommendationV2Run | None:
     existing = db.scalar(
@@ -533,7 +534,10 @@ def record_failed_recommendation_run(
         "userConstraints": {
             "availableTimeMs": available_time_ms,
             "contextCostPolicy": "explicit-only",
-            "contextCosts": [],
+            "contextCosts": [
+                {"sourceType": source_type, "sourceEntityId": source_id, "cost": cost}
+                for source_type, source_id, cost in sorted(context_costs)
+            ],
         },
         "replayOfRunId": replay_of_run_id,
     }

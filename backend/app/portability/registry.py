@@ -3,8 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 
-PORTABLE_SCHEMA_CURRENT = 7
-PORTABLE_SCHEMA_READABLE = frozenset({1, 2, 3, 4, 5, 6, 7})
+PORTABLE_SCHEMA_CURRENT = 8
+PORTABLE_SCHEMA_READABLE = frozenset({1, 2, 3, 4, 5, 6, 7, 8})
 PORTABLE_V2_FOUNDATION_TABLES = frozenset(
     {
         "analysis_runs",
@@ -346,6 +346,56 @@ PORTABLE_V7_MANIFEST = {
     ],
 }
 
+PORTABLE_V8_TODAY_TABLES = frozenset(
+    {
+        "today_generations",
+        "today_suggestions",
+        "today_interactions",
+        "today_interaction_corrections",
+        "suggestion_activity_relations",
+        "suggestion_activity_relation_corrections",
+    }
+)
+PORTABLE_V1_FORBIDDEN_TABLES = frozenset(
+    set(PORTABLE_V1_FORBIDDEN_TABLES) | set(PORTABLE_V8_TODAY_TABLES)
+)
+PORTABLE_V2_FORBIDDEN_TABLES = frozenset(
+    set(PORTABLE_V2_FORBIDDEN_TABLES) | set(PORTABLE_V8_TODAY_TABLES)
+)
+PORTABLE_V3_FORBIDDEN_TABLES = frozenset(
+    set(PORTABLE_V3_FORBIDDEN_TABLES) | set(PORTABLE_V8_TODAY_TABLES)
+)
+PORTABLE_V4_FORBIDDEN_TABLES = frozenset(
+    set(PORTABLE_V4_FORBIDDEN_TABLES) | set(PORTABLE_V8_TODAY_TABLES)
+)
+PORTABLE_V5_FORBIDDEN_TABLES = frozenset(
+    set(PORTABLE_V5_FORBIDDEN_TABLES) | set(PORTABLE_V8_TODAY_TABLES)
+)
+PORTABLE_V6_FORBIDDEN_TABLES = frozenset(
+    set(PORTABLE_V6_FORBIDDEN_TABLES) | set(PORTABLE_V8_TODAY_TABLES)
+)
+PORTABLE_V7_FORBIDDEN_TABLES = PORTABLE_V8_TODAY_TABLES
+PORTABLE_V8_MANIFEST = {
+    "includedCanonicalDomains": [
+        *PORTABLE_V7_MANIFEST["includedCanonicalDomains"],
+        "today_v2_advisory_history",
+        "suggestion_actual_activity_relations",
+    ],
+    "includedImmutableHistory": [
+        *PORTABLE_V7_MANIFEST["includedImmutableHistory"],
+        "today_v2_generations_suggestions_interactions_relations_corrections",
+    ],
+    "omittedRebuildableState": [
+        *PORTABLE_V7_MANIFEST["omittedRebuildableState"],
+        "today_suggestion_current_states",
+    ],
+    "restoreActions": [
+        *PORTABLE_V7_MANIFEST["restoreActions"],
+        "rebuild_today_suggestion_current_states",
+        "verify_today_v2_history_and_current_state_parity",
+    ],
+}
+
 
 def upgrade_v2_to_v3_tables(tables: dict[str, list[dict[str, object]]]) -> dict[str, int]:
     """Apply the lossless v2-to-v3 empty Curriculum-domain adapter in place."""
@@ -450,6 +500,16 @@ def upgrade_v6_to_v7_tables(tables: dict[str, list[dict[str, object]]]) -> dict[
             tables[table_name] = []
             created += 1
     return {"initializedRecommendationV2Tables": created}
+
+
+def upgrade_v7_to_v8_tables(tables: dict[str, list[dict[str, object]]]) -> dict[str, int]:
+    """Add empty Today V2 history without converting ambiguous V1 decisions."""
+    created = 0
+    for table_name in sorted(PORTABLE_V8_TODAY_TABLES):
+        if table_name not in tables:
+            tables[table_name] = []
+            created += 1
+    return {"initializedTodayV2Tables": created}
 
 
 def supports_portable_schema(version: int) -> bool:

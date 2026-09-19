@@ -4,7 +4,7 @@ import json
 import re
 from collections import defaultdict
 from dataclasses import asdict
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -187,7 +187,17 @@ from app.roadmap_projection.models import (
     RoadmapProjectionPreference,
 )
 from app.schemas import validate_external_reference
-from app.time_utils import datetime_to_epoch_ms
+from app.time_utils import datetime_to_epoch_ms, local_date_for_ms, local_day_bounds_ms
+from app.today.contracts import TODAY_POLICY_VERSION, TODAY_PRESENTATION_VERSION
+from app.today.models import (
+    SuggestionActivityRelation,
+    SuggestionActivityRelationCorrection,
+    TodayGeneration,
+    TodayInteraction,
+    TodayInteractionCorrection,
+    TodaySuggestion,
+    TodaySuggestionCurrentState,
+)
 
 
 def validate_portable_row_types(
@@ -258,6 +268,8 @@ def _validate_json_columns(connection: Any) -> None:
         (ProjectEvidenceOpportunity, "intended_characteristics_json"),
         (ProjectEvent, "payload_json"),
         (ProjectCriterionEvaluation, "facts_json"),
+        (TodaySuggestion, "presentation_json"),
+        (TodayInteraction, "structured_reason_json"),
     )
     for model, column_name in json_columns:
         column = getattr(model, column_name)
@@ -3034,6 +3046,7 @@ def validate_domain_integrity(connection: Any) -> None:
     _validate_analysis_history(connection)
     _validate_analysis_v3(connection)
     _validate_recommendation_v2(connection)
+    _validate_today_v2(connection)
     _validate_roadmap_scope(connection)
     _validate_roadmap_scope_history(connection)
     _validate_versioned_roadmap(connection)
@@ -3054,6 +3067,457 @@ def validate_domain_integrity(connection: Any) -> None:
                 "PORTABLE_TIMEZONE_INVALID",
                 "The discipline timezone is not a valid IANA timezone.",
             ) from exc
+
+
+def _validate_today_v2(connection: Any) -> None:
+    generations = {
+        row.id: row
+        for row in connection.execute(select(*TodayGeneration.__table__.c)).all()
+    }
+    suggestions = {
+        row.id: row
+        for row in connection.execute(select(*TodaySuggestion.__table__.c)).all()
+    }
+    interactions: dict[str, list[Any]] = defaultdict(list)
+    for row in connection.execute(select(*TodayInteraction.__table__.c)).all():
+        interactions[row.suggestion_id].append(row)
+    relations = {
+        row.id: row
+        for row in connection.execute(select(*SuggestionActivityRelation.__table__.c)).all()
+    }
+    relation_corrections = list(
+        connection.execute(select(*SuggestionActivityRelationCorrection.__table__.c)).all()
+    )
+    corrected_relation_ids = {row.relation_id for row in relation_corrections}
+    interaction_corrections = {
+        row.interaction_id: row
+        for row in connection.execute(select(*TodayInteractionCorrection.__table__.c)).all()
+    }
+    current_states = {
+        row.suggestion_id: row
+        for row in connection.execute(select(*TodaySuggestionCurrentState.__table__.c)).all()
+    }
+    recommendations = {
+        row.id: row
+        for row in connection.execute(select(*RecommendationV2Recommendation.__table__.c)).all()
+    }
+    candidates = {
+        row.id: row
+        for row in connection.execute(select(*RecommendationV2Candidate.__table__.c)).all()
+    }
+    recommendation_runs = {
+        row.id: row
+        for row in connection.execute(select(*RecommendationV2Run.__table__.c)).all()
+    }
+    reasons_by_candidate: dict[str, list[Any]] = defaultdict(list)
+    for row in connection.execute(select(*RecommendationV2Reason.__table__.c)).all():
+        reasons_by_candidate[row.candidate_id].append(row)
+    sessions = {
+        row.id: row
+        for row in connection.execute(select(*LearningSession.__table__.c)).all()
+    }
+    transition_map = {
+        "suggested": {"viewed", "accepted", "started", "skipped", "replaced", "expired"},
+        "viewed": {"accepted", "started", "skipped", "replaced", "expired"},
+        "accepted": {"started", "skipped", "replaced", "expired"},
+        "started": {"completed", "partially_completed", "replaced", "expired"},
+    }
+    role_order = {"primary": 1, "complementary": 2, "maintenance": 3}
+    terminal = {"completed", "partially_completed", "skipped", "replaced", "expired"}
+    if set(current_states) != set(suggestions):
+        raise AppError(
+            422,
+            "PORTABLE_TODAY_V2_INVALID",
+            "Today current-state coverage does not match suggestion history.",
+        )
+    generation_sequences: dict[str, list[Any]] = defaultdict(list)
+    for generation in generations.values():
+        generation_sequences[generation.local_date].append(generation)
+        try:
+            date.fromisoformat(generation.local_date)
+            ZoneInfo(generation.timezone)
+        except (ValueError, TypeError, ZoneInfoNotFoundError) as exc:
+            raise AppError(
+                422, "PORTABLE_TODAY_V2_INVALID", "Today generation metadata is invalid."
+            ) from exc
+        if (
+            local_date_for_ms(generation.generated_at, generation.timezone).isoformat()
+            != generation.local_date
+            or generation.today_policy_version != TODAY_POLICY_VERSION
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_TODAY_V2_INVALID",
+                "Today generation local-date or policy lineage is inconsistent.",
+            )
+    for rows in generation_sequences.values():
+        ordered = sorted(rows, key=lambda item: item.explicit_generation_sequence)
+        if [item.explicit_generation_sequence for item in ordered] != list(
+            range(1, len(ordered) + 1)
+        ) or any(item.is_regeneration != (index > 0) for index, item in enumerate(ordered)):
+            raise AppError(
+                422,
+                "PORTABLE_TODAY_V2_INVALID",
+                "Today generation sequence or regeneration lineage is inconsistent.",
+            )
+    automatic_activity_ids: set[str] = set()
+    for relation in relations.values():
+        payload = {
+            "suggestionId": relation.suggestion_id,
+            "activityId": relation.activity_id,
+            "relationType": relation.relation_type,
+            "actor": relation.actor,
+            "source": relation.source,
+            "automatic": relation.automatic,
+        }
+        if relation.payload_hash != content_hash(payload):
+            raise AppError(
+                422,
+                "PORTABLE_TODAY_V2_INVALID",
+                "Today Activity relation hash is inconsistent.",
+            )
+        suggestion = suggestions.get(relation.suggestion_id)
+        if suggestion is None or relation.created_at < suggestion.created_at:
+            raise AppError(
+                422,
+                "PORTABLE_TODAY_V2_INVALID",
+                "Today Activity relation time is inconsistent.",
+            )
+        if (
+            relation.automatic
+            and relation.id not in corrected_relation_ids
+            and relation.activity_id in automatic_activity_ids
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_TODAY_V2_INVALID",
+                "An Activity has more than one active automatic Today relation.",
+            )
+        if relation.automatic and relation.id not in corrected_relation_ids:
+            automatic_activity_ids.add(relation.activity_id)
+    by_generation: dict[str, list[Any]] = defaultdict(list)
+    for suggestion in suggestions.values():
+        by_generation[suggestion.generation_id].append(suggestion)
+        generation = generations.get(suggestion.generation_id)
+        recommendation = recommendations.get(suggestion.recommendation_id)
+        candidate = candidates.get(suggestion.candidate_id)
+        recommendation_run = (
+            recommendation_runs.get(recommendation.run_id) if recommendation is not None else None
+        )
+        try:
+            presentation = json.loads(suggestion.presentation_json)
+            local_date = date.fromisoformat(suggestion.local_date)
+            ZoneInfo(suggestion.timezone)
+        except (ValueError, TypeError, json.JSONDecodeError, ZoneInfoNotFoundError) as exc:
+            raise AppError(
+                422, "PORTABLE_TODAY_V2_INVALID", "Today suggestion metadata is invalid."
+            ) from exc
+        replaced_suggestion = suggestions.get(suggestion.replaces_suggestion_id)
+        if suggestion.replaces_suggestion_id is not None and (
+            replaced_suggestion is None
+            or replaced_suggestion.id == suggestion.id
+            or replaced_suggestion.local_date != suggestion.local_date
+            or replaced_suggestion.created_at > suggestion.created_at
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_TODAY_V2_INVALID",
+                "Today suggestion replacement lineage is inconsistent.",
+            )
+        if (
+            generation is None
+            or recommendation is None
+            or candidate is None
+            or recommendation.run_id != suggestion.recommendation_run_id
+            or recommendation.candidate_id != suggestion.candidate_id
+            or generation.recommendation_run_id != suggestion.recommendation_run_id
+            or generation.generation_key != suggestion.generation_key
+            or generation.local_date != suggestion.local_date
+            or generation.timezone != suggestion.timezone
+            or suggestion.created_at != generation.generated_at
+            or suggestion.today_policy_version != generation.today_policy_version
+            or content_hash(presentation) != suggestion.presentation_hash
+            or local_day_bounds_ms(local_date, suggestion.timezone)[1] != suggestion.expires_at
+            or suggestion.today_policy_version != TODAY_POLICY_VERSION
+            or suggestion.presentation_version != TODAY_PRESENTATION_VERSION
+            or recommendation_run is None
+            or generation.recommendation_policy_version
+            != recommendation_run.policy_registry_version
+            or recommendation.portfolio_role != suggestion.portfolio_role
+            or role_order.get(recommendation.portfolio_role) != suggestion.ordinal
+            or recommendation.advisory_duration_ms != suggestion.advisory_duration_ms
+            or recommendation.duration_minimum_ms != suggestion.duration_minimum_ms
+            or recommendation.duration_preferred_ms != suggestion.duration_preferred_ms
+            or recommendation.duration_maximum_ms != suggestion.duration_maximum_ms
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_TODAY_V2_INVALID",
+                "Today suggestion lineage or expiration is inconsistent.",
+            )
+        expected_presentation = {
+            "candidateType": candidate.candidate_type,
+            "source": {
+                "type": candidate.source_type,
+                "entityId": candidate.source_entity_id,
+                "versionId": candidate.source_version_id,
+            },
+            "candidateStableId": candidate.stable_id,
+            "title": candidate.title,
+            "description": candidate.description,
+            "portfolioRole": recommendation.portfolio_role,
+            "rank": recommendation.rank_ordinal,
+            "score": recommendation.score_total,
+            "reasonSummary": recommendation.reason_summary,
+            "reasons": [
+                {
+                    "code": reason.reason_code,
+                    "title": reason.title,
+                    "text": reason.rendered_text,
+                    "facts": json.loads(reason.explanation_facts_json),
+                }
+                for reason in sorted(
+                    reasons_by_candidate.get(candidate.id, []), key=lambda item: item.ordinal
+                )
+            ],
+            "advisoryDurationMs": recommendation.advisory_duration_ms,
+            "durationRangeMs": (
+                [
+                    recommendation.duration_minimum_ms,
+                    recommendation.duration_preferred_ms,
+                    recommendation.duration_maximum_ms,
+                ]
+                if recommendation.duration_minimum_ms is not None
+                else None
+            ),
+        }
+        if presentation != expected_presentation:
+            raise AppError(
+                422,
+                "PORTABLE_TODAY_V2_INVALID",
+                "Today presentation does not exactly freeze its Recommendation output.",
+            )
+    for suggestion in suggestions.values():
+        seen: set[str] = set()
+        current: Any | None = suggestion
+        while current is not None and current.replaces_suggestion_id is not None:
+            if current.id in seen:
+                raise AppError(
+                    422,
+                    "PORTABLE_TODAY_V2_INVALID",
+                    "Today suggestion replacement lineage contains a cycle.",
+                )
+            seen.add(current.id)
+            current = suggestions.get(current.replaces_suggestion_id)
+    for generation_id, generation in generations.items():
+        rows = sorted(by_generation.get(generation_id, []), key=lambda item: item.ordinal)
+        expected_recommendation_ids = {
+            row.id
+            for row in recommendations.values()
+            if row.run_id == generation.recommendation_run_id
+        }
+        expected_output = [
+            {
+                "ordinal": row.ordinal,
+                "recommendationId": row.recommendation_id,
+                "candidateId": row.candidate_id,
+                "presentationHash": row.presentation_hash,
+                "expiresAt": row.expires_at,
+            }
+            for row in rows
+        ]
+        if (
+            generation.generation_key
+            != f"{generation.local_date}|{generation.recommendation_policy_version}|"
+            f"{generation.explicit_generation_sequence}"
+            or {row.recommendation_id for row in rows} != expected_recommendation_ids
+            or generation.output_hash != content_hash(expected_output)
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_TODAY_V2_INVALID",
+                "Today generation lineage or output hash is inconsistent.",
+            )
+    for correction in relation_corrections:
+        replacement = relations.get(correction.replacement_relation_id)
+        original = relations.get(correction.relation_id)
+        if (
+            original is None
+            or correction.replacement_relation_id == correction.relation_id
+            or (
+                correction.correction_type == "replaced"
+                and (
+                    replacement is None
+                    or replacement.suggestion_id != original.suggestion_id
+                )
+            )
+            or not correction.reason
+            or correction.corrected_at < original.created_at
+            or (
+                replacement is not None
+                and replacement.created_at > correction.corrected_at
+            )
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_TODAY_V2_INVALID",
+                "Today relation correction lineage is inconsistent.",
+            )
+    for suggestion_id, suggestion in suggestions.items():
+        rows = sorted(interactions.get(suggestion_id, []), key=lambda item: item.event_sequence)
+        status = "suggested"
+        latest: Any | None = None
+        updated_at = suggestion.created_at
+        for row_index, interaction in enumerate(rows):
+            expected_sequence = row_index + 1
+            reason = json.loads(interaction.structured_reason_json)
+            if not isinstance(reason, dict) or set(reason) != {"feedback", "command"}:
+                raise AppError(
+                    422,
+                    "PORTABLE_TODAY_V2_INVALID",
+                    "Today interaction structured reason is invalid.",
+                )
+            payload = {
+                "suggestionId": suggestion_id,
+                "interactionType": interaction.interaction_type,
+                "actor": interaction.actor,
+                "source": interaction.source,
+                "activityId": interaction.activity_id,
+                "sessionId": interaction.session_id,
+                "replacementSuggestionId": interaction.replacement_suggestion_id,
+                "reasonCode": interaction.reason_code,
+                "feedback": reason.get("feedback"),
+                "command": reason.get("command"),
+            }
+            if (
+                interaction.event_sequence != expected_sequence
+                or interaction.occurred_at < suggestion.created_at
+                or interaction.occurred_at < updated_at
+                or interaction.prior_status != status
+                or interaction.interaction_type not in transition_map.get(status, set())
+                or interaction.resulting_status != interaction.interaction_type
+                or interaction.payload_hash != content_hash(payload)
+            ):
+                raise AppError(
+                    422,
+                    "PORTABLE_TODAY_V2_INVALID",
+                    "Today interaction history is not a valid append-only transition sequence.",
+                )
+            replacement_suggestion = suggestions.get(interaction.replacement_suggestion_id)
+            if interaction.replacement_suggestion_id is not None and (
+                replacement_suggestion is None
+                or replacement_suggestion.id == suggestion_id
+                or replacement_suggestion.local_date != suggestion.local_date
+                or replacement_suggestion.created_at > interaction.occurred_at
+            ):
+                raise AppError(
+                    422,
+                    "PORTABLE_TODAY_V2_INVALID",
+                    "Today replacement-suggestion lineage is inconsistent.",
+                )
+            status = interaction.resulting_status
+            latest = interaction
+            updated_at = interaction.occurred_at
+            correction = interaction_corrections.get(interaction.id)
+            if correction is not None:
+                correction_payload = {
+                    "interactionId": interaction.id,
+                    "correctionType": "retracted",
+                    "reason": correction.reason,
+                    "actor": correction.actor,
+                    "source": correction.source,
+                    "resultingStatus": interaction.prior_status,
+                }
+                next_interaction = rows[row_index + 1] if row_index + 1 < len(rows) else None
+                if (
+                    not correction.reason
+                    or correction.actor not in {"user", "system"}
+                    or not correction.source
+                    or correction.resulting_status != interaction.prior_status
+                    or correction.payload_hash != content_hash(correction_payload)
+                    or correction.corrected_at < interaction.occurred_at
+                    or next_interaction is not None
+                    and correction.corrected_at > next_interaction.occurred_at
+                ):
+                    raise AppError(
+                        422,
+                        "PORTABLE_TODAY_V2_INVALID",
+                        "Today interaction correction history is inconsistent.",
+                    )
+                status = correction.resulting_status
+                updated_at = correction.corrected_at
+            if (
+                interaction.interaction_type in {"viewed", "accepted", "started", "skipped"}
+                and interaction.occurred_at >= suggestion.expires_at
+                or interaction.interaction_type == "expired"
+                and interaction.reason_code == "next_local_midnight"
+                and interaction.occurred_at < suggestion.expires_at
+            ):
+                raise AppError(
+                    422,
+                    "PORTABLE_TODAY_V2_INVALID",
+                    "Today interaction time is inconsistent with suggestion expiry.",
+                )
+        state = current_states.get(suggestion_id)
+        expected_sequence = latest.event_sequence if latest is not None else 0
+        expected_latest = latest.id if latest is not None else None
+        expected_updated = updated_at
+        if (
+            state is None
+            or state.status != status
+            or state.event_sequence != expected_sequence
+            or state.latest_interaction_id != expected_latest
+            or state.terminal != (status in terminal)
+            or state.updated_at != expected_updated
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_TODAY_V2_INVALID",
+                "Today current state does not match immutable interactions.",
+            )
+        # A later correction changes the current association without erasing the
+        # relation that justified an already-recorded historical interaction.
+        relation_rows = [row for row in relations.values() if row.suggestion_id == suggestion_id]
+        for interaction in rows:
+            if interaction.interaction_type == "started":
+                session = sessions.get(interaction.session_id)
+                if (
+                    session is None
+                    or session.activity_id != interaction.activity_id
+                    or not any(
+                        row.activity_id == interaction.activity_id
+                        and row.relation_type == "matched"
+                        for row in relation_rows
+                    )
+                ):
+                    raise AppError(
+                        422,
+                        "PORTABLE_TODAY_V2_INVALID",
+                        "A Started interaction lacks its exact actual-work lineage.",
+                    )
+            if interaction.interaction_type in {"completed", "partially_completed"}:
+                session = sessions.get(interaction.session_id)
+                if (
+                    session is None
+                    or session.activity_id != interaction.activity_id
+                    or session.outcome not in {"completed", "partial", "blocked"}
+                    or session.timed_state == "cancelled"
+                    or not any(row.activity_id == session.activity_id for row in relation_rows)
+                ):
+                    raise AppError(
+                        422,
+                        "PORTABLE_TODAY_V2_INVALID",
+                        "A completion interaction lacks finalized linked actual work.",
+                    )
+            if interaction.interaction_type == "replaced" and not any(
+                row.activity_id == interaction.activity_id and row.relation_type == "replaced"
+                for row in relation_rows
+            ):
+                raise AppError(
+                    422,
+                    "PORTABLE_TODAY_V2_INVALID",
+                    "A Replaced interaction lacks its explicit actual Activity relation.",
+                )
 
 
 def _validate_curriculum(connection: Any) -> None:

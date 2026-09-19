@@ -24,6 +24,7 @@ import { useAuth } from '../auth'
 
 const navigation = [
   { to: '/', label: 'Today', icon: Sparkles },
+  { to: '/today-v2', label: 'Today V2 preview', icon: Sparkles },
   { to: '/roadmap', label: 'Roadmap', icon: Map },
   { to: '/roadmap-v2', label: 'Roadmap V2 preview', icon: GitBranch },
   { to: '/curriculum', label: 'Curriculum', icon: LibraryBig },

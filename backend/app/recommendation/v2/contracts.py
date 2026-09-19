@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 CandidateType = Literal[
     "curriculum_unit",
@@ -43,6 +43,13 @@ class RecommendationRunRequest(StrictModel):
     available_time_ms: int | None = Field(default=None, ge=0)
     context_costs: list[RecommendationContextCost] = Field(default_factory=list)
 
+    @field_validator("idempotency_key")
+    @classmethod
+    def reject_internal_idempotency_namespace(cls, value: str) -> str:
+        if value.startswith("internal:"):
+            raise ValueError("idempotency_key uses a reserved internal namespace")
+        return value
+
     @model_validator(mode="after")
     def unique_context_cost_sources(self) -> RecommendationRunRequest:
         source_keys = [
@@ -55,6 +62,13 @@ class RecommendationRunRequest(StrictModel):
 
 class RecommendationReplayRequest(StrictModel):
     idempotency_key: str = Field(min_length=1, max_length=128)
+
+    @field_validator("idempotency_key")
+    @classmethod
+    def reject_internal_idempotency_namespace(cls, value: str) -> str:
+        if value.startswith("internal:"):
+            raise ValueError("idempotency_key uses a reserved internal namespace")
+        return value
 
 
 @dataclass(frozen=True)

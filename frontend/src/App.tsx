@@ -7,6 +7,7 @@ import { LoadingState } from './components/PageState'
 import { LoginPage } from './pages/LoginPage'
 
 const TodayPage = lazy(() => import('./pages/TodayPage').then((module) => ({ default: module.TodayPage })))
+const TodayV2Page = lazy(() => import('./pages/TodayV2Page').then((module) => ({ default: module.TodayV2Page })))
 const RoadmapPage = lazy(() => import('./pages/RoadmapPage').then((module) => ({ default: module.RoadmapPage })))
 const RoadmapV2Page = lazy(() => import('./pages/RoadmapV2Page').then((module) => ({ default: module.RoadmapV2Page })))
 const SessionsPage = lazy(() => import('./pages/SessionsPage').then((module) => ({ default: module.SessionsPage })))
@@ -34,6 +35,7 @@ export function App() {
       <Routes>
         <Route element={<Layout />}>
           <Route index element={<TodayPage />} />
+          <Route path="today-v2" element={<TodayV2Page />} />
           <Route path="roadmap" element={<RoadmapPage />} />
           <Route path="roadmap-v2" element={<RoadmapV2Page />} />
           <Route path="curriculum" element={<CurriculumPage />} />

@@ -48,6 +48,8 @@ from app.roadmap_projection.service import (
 from app.sessions import router as session_router
 from app.settings_api import get_or_create_profile
 from app.settings_api import router as settings_router
+from app.today import models as today_models  # noqa: F401
+from app.today.api import router as today_router
 from app.v2_activities import router as v2_activity_router
 from app.v2_profiles import router as v2_profile_router
 from app.verification import router as verification_router
@@ -179,3 +181,4 @@ app.include_router(roadmap_projection_router, prefix="/api/v2")
 app.include_router(legacy_roadmap_graph_router, prefix="/api/v2")
 app.include_router(analysis_v3_router, prefix="/api/v2")
 app.include_router(recommendation_v2_router, prefix="/api/v2")
+app.include_router(today_router, prefix="/api/v2")

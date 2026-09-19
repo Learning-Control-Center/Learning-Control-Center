@@ -44,6 +44,7 @@ from app.models import AnalysisSnapshot
 from app.portability.registry import (
     PORTABLE_V6_MANIFEST,
     PORTABLE_V7_RECOMMENDATION_TABLES,
+    PORTABLE_V8_TODAY_TABLES,
 )
 from app.profile_views import ActiveProfileProjectionPublicDTO, ProfileTargetProjectionPublicDTO
 from app.projects.contracts import (
@@ -90,6 +91,16 @@ from app.recommendation.v2.service import (
 from app.recommendation.v2.service import (
     generate_recommendations as generate_live_recommendations,
 )
+from app.time_utils import utc_now_ms
+from app.today.models import TodaySuggestion
+from app.today.service import (
+    correct_interaction,
+    correct_relation,
+    generate_today,
+    link_activity,
+    record_interaction,
+)
+from app.v2_activities import create_activity_in_uow
 from httpx import AsyncClient
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
@@ -1873,7 +1884,7 @@ def test_failed_run_persists_lineage_only_and_is_portable(db: Session) -> None:
     )
     validate_domain_integrity(db.connection())
     payload = _portable_payload(db)
-    tables, _summary = _validate_portable_payload(payload, "recommendation-failed-v7", 7)
+    tables, _summary = _validate_portable_payload(payload, "recommendation-failed-v8", 8)
     portable = next(row for row in tables["recommendation_v2_runs"] if row["id"] == failed.id)
     assert portable["status"] == "failed"
     assert portable["output_hash"] is None
@@ -1902,15 +1913,105 @@ async def test_recommendation_history_is_portable_tamper_evident_and_not_backfil
         db, run_id=original.id, idempotency_key="portable-recommendation-replay"
     )
     db.commit()
+    now = utc_now_ms()
+    generation = generate_today(
+        db,
+        idempotency_key="portable-today-generation",
+        analysis_snapshot_id=snapshot.id,
+        available_time_ms=None,
+        context_costs=(),
+        regenerate=False,
+        now_ms=now,
+    )
+    suggestion = db.scalar(
+        select(TodaySuggestion).where(TodaySuggestion.generation_id == generation.id)
+    )
+    assert suggestion is not None
+    viewed = record_interaction(
+        db,
+        suggestion_id=suggestion.id,
+        interaction_type="viewed",
+        idempotency_key="portable-today-viewed",
+        now_ms=now + 1,
+    )
+    correct_interaction(
+        db,
+        interaction_id=viewed.id,
+        idempotency_key="portable-today-viewed-correction",
+        reason="Portable correction round trip.",
+        now_ms=now + 2,
+    )
+    replacement_generation = generate_today(
+        db,
+        idempotency_key="portable-today-regeneration",
+        analysis_snapshot_id=snapshot.id,
+        available_time_ms=None,
+        context_costs=(),
+        regenerate=True,
+        now_ms=now + 3,
+    )
+    replacement_suggestion = db.scalar(
+        select(TodaySuggestion).where(
+            TodaySuggestion.generation_id == replacement_generation.id
+        )
+    )
+    assert replacement_suggestion is not None
+    db.connection().execute(
+        TodaySuggestion.__table__.update()
+        .where(TodaySuggestion.id == replacement_suggestion.id)
+        .values(replaces_suggestion_id=suggestion.id)
+    )
+    actual = create_activity_in_uow(
+        db,
+        title="Portable Today actual work",
+        description="Restore fixture for actual-Activity relation history.",
+        category_stable_key="practice",
+        occurred_at=now + 4,
+        creator_source="user",
+        provenance="user_recorded",
+    )
+    relation = link_activity(
+        db,
+        suggestion_id=replacement_suggestion.id,
+        activity_id=actual.id,
+        relation_type="partially_matched",
+        idempotency_key="portable-today-relation",
+        now_ms=now + 5,
+    )
+    correct_relation(
+        db,
+        relation_id=relation.id,
+        idempotency_key="portable-today-relation-correction",
+        correction_type="retracted",
+        replacement_activity_id=None,
+        replacement_relation_type=None,
+        reason="Portable relation correction round trip.",
+        now_ms=now + 6,
+    )
+    db.commit()
+    db.expire_all()
     payload = _portable_payload(db)
-    tables, _summary = _validate_portable_payload(payload, "recommendation-v7", 7)
-    assert len(tables["recommendation_v2_runs"]) == 2
-    assert len(tables["recommendation_v2_candidates"]) == 2
+    tables, _summary = _validate_portable_payload(payload, "recommendation-v8", 8)
+    assert len(tables["recommendation_v2_runs"]) == 4
+    assert len(tables["recommendation_v2_candidates"]) == 4
+    assert len(tables["today_generations"]) == 2
+    assert len(tables["today_suggestions"]) == 2
+    assert len(tables["today_interaction_corrections"]) == 1
+    assert len(tables["suggestion_activity_relations"]) == 1
+    assert len(tables["suggestion_activity_relation_corrections"]) == 1
+    assert any(
+        row["replaces_suggestion_id"] == suggestion.id
+        for row in tables["today_suggestions"]
+    )
+    original_today_tables = {
+        name: sorted(deepcopy(tables[name]), key=lambda row: row["id"])
+        for name in PORTABLE_V8_TODAY_TABLES
+    }
 
     tampered = deepcopy(payload)
     tampered["tables"]["recommendation_v2_score_components"][0]["value"] += 1
     with pytest.raises(AppError, match="Recommendation V2 immutable history"):
-        _validate_portable_payload(tampered, "recommendation-v7-tampered", 7)
+        _validate_portable_payload(tampered, "recommendation-v8-tampered", 8)
 
     coherently_rehashed = deepcopy(tampered)
     history = {
@@ -1923,15 +2024,15 @@ async def test_recommendation_history_is_portable_tamper_evident_and_not_backfil
         {key: value for key, value in checkpoint.items() if key != "checkpointHash"}
     )
     with pytest.raises(AppError, match="persisted audit differs"):
-        _validate_portable_payload(coherently_rehashed, "recommendation-v7-rehashed", 7)
+        _validate_portable_payload(coherently_rehashed, "recommendation-v8-rehashed", 8)
 
     payload["tables"]["recommendation_v2_runs"].reverse()
     _apply_portable_restore(
         db,
         payload,
         True,
-        package_id="recommendation-v7-restore",
-        schema_version=7,
+        package_id="recommendation-v8-restore",
+        schema_version=8,
     )
     db.commit()
     restored = db.get(RecommendationV2Run, original.id)
@@ -1940,11 +2041,20 @@ async def test_recommendation_history_is_portable_tamper_evident_and_not_backfil
     restored_replay = db.get(RecommendationV2Run, replay.id)
     assert restored_replay is not None
     assert restored_replay.replay_of_run_id == original.id
+    restored_payload = _portable_payload(db)
+    assert {
+        name: sorted(restored_payload["tables"][name], key=lambda row: row["id"])
+        for name in PORTABLE_V8_TODAY_TABLES
+    } == original_today_tables
+    assert restored_payload["todayV2CurrentCheckpoint"] == payload["todayV2CurrentCheckpoint"]
 
     v6 = deepcopy(payload)
     v6["manifest"] = PORTABLE_V6_MANIFEST
     v6.pop("recommendationV2HistoryCheckpoint")
+    v6.pop("todayV2CurrentCheckpoint")
     for table_name in PORTABLE_V7_RECOMMENDATION_TABLES:
+        v6["tables"].pop(table_name)
+    for table_name in PORTABLE_V8_TODAY_TABLES:
         v6["tables"].pop(table_name)
     converted, summary = _validate_portable_payload(v6, "recommendation-v6-adapter", 6)
     assert all(converted[name] == [] for name in PORTABLE_V7_RECOMMENDATION_TABLES)
@@ -1970,7 +2080,7 @@ def test_0016_is_additive_invents_no_history_and_refuses_populated_downgrade(
         before = connection.execute(
             "SELECT * FROM recommendation_snapshots WHERE id='legacy-recommendation'"
         ).fetchone()
-    command.upgrade(config, "head")
+    command.upgrade(config, "0016_recommendation_v2")
     with sqlite3.connect(database_path) as connection:
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
             "0016_recommendation_v2",
@@ -1983,7 +2093,7 @@ def test_0016_is_additive_invents_no_history_and_refuses_populated_downgrade(
             == before
         )
     command.downgrade(config, "0015_analysis_v3")
-    command.upgrade(config, "head")
+    command.upgrade(config, "0016_recommendation_v2")
     with sqlite3.connect(database_path) as connection:
         connection.execute(
             "INSERT INTO recommendation_v2_runs "

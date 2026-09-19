@@ -182,14 +182,18 @@ from app.portability.registry import (
     PORTABLE_V6_ANALYSIS_TABLES,
     PORTABLE_V6_FORBIDDEN_TABLES,
     PORTABLE_V6_MANIFEST,
+    PORTABLE_V7_FORBIDDEN_TABLES,
     PORTABLE_V7_MANIFEST,
     PORTABLE_V7_RECOMMENDATION_TABLES,
+    PORTABLE_V8_MANIFEST,
+    PORTABLE_V8_TODAY_TABLES,
     supports_portable_schema,
     upgrade_v2_to_v3_tables,
     upgrade_v3_to_v4_tables,
     upgrade_v4_to_v5_tables,
     upgrade_v5_to_v6_tables,
     upgrade_v6_to_v7_tables,
+    upgrade_v7_to_v8_tables,
 )
 from app.projects.contracts import ProjectCatalogPublicDTO
 from app.projects.models import (
@@ -262,6 +266,16 @@ from app.time_utils import (
     local_day_bounds_ms,
     utc_now_ms,
 )
+from app.today.models import (
+    SuggestionActivityRelation,
+    SuggestionActivityRelationCorrection,
+    TodayGeneration,
+    TodayInteraction,
+    TodayInteractionCorrection,
+    TodaySuggestion,
+    TodaySuggestionCurrentState,
+)
+from app.today.service import rebuild_today_current_states, today_current_checkpoint
 
 router = APIRouter(prefix="/import-export", tags=["import/export"])
 logger = logging.getLogger(__name__)
@@ -390,6 +404,12 @@ PORTABLE_MODELS = [
     RecommendationV2SelectionDecision,
     RecommendationV2Recommendation,
     RecommendationV2Reason,
+    TodayGeneration,
+    TodaySuggestion,
+    TodayInteraction,
+    TodayInteractionCorrection,
+    SuggestionActivityRelation,
+    SuggestionActivityRelationCorrection,
     RecommendationSnapshot,
     DisciplineProfile,
     DisciplineConfigurationEvent,
@@ -459,7 +479,7 @@ def _capability_projection_checkpoints(db: Session) -> list[dict[str, str]]:
 
 def _portable_payload(db: Session, project_ids: set[str] | None = None) -> dict[str, Any]:
     payload: dict[str, Any] = {
-        "manifest": PORTABLE_V7_MANIFEST,
+        "manifest": PORTABLE_V8_MANIFEST,
         "tables": {
             _table(model).name: [_row_dict(item) for item in db.scalars(select(model)).all()]
             for model in PORTABLE_MODELS
@@ -806,6 +826,7 @@ def _portable_payload(db: Session, project_ids: set[str] | None = None) -> dict[
     }
     recommendation_checkpoint["checkpointHash"] = content_hash(recommendation_checkpoint)
     payload["recommendationV2HistoryCheckpoint"] = recommendation_checkpoint
+    payload["todayV2CurrentCheckpoint"] = today_current_checkpoint(db)
     return payload
 
 
@@ -1505,6 +1526,87 @@ def _validate_recommendation_v2_checkpoint(
                 )
 
 
+def _validate_today_v2_checkpoint(
+    payload: dict[str, Any], tables: dict[str, list[dict[str, Any]]], schema_version: int
+) -> None:
+    checkpoint = payload.get("todayV2CurrentCheckpoint")
+    if schema_version < 8:
+        if checkpoint is not None:
+            raise AppError(
+                422,
+                "PORTABLE_SCHEMA_INVALID",
+                "Portable schema versions before V8 cannot contain Today V2 state.",
+            )
+        return
+    if (
+        not isinstance(checkpoint, dict)
+        or set(checkpoint) != {"states", "checkpointHash"}
+        or not isinstance(checkpoint.get("states"), list)
+        or checkpoint["checkpointHash"] != content_hash(checkpoint["states"])
+    ):
+        raise AppError(
+            422,
+            "PORTABLE_TODAY_CHECKPOINT_INVALID",
+            "The Today V2 current-state checkpoint is invalid.",
+        )
+    interactions_by_suggestion: dict[str, list[dict[str, Any]]] = {}
+    for interaction in tables["today_interactions"]:
+        interactions_by_suggestion.setdefault(interaction["suggestion_id"], []).append(
+            interaction
+        )
+    corrections_by_interaction = {
+        correction["interaction_id"]: correction
+        for correction in tables["today_interaction_corrections"]
+    }
+    expected: list[dict[str, Any]] = []
+    terminal = {"completed", "partially_completed", "skipped", "replaced", "expired"}
+    for suggestion in sorted(tables["today_suggestions"], key=lambda item: item["id"]):
+        interactions = sorted(
+            interactions_by_suggestion.get(suggestion["id"], []),
+            key=lambda item: item["event_sequence"],
+        )
+        if interactions:
+            latest = interactions[-1]
+            correction = corrections_by_interaction.get(latest["id"])
+            status = (
+                correction["resulting_status"]
+                if correction is not None
+                else latest["resulting_status"]
+            )
+            updated_at = (
+                correction["corrected_at"]
+                if correction is not None
+                else latest["occurred_at"]
+            )
+            expected.append(
+                {
+                    "suggestionId": suggestion["id"],
+                    "status": status,
+                    "eventSequence": latest["event_sequence"],
+                    "latestInteractionId": latest["id"],
+                    "terminal": status in terminal,
+                    "updatedAt": updated_at,
+                }
+            )
+        else:
+            expected.append(
+                {
+                    "suggestionId": suggestion["id"],
+                    "status": "suggested",
+                    "eventSequence": 0,
+                    "latestInteractionId": None,
+                    "terminal": False,
+                    "updatedAt": suggestion["created_at"],
+                }
+            )
+    if checkpoint["states"] != expected:
+        raise AppError(
+            422,
+            "PORTABLE_TODAY_CHECKPOINT_INVALID",
+            "Today V2 current-state parity failed.",
+        )
+
+
 def _validate_curriculum_checkpoint(payload: dict[str, Any], schema_version: int) -> None:
     checkpoint = payload.get("curriculumCatalogCheckpoint")
     if schema_version < 3:
@@ -1977,6 +2079,7 @@ def _insert_portable_tables(connection: Any, tables: dict[str, list[dict[str, An
     evidence_replacement_pointers: list[tuple[str, str | None]] = []
     evidence_link_replacement_pointers: list[tuple[str, str | None]] = []
     recommendation_replay_pointers: list[tuple[str, str | None]] = []
+    today_suggestion_replacement_pointers: list[tuple[str, str | None]] = []
     for model in PORTABLE_MODELS:
         table_name = _table(model).name
         rows = [dict(row) for row in tables.get(table_name, [])]
@@ -2043,6 +2146,12 @@ def _insert_portable_tables(connection: Any, tables: dict[str, list[dict[str, An
             for row in rows:
                 recommendation_replay_pointers.append((row["id"], row.get("replay_of_run_id")))
                 row["replay_of_run_id"] = None
+        if model is TodaySuggestion:
+            for row in rows:
+                today_suggestion_replacement_pointers.append(
+                    (row["id"], row.get("replaces_suggestion_id"))
+                )
+                row["replaces_suggestion_id"] = None
         if rows:
             connection.execute(insert(_table(model)), rows)
     for definition_id, parent_id in parent_pointers:
@@ -2124,6 +2233,14 @@ def _insert_portable_tables(connection: Any, tables: dict[str, list[dict[str, An
                 .update()
                 .where(RecommendationV2Run.id == run_id)
                 .values(replay_of_run_id=replay_of_run_id)
+            )
+    for suggestion_id, replaces_suggestion_id in today_suggestion_replacement_pointers:
+        if replaces_suggestion_id:
+            connection.execute(
+                _table(TodaySuggestion)
+                .update()
+                .where(TodaySuggestion.id == suggestion_id)
+                .values(replaces_suggestion_id=replaces_suggestion_id)
             )
     for roadmap_id, roadmap_version_id, phase_id, is_current in roadmap_pointers:
         connection.execute(
@@ -2259,6 +2376,12 @@ def _normalize_portable_tables(
             "PORTABLE_MANIFEST_INVALID",
             "The portable V7 manifest is missing or does not match the recovery contract.",
         )
+    if schema_version == 8 and parsed.manifest != PORTABLE_V8_MANIFEST:
+        raise AppError(
+            422,
+            "PORTABLE_MANIFEST_INVALID",
+            "The portable V8 manifest is missing or does not match the recovery contract.",
+        )
     if schema_version == 1 and parsed.manifest is not None:
         raise AppError(
             422, "PORTABLE_SCHEMA_INVALID", "A V1 portable package cannot contain a V2 manifest."
@@ -2288,6 +2411,10 @@ def _normalize_portable_tables(
         raise AppError(
             422, "PORTABLE_SCHEMA_INVALID", "A V6 portable package cannot contain V7 tables."
         )
+    if schema_version == 7 and set(tables) & set(PORTABLE_V7_FORBIDDEN_TABLES):
+        raise AppError(
+            422, "PORTABLE_SCHEMA_INVALID", "A V7 portable package cannot contain V8 tables."
+        )
     unknown = set(tables) - set(PORTABLE_BY_TABLE)
     v2_tables = set(PORTABLE_V2_FOUNDATION_TABLES)
     v3_tables = set(PORTABLE_V3_CURRICULUM_TABLES)
@@ -2295,6 +2422,7 @@ def _normalize_portable_tables(
     v5_tables = set(PORTABLE_V5_GRAPH_PROJECTION_TABLES)
     v6_tables = set(PORTABLE_V6_ANALYSIS_TABLES)
     v7_tables = set(PORTABLE_V7_RECOMMENDATION_TABLES)
+    v8_tables = set(PORTABLE_V8_TODAY_TABLES)
     missing = set(PORTABLE_BY_TABLE) - set(tables)
     allowed_v1_missing = (
         v2_tables
@@ -2303,6 +2431,7 @@ def _normalize_portable_tables(
         | v5_tables
         | v6_tables
         | v7_tables
+        | v8_tables
         | {"roadmap_scope_events"}
     )
     legacy_without_scope_history = schema_version == 1 and "roadmap_scope_events" in missing
@@ -2310,12 +2439,17 @@ def _normalize_portable_tables(
         (schema_version == 1 and missing <= allowed_v1_missing)
         or (
             schema_version == 2
-            and missing <= (v3_tables | v4_tables | v5_tables | v6_tables | v7_tables)
+            and missing
+            <= (v3_tables | v4_tables | v5_tables | v6_tables | v7_tables | v8_tables)
         )
-        or (schema_version == 3 and missing <= (v4_tables | v5_tables | v6_tables | v7_tables))
-        or (schema_version == 4 and missing <= (v5_tables | v6_tables | v7_tables))
-        or (schema_version == 5 and missing <= (v6_tables | v7_tables))
-        or (schema_version == 6 and missing <= v7_tables)
+        or (
+            schema_version == 3
+            and missing <= (v4_tables | v5_tables | v6_tables | v7_tables | v8_tables)
+        )
+        or (schema_version == 4 and missing <= (v5_tables | v6_tables | v7_tables | v8_tables))
+        or (schema_version == 5 and missing <= (v6_tables | v7_tables | v8_tables))
+        or (schema_version == 6 and missing <= (v7_tables | v8_tables))
+        or (schema_version == 7 and missing <= v8_tables)
         or not missing
     )
     if unknown or not valid_missing:
@@ -2340,26 +2474,34 @@ def _normalize_portable_tables(
         upgrade_v4_to_v5_tables(tables)
         upgrade_v5_to_v6_tables(tables)
         upgrade_v6_to_v7_tables(tables)
+        upgrade_v7_to_v8_tables(tables)
     elif schema_version == 2:
         upgrade_v2_to_v3_tables(tables)
         upgrade_v3_to_v4_tables(tables)
         upgrade_v4_to_v5_tables(tables)
         upgrade_v5_to_v6_tables(tables)
         upgrade_v6_to_v7_tables(tables)
+        upgrade_v7_to_v8_tables(tables)
     elif schema_version == 3:
         upgrade_v3_to_v4_tables(tables)
         upgrade_v4_to_v5_tables(tables)
         upgrade_v5_to_v6_tables(tables)
         upgrade_v6_to_v7_tables(tables)
+        upgrade_v7_to_v8_tables(tables)
     elif schema_version == 4:
         upgrade_v4_to_v5_tables(tables)
         upgrade_v5_to_v6_tables(tables)
         upgrade_v6_to_v7_tables(tables)
+        upgrade_v7_to_v8_tables(tables)
     elif schema_version == 5:
         upgrade_v5_to_v6_tables(tables)
         upgrade_v6_to_v7_tables(tables)
+        upgrade_v7_to_v8_tables(tables)
     elif schema_version == 6:
         upgrade_v6_to_v7_tables(tables)
+        upgrade_v7_to_v8_tables(tables)
+    elif schema_version == 7:
+        upgrade_v7_to_v8_tables(tables)
     return tables, legacy_without_scope_history
 
 
@@ -2375,6 +2517,7 @@ def _validate_portable_payload(
     _validate_roadmap_projection_checkpoint(payload, schema_version)
     _validate_analysis_v3_checkpoint(payload, tables, schema_version)
     _validate_recommendation_v2_checkpoint(payload, tables, schema_version)
+    _validate_today_v2_checkpoint(payload, tables, schema_version)
     for table_name, rows in tables.items():
         if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
             raise AppError(422, "PORTABLE_SCHEMA_INVALID", f"Table {table_name} has invalid rows.")
@@ -2401,8 +2544,10 @@ def _validate_portable_payload(
                         "PORTABLE_DATA_INVALID",
                         "Portable backup values violate the canonical data model.",
                     ) from exc
-                validate_domain_integrity(connection)
                 with Session(bind=connection) as validation_db:
+                    rebuild_today_current_states(validation_db)
+                    validation_db.flush()
+                    validate_domain_integrity(connection)
                     _assert_curriculum_checkpoint_parity(
                         validation_db, payload.get("curriculumCatalogCheckpoint")
                     )
@@ -2446,6 +2591,8 @@ def _validate_portable_payload(
             "targetProfilesInferred": 0,
             "nativeCurriculaInferred": 0,
             "nativeProjectsInferred": 0,
+            "initializedTodayV2Tables": len(PORTABLE_V8_TODAY_TABLES),
+            "nativeTodayHistoryInferred": 0,
         }
     elif schema_version == 2:
         compatibility_conversions = {
@@ -2459,6 +2606,8 @@ def _validate_portable_payload(
             "nativeAnalysisHistoryInferred": 0,
             "initializedRecommendationV2Tables": len(PORTABLE_V7_RECOMMENDATION_TABLES),
             "nativeRecommendationHistoryInferred": 0,
+            "initializedTodayV2Tables": len(PORTABLE_V8_TODAY_TABLES),
+            "nativeTodayHistoryInferred": 0,
         }
     elif schema_version == 3:
         compatibility_conversions = {
@@ -2470,6 +2619,8 @@ def _validate_portable_payload(
             "nativeAnalysisHistoryInferred": 0,
             "initializedRecommendationV2Tables": len(PORTABLE_V7_RECOMMENDATION_TABLES),
             "nativeRecommendationHistoryInferred": 0,
+            "initializedTodayV2Tables": len(PORTABLE_V8_TODAY_TABLES),
+            "nativeTodayHistoryInferred": 0,
         }
     elif schema_version == 4:
         compatibility_conversions = {
@@ -2479,6 +2630,8 @@ def _validate_portable_payload(
             "nativeAnalysisHistoryInferred": 0,
             "initializedRecommendationV2Tables": len(PORTABLE_V7_RECOMMENDATION_TABLES),
             "nativeRecommendationHistoryInferred": 0,
+            "initializedTodayV2Tables": len(PORTABLE_V8_TODAY_TABLES),
+            "nativeTodayHistoryInferred": 0,
         }
     elif schema_version == 5:
         compatibility_conversions = {
@@ -2486,11 +2639,20 @@ def _validate_portable_payload(
             "nativeAnalysisHistoryInferred": 0,
             "initializedRecommendationV2Tables": len(PORTABLE_V7_RECOMMENDATION_TABLES),
             "nativeRecommendationHistoryInferred": 0,
+            "initializedTodayV2Tables": len(PORTABLE_V8_TODAY_TABLES),
+            "nativeTodayHistoryInferred": 0,
         }
     elif schema_version == 6:
         compatibility_conversions = {
             "initializedRecommendationV2Tables": len(PORTABLE_V7_RECOMMENDATION_TABLES),
             "nativeRecommendationHistoryInferred": 0,
+            "initializedTodayV2Tables": len(PORTABLE_V8_TODAY_TABLES),
+            "nativeTodayHistoryInferred": 0,
+        }
+    elif schema_version == 7:
+        compatibility_conversions = {
+            "initializedTodayV2Tables": len(PORTABLE_V8_TODAY_TABLES),
+            "nativeTodayHistoryInferred": 0,
         }
     return tables, {
         "tableCounts": {name: len(rows) for name, rows in sorted(tables.items())},
@@ -2710,12 +2872,22 @@ def _delete_portable_state(db: Session) -> None:
     db.execute(_table(EvidenceRetraction).update().values(replacement_evidence_id=None))
     db.execute(_table(EvidenceLinkRetraction).update().values(replacement_link_id=None))
     db.execute(_table(RecommendationV2Run).update().values(replay_of_run_id=None))
+    db.execute(
+        _table(TodayInteraction).update().values(replacement_suggestion_id=None),
+        execution_options={"synchronize_session": False},
+    )
+    db.execute(
+        _table(TodaySuggestion).update().values(replaces_suggestion_id=None),
+        execution_options={"synchronize_session": False},
+    )
+    db.flush()
     db.execute(_table(RoadmapProjectionCheckpoint).delete())
     db.execute(_table(RoadmapProjectionCache).delete())
     for item in list(db.identity_map.values()):
         if isinstance(item, AnalysisV3CurrentState):
             db.expunge(item)
     db.execute(_table(AnalysisV3CurrentState).delete())
+    db.execute(_table(TodaySuggestionCurrentState).delete())
     for model in reversed(PORTABLE_MODELS):
         db.execute(_table(model).delete())
     db.flush()
@@ -2744,6 +2916,7 @@ def _apply_portable_restore(
     project_checkpoint = payload.get("projectCatalogCheckpoint")
     roadmap_projection_checkpoint = payload.get("roadmapProjectionCheckpoint")
     analysis_checkpoint = payload.get("analysisV3CurrentCheckpoint")
+    today_checkpoint = payload.get("todayV2CurrentCheckpoint")
     tables, legacy_without_scope_history = _normalize_portable_tables(
         payload, package_id, schema_version
     )
@@ -2759,6 +2932,13 @@ def _apply_portable_restore(
     _delete_portable_state(db)
     _insert_portable_tables(db.connection(), tables)
     db.flush()
+    rebuild_today_current_states(db)
+    if today_checkpoint is not None and today_current_checkpoint(db) != today_checkpoint:
+        raise AppError(
+            422,
+            "RESTORE_TODAY_PROJECTION_MISMATCH",
+            "Restored Today V2 current state does not match its rebuild checkpoint.",
+        )
     restored_analysis_states = (
         analysis_checkpoint.get("states", []) if isinstance(analysis_checkpoint, dict) else []
     )

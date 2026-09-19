@@ -652,6 +652,7 @@ class PortablePackagePayload(StrictModel):
     roadmapProjectionCheckpoint: dict[str, Any] | None = None
     analysisV3CurrentCheckpoint: dict[str, Any] | None = None
     recommendationV2HistoryCheckpoint: dict[str, Any] | None = None
+    todayV2CurrentCheckpoint: dict[str, Any] | None = None
 
 
 class ImportInspectRequest(StrictModel):

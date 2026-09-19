@@ -290,17 +290,75 @@ def _queue_session_invalidation(db: Session, session: LearningSession, source_fa
     )
 
 
+def create_activity_in_uow(
+    db: Session,
+    *,
+    title: str,
+    description: str | None,
+    category_stable_key: str,
+    occurred_at: int | None,
+    creator_source: str,
+    provenance: str,
+    outcome_classification: str | None = None,
+) -> Activity:
+    """Create an actual Activity without committing the caller-owned unit of work."""
+    activity = Activity(
+        title=title,
+        description=description,
+        category_stable_key=category_stable_key,
+        category_version="v1",
+        occurred_at=occurred_at,
+        creator_source=creator_source,
+        provenance=provenance,
+        outcome_classification=outcome_classification,
+    )
+    db.add(activity)
+    db.flush()
+    return activity
+
+
+def start_timed_session_in_uow(
+    db: Session,
+    *,
+    activity: Activity,
+    assistance_mode: str,
+    notes: str | None,
+    contributions: list[SessionContributionCreate],
+    started_at: int,
+) -> LearningSession:
+    """Start a timed Session without committing the caller-owned unit of work."""
+    if active_timed_session(db) is not None:
+        raise AppError(409, "ACTIVE_SESSION_EXISTS", "Complete or cancel the active Session first.")
+    validated = _validated_contribution_targets(db, contributions)
+    session = LearningSession(
+        activity_id=activity.id,
+        track_id=None,
+        session_mode="timed",
+        timed_state="running",
+        activity_type=activity.category_stable_key,
+        assistance_mode=assistance_mode,
+        started_at=started_at,
+        active_since=started_at,
+        accumulated_duration_ms=0,
+        notes=notes,
+    )
+    db.add(session)
+    db.flush()
+    _add_initial_contributions(db, session, validated)
+    return session
+
+
 @router.post("/activities", status_code=201)
 async def create_activity(
     payload: ActivityCreate,
     _auth: AuthContext = Depends(require_csrf),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    activity = Activity(
+    activity = create_activity_in_uow(
+        db,
         title=payload.title,
         description=payload.description,
         category_stable_key=payload.category_stable_key,
-        category_version="v1",
         occurred_at=datetime_to_epoch_ms(payload.occurred_at) if payload.occurred_at else None,
         creator_source="user",
         provenance="user_recorded",
@@ -361,27 +419,17 @@ async def start_timed_session(
     _auth: AuthContext = Depends(require_csrf),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    if active_timed_session(db) is not None:
-        raise AppError(409, "ACTIVE_SESSION_EXISTS", "Complete or cancel the active Session first.")
     activity = _activity_or_404(db, payload.activity_id)
-    validated = _validated_contribution_targets(db, payload.contributions)
     now = utc_now_ms()
-    session = LearningSession(
-        activity_id=activity.id,
-        track_id=None,
-        session_mode="timed",
-        timed_state="running",
-        activity_type=activity.category_stable_key,
-        assistance_mode=payload.assistance_mode,
-        started_at=now,
-        active_since=now,
-        accumulated_duration_ms=0,
-        notes=payload.notes,
-    )
-    db.add(session)
     try:
-        db.flush()
-        _add_initial_contributions(db, session, validated)
+        session = start_timed_session_in_uow(
+            db,
+            activity=activity,
+            assistance_mode=payload.assistance_mode,
+            notes=payload.notes,
+            contributions=payload.contributions,
+            started_at=now,
+        )
         db.commit()
     except IntegrityError as exc:
         db.rollback()
