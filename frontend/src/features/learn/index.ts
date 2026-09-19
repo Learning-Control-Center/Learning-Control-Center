@@ -1,1 +1,1 @@
-export { CurriculumPage } from '../../pages/CurriculumPage'
+export { CurriculumPage } from './CurriculumPage'

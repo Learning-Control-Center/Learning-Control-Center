@@ -52,7 +52,9 @@ test('production timer survives refresh and completes', async ({ page }) => {
   await page.getByLabel('Password').fill(replacementPassword)
   await page.getByRole('button', { name: 'Sign in' }).click()
   await page.getByRole('link', { name: 'Activity' }).click()
-  await expect(page.getByRole('heading', { name: 'Log & sessions' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Activity', level: 1 })).toBeVisible()
+  await page.getByLabel('Activity title').fill('Production timer')
+  await page.getByRole('button', { name: 'Create Activity' }).click()
   await page.getByRole('button', { name: 'Start timer' }).click()
   await expect(page.getByRole('button', { name: 'Pause' })).toBeVisible()
   await page.reload()
@@ -62,7 +64,7 @@ test('production timer survives refresh and completes', async ({ page }) => {
   await page.getByRole('button', { name: 'Resume' }).click()
   await expect(page.getByRole('button', { name: 'Complete' })).toBeVisible()
   await page.getByRole('button', { name: 'Complete' }).click()
-  await expect(page.getByText('Unlinked learning session')).toBeVisible()
+  await expect(page.getByText('Unlinked or legacy Session')).toBeVisible()
 })
 
 test('production V2 authority cutover routes the default learning surfaces', async ({ page }) => {

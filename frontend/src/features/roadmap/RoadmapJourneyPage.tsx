@@ -36,11 +36,12 @@ import {
   X,
 } from 'lucide-react'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 
 import { ApiError, apiV2 } from '../../api'
 import {
   Button,
+  CapabilitySummary,
   Dialog,
   EmptyState,
   ErrorState,
@@ -52,7 +53,10 @@ import {
   Surface,
   TextField,
 } from '../../shared/components'
+import type { CurriculumCatalogUnit, ProjectCatalogCandidateApi } from '../../shared/contracts/productCatalog'
+import { adaptProjectCatalogCandidate } from '../../shared/contracts/productCatalog'
 import type { RoadmapProjection } from './projection'
+import { paths } from '../../shared/navigation/paths'
 import {
   applyRoadmapVisibility,
   createRoadmapViewModel,
@@ -218,9 +222,11 @@ function RoadmapCanvasControls({ selectedIds }: { selectedIds: string[] }) {
   )
 }
 
-function RoadmapDetail({ node, relationships, editMode, onClose, onEditPosition, onToggleBranch, branchCollapsed, branchHiddenCount }: {
+function RoadmapDetail({ node, relationships, relatedLearning, relatedProjects, editMode, onClose, onEditPosition, onToggleBranch, branchCollapsed, branchHiddenCount }: {
   node: RoadmapNodeView
   relationships: Array<{ id: string; type: string; direction: string; otherTitle: string; state: string; reasons: string[]; criterionStates: Array<{ criterionDefinitionId: string; state: string }> }>
+  relatedLearning: Array<{ curriculumId: string; title: string }>
+  relatedProjects: Array<{ projectId: string; title: string }>
   editMode: boolean
   onClose: () => void
   onEditPosition: () => void
@@ -253,7 +259,7 @@ function RoadmapDetail({ node, relationships, editMode, onClose, onEditPosition,
       </section>
       <section aria-labelledby={`evidence-${node.id}`}>
         <h3 id={`evidence-${node.id}`} className="text-sm font-semibold uppercase tracking-wide text-ink/55">Capability basis</h3>
-        {node.capability.scopes.length ? <ul className="mt-2 space-y-2 text-sm">{node.capability.scopes.map((scope) => <li key={scope.scopeKey} className="rounded-xl border border-ink/10 p-3"><span className="font-semibold">{scope.scopeKey === 'overall' ? 'Overall capability' : 'Target dimension'}</span>: {scope.levelTitle ?? scope.levelKey ?? 'level unknown'} · {scope.assessmentStatus} · {scope.confidence} · {scope.freshness}{scope.reviewDue ? ' · review due' : ''}</li>)}</ul> : <p className="mt-2 text-sm text-status-unknown">Capability is Unknown for this item.</p>}
+        {node.capability.scopes.length ? <ul className="mt-2 space-y-2 text-sm">{node.capability.scopes.map((scope) => <li key={scope.scopeKey}><CapabilitySummary state={scope} /></li>)}</ul> : <p className="mt-2 text-sm text-status-unknown">Capability is Unknown for this item.</p>}
         {relationships.some((relationship) => relationship.criterionStates.length) ? <div className="mt-3"><p className="text-xs font-semibold uppercase tracking-wide text-ink/55">Prerequisite criteria</p><ul className="mt-2 space-y-1 text-sm">{relationships.flatMap((relationship) => relationship.criterionStates.map((criterion) => <li key={`${relationship.id}:${criterion.criterionDefinitionId}`} className="rounded-lg border border-ink/10 px-3 py-2">{relationship.direction} {relationship.otherTitle}: <span className="font-semibold">{criterion.state.replaceAll('_', ' ')}</span></li>))}</ul></div> : null}
         <p className="mt-2 text-xs leading-5 text-ink/55">Individual evidence records are not included in the Roadmap projection. This view reports its authoritative capability and prerequisite states without inferring evidence.</p>
       </section>
@@ -267,6 +273,9 @@ function RoadmapDetail({ node, relationships, editMode, onClose, onEditPosition,
         <p className="mt-2 text-sm text-ink/60">This projection contains journey status and presentation position only; it does not assert Curriculum or Project associations.</p>
       </section>
       <div className="flex flex-wrap gap-2">
+        <Link className="button-primary" to={paths.competency(node.id)}>Open competency detail</Link>
+        {relatedLearning.length ? relatedLearning.map((item) => <Link key={item.curriculumId} className="button-secondary" to={paths.curriculum(item.curriculumId)}>Learn: {item.title}</Link>) : <Link className="button-secondary" to={paths.learn}>Browse learning</Link>}
+        {relatedProjects.length ? relatedProjects.map((item) => <Link key={item.projectId} className="button-secondary" to={paths.project(item.projectId)}>Project: {item.title}</Link>) : <Link className="button-secondary" to={paths.projects}>Browse Projects</Link>}
         {branchHiddenCount ? <Button variant="secondary" onClick={onToggleBranch} aria-expanded={!branchCollapsed}><GitBranch className="size-4" />{branchCollapsed ? `Expand ${branchHiddenCount} branch items` : `Collapse branch (${branchHiddenCount} descendants)`}</Button> : null}
         <Button variant="secondary" onClick={onEditPosition}><Move className="size-4" />Set X/Y position</Button>
       </div>
@@ -319,6 +328,8 @@ export function RoadmapJourneyPage() {
   searchParamsRef.current = searchParams
   const [projection, setProjection] = useState<RoadmapProjection | null>(null)
   const [levelTitles, setLevelTitles] = useState<Map<string, { key: string; title: string }>>(new Map())
+  const [curriculumUnits, setCurriculumUnits] = useState<CurriculumCatalogUnit[]>([])
+  const [projectCandidates, setProjectCandidates] = useState<ReturnType<typeof adaptProjectCatalogCandidate>[]>([])
   const [loading, setLoading] = useState(true)
   const [working, setWorking] = useState(false)
   const [error, setError] = useState('')
@@ -362,6 +373,13 @@ export function RoadmapJourneyPage() {
       ])
       setProjection(nextProjection)
       setLevelTitles(new Map(scales.flatMap((scale) => scale.levels).map((level) => [level.id, { key: level.stableKey, title: level.displayLabel }])))
+      void Promise.allSettled([
+        apiV2<{ units: CurriculumCatalogUnit[] }>('/curricula/catalog/active'),
+        apiV2<{ candidates: ProjectCatalogCandidateApi[] }>('/projects/catalog/current'),
+      ]).then(([curricula, projects]) => {
+        if (curricula.status === 'fulfilled') setCurriculumUnits(curricula.value.units ?? [])
+        if (projects.status === 'fulfilled') setProjectCandidates((projects.value.candidates ?? []).map(adaptProjectCatalogCandidate))
+      })
     }
     catch (caught) { setError(caught instanceof ApiError ? caught.message : 'The learning roadmap could not be loaded.') }
     finally { setLoading(false) }
@@ -542,6 +560,8 @@ export function RoadmapJourneyPage() {
     while (parent) { if (parent === selected.id) return true; parent = model.nodeById.get(parent)?.presentationParentId ?? null }
     return false
   }).length : 0
+  const selectedLearning = selected ? curriculumUnits.filter((unit) => unit.targets?.some((target) => target.semanticDefinitionId === selected.semanticDefinitionId)).map((unit) => ({ curriculumId: unit.curriculumId, title: unit.title })) : []
+  const selectedProjects = selected ? projectCandidates.filter((item) => item.semanticDefinitionIds.includes(selected.semanticDefinitionId)).map((item) => ({ projectId: item.projectId, title: item.title })) : []
   const toggleSet = (setter: React.Dispatch<React.SetStateAction<Set<string>>>, id: string) => setter((current) => { const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next })
 
   return (
@@ -610,10 +630,10 @@ export function RoadmapJourneyPage() {
             {compact && mapActivated ? <button ref={mapExitRef} className="button-secondary absolute right-3 top-3 z-20 bg-white/95" onClick={() => { setMapActivated(false); window.requestAnimationFrame(() => mapActivateRef.current?.focus()) }}>Done interacting</button> : null}
           </div> : <div className="space-y-4" aria-labelledby="roadmap-outline-heading"><h2 id="roadmap-outline-heading" tabIndex={-1} className="sr-only">Learning journey outline</h2>{model.lanes.map((lane) => { const laneNodes = visible.nodes.filter((node) => node.layoutLane.id === lane.id); const collapsed = collapsedLanes.has(lane.id); const temporarilyOpen = laneNodes.some((node) => visible.temporarilyRevealed.has(node.id) || visible.searchRevealed.has(node.id)); const expanded = !collapsed || temporarilyOpen; return <section key={lane.id} className="surface overflow-hidden"><button className="flex min-h-14 w-full items-center justify-between gap-3 border-b border-ink/10 px-4 py-3 text-left" onClick={() => toggleSet(setCollapsedLanes, lane.id)} aria-expanded={expanded}><span><span className="font-display text-lg font-semibold">{lane.title}</span><span className="ml-2 text-xs text-ink/50">{laneNodes.length} shown{collapsed && temporarilyOpen ? ' · temporarily revealed' : ''}</span></span>{expanded ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}</button>{expanded ? <ol className="divide-y divide-ink/10">{laneNodes.map((node) => { const revealed = visible.temporarilyRevealed.has(node.id) || visible.searchRevealed.has(node.id); return <li key={node.id} className={`${node.presentationParentId ? 'border-l-4 border-moss/25 pl-4 sm:ml-6' : ''}`} data-roadmap-node-id={node.id} data-current-summary={node.currentSummary} data-target-summary={node.targetSummary} data-target-status-summary={node.targetStatusSummary} data-target-rows={JSON.stringify(node.targetRows)} data-today={String(node.isToday)}>{node.presentationParentId ? <p className="px-4 pt-2 text-[0.65rem] font-semibold uppercase tracking-wide text-moss">Specialization branch</p> : null}<button className="grid min-h-20 w-full gap-2 px-4 py-3 text-left sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center" onClick={() => selectNode(node.id)} aria-current={node.id === selectedId ? 'true' : undefined}><span><span className="block font-semibold">{node.title}</span><span className="mt-1 block text-sm text-ink/60">Current: {node.currentSummary} · Target: {node.targetSummary} · {node.targetStatusSummary}</span></span><span className="flex flex-wrap gap-1"><StatusBadge label={node.isTargeted ? 'Target' : 'Path'} tone={node.isTargeted ? 'info' : 'neutral'} />{revealed ? <StatusBadge label="Focused path" tone="info" /> : null}{node.isToday ? <StatusBadge label="Today" tone="today" /> : null}{node.blockedLabel ? <StatusBadge label={node.blockedLabel} tone={toneFor(node)} /> : null}{node.targetRows.some((target) => target.reviewDue) ? <StatusBadge label="Review due" tone="warning" /> : null}{node.positionSource === 'user_override' ? <StatusBadge label="Manual position" tone="warning" /> : null}</span></button></li> })}</ol> : null}</section>})}<Surface className="p-4"><h3 className="font-display text-lg font-semibold">Visible relationships</h3>{visible.edges.length ? <ul className="mt-3 space-y-2 text-sm">{visible.edges.map((edge) => <li key={edge.id} className="rounded-xl border border-ink/10 p-3"><span className="font-semibold">{model.nodeById.get(edge.source)?.title}</span> → <span className="font-semibold">{model.nodeById.get(edge.target)?.title}</span><span className="block text-ink/60">{edge.edgeType.replaceAll('_', ' ')} · {edge.edgeType === 'prerequisite' ? edge.satisfaction.aggregate_state : 'contextual'}{edge.satisfaction.unknown_reasons?.length ? ` · ${edge.satisfaction.unknown_reasons.map((reason) => reason.replaceAll('_', ' ').toLowerCase()).join(', ')}` : ''}</span></li>)}</ul> : <p className="mt-2 text-sm text-ink/60">No relationships are visible under the current filters.</p>}</Surface></div>}
         </div>
-        {selected && !compact ? <aside className="surface hidden h-fit max-h-[calc(100vh-3rem)] overflow-y-auto p-5 xl:sticky xl:top-6 xl:block" aria-label="Roadmap item details"><RoadmapDetail node={selected} relationships={selectedRelationships} editMode={editMode} onClose={closeSelected} onEditPosition={() => setPositionNode(selected)} branchCollapsed={collapsedBranches.has(selected.id)} branchHiddenCount={branchHiddenCount} onToggleBranch={() => toggleSet(setCollapsedBranches, selected.id)} /></aside> : !selected ? <aside className="surface hidden h-fit p-5 text-sm text-ink/60 xl:block"><LockKeyhole className="mb-3 size-5 text-moss" /><h2 className="font-display text-lg font-semibold text-ink">Choose a journey item</h2><p className="mt-2 leading-6">Open any item to compare current capability with its target, inspect prerequisites, and manage presentation position.</p></aside> : null}
+        {selected && !compact ? <aside className="surface hidden h-fit max-h-[calc(100vh-3rem)] overflow-y-auto p-5 xl:sticky xl:top-6 xl:block" aria-label="Roadmap item details"><RoadmapDetail node={selected} relationships={selectedRelationships} relatedLearning={selectedLearning} relatedProjects={selectedProjects} editMode={editMode} onClose={closeSelected} onEditPosition={() => setPositionNode(selected)} branchCollapsed={collapsedBranches.has(selected.id)} branchHiddenCount={branchHiddenCount} onToggleBranch={() => toggleSet(setCollapsedBranches, selected.id)} /></aside> : !selected ? <aside className="surface hidden h-fit p-5 text-sm text-ink/60 xl:block"><LockKeyhole className="mb-3 size-5 text-moss" /><h2 className="font-display text-lg font-semibold text-ink">Choose a journey item</h2><p className="mt-2 leading-6">Open any item to compare current capability with its target, inspect prerequisites, and manage presentation position.</p></aside> : null}
       </div>}
 
-      <Dialog open={Boolean(selected && compact && !positionNode)} label={selected ? `Details for ${selected.title}` : 'Roadmap item details'} onDismiss={closeSelected} className="absolute inset-x-2 bottom-[max(0.5rem,env(safe-area-inset-bottom))] max-h-[calc(100dvh-1rem-env(safe-area-inset-bottom))] overflow-y-auto overscroll-contain rounded-2xl bg-white p-5 shadow-xl">{selected ? <RoadmapDetail node={selected} relationships={selectedRelationships} editMode={editMode} onClose={closeSelected} onEditPosition={() => setPositionNode(selected)} branchCollapsed={collapsedBranches.has(selected.id)} branchHiddenCount={branchHiddenCount} onToggleBranch={() => toggleSet(setCollapsedBranches, selected.id)} /> : null}</Dialog>
+      <Dialog open={Boolean(selected && compact && !positionNode)} label={selected ? `Details for ${selected.title}` : 'Roadmap item details'} onDismiss={closeSelected} className="absolute inset-x-2 bottom-[max(0.5rem,env(safe-area-inset-bottom))] max-h-[calc(100dvh-1rem-env(safe-area-inset-bottom))] overflow-y-auto overscroll-contain rounded-2xl bg-white p-5 shadow-xl">{selected ? <RoadmapDetail node={selected} relationships={selectedRelationships} relatedLearning={selectedLearning} relatedProjects={selectedProjects} editMode={editMode} onClose={closeSelected} onEditPosition={() => setPositionNode(selected)} branchCollapsed={collapsedBranches.has(selected.id)} branchHiddenCount={branchHiddenCount} onToggleBranch={() => toggleSet(setCollapsedBranches, selected.id)} /> : null}</Dialog>
 
       <PositionDialog node={positionNode} open={Boolean(positionNode)} onDismiss={() => setPositionNode(null)} onSave={(position) => positionNode ? savePosition(positionNode, position) : Promise.resolve()} />
       <Dialog open={resetOpen} label="Reset Roadmap layout" onDismiss={() => setResetOpen(false)} className="absolute left-1/2 top-1/2 max-h-[calc(100dvh-1rem)] w-[min(92vw,32rem)] -translate-x-1/2 -translate-y-1/2 overflow-y-auto overscroll-contain rounded-2xl bg-white p-6 shadow-xl"><div className="space-y-4"><h2 className="font-display text-2xl font-semibold">Restore canonical layout?</h2><p className="text-sm leading-6 text-ink/65">This removes {model.nodes.filter((node) => node.positionSource === 'user_override').length} saved manual position(s) in scope <span className="break-all font-mono text-xs">{projection.scopeKey}</span>. It does not change the Learning Graph, Profile, capability, or eligibility.</p>{error ? <MutationError>{error}</MutationError> : null}<div className="flex justify-end gap-2"><Button variant="secondary" onClick={() => setResetOpen(false)}>Cancel</Button><Button disabled={working} onClick={() => void resetLayout()}>{working ? 'Resetting…' : 'Reset layout'}</Button></div></div></Dialog>

@@ -537,8 +537,26 @@ def _seed_v2_shell(client: PublicApiClient, run: FixtureRun) -> tuple[JsonObject
                         "priority": "core",
                     }
                 ],
-                "milestones": [],
-                "readiness_gates": [],
+                "milestones": [
+                    {
+                        "stable_key": "first-domain-ready",
+                        "title": "First domain ready",
+                        "description": "Reach the first target waypoint in the learning journey.",
+                        "order_index": 0,
+                        "target_stable_keys": ["fixture-shell-target"],
+                    }
+                ],
+                "readiness_gates": [
+                    {
+                        "stable_key": "first-domain-gate",
+                        "title": "First domain readiness",
+                        "effect": "display_only",
+                        "order_index": 0,
+                        "milestone_stable_key": "first-domain-ready",
+                        "target_stable_keys": ["fixture-shell-target"],
+                        "predicates": [],
+                    }
+                ],
             },
         },
         expected=201,
@@ -853,8 +871,26 @@ def _seed_roadmap_scale(client: PublicApiClient, run: FixtureRun, size: int) -> 
                 "effective_at": effective_at,
                 "domains": domains,
                 "targets": targets,
-                "milestones": [],
-                "readiness_gates": [],
+                "milestones": [
+                    {
+                        "stable_key": "first-domain-ready",
+                        "title": "First domain ready",
+                        "description": "Reach the first target waypoint in the learning journey.",
+                        "order_index": 0,
+                        "target_stable_keys": [f"target-{foundation_count:03d}"],
+                    }
+                ],
+                "readiness_gates": [
+                    {
+                        "stable_key": "first-domain-gate",
+                        "title": "First domain readiness",
+                        "effect": "display_only",
+                        "order_index": 0,
+                        "milestone_stable_key": "first-domain-ready",
+                        "target_stable_keys": [f"target-{foundation_count:03d}"],
+                        "predicates": [],
+                    }
+                ],
             },
         },
         expected=201,
@@ -992,59 +1028,60 @@ def _seed_roadmap_scale(client: PublicApiClient, run: FixtureRun, size: int) -> 
         {"stable_key": f"roadmap-journey-{size}", "creation_source": "roadmap_fixture"},
         expected=201,
     )
+    journey_version_payload = {
+        "title": f"Roadmap journey actions {size}",
+        "description": "Representative available work for the Roadmap Today overlay.",
+        "effective_at": effective_at,
+        "creation_source": "roadmap_fixture",
+        "objectives": [
+            {
+                "stable_key": "journey",
+                "title": "Journey",
+                "description": "Continue the target path.",
+                "order_index": 0,
+            }
+        ],
+        "units": [
+            {
+                "stable_key": "journey-practice",
+                "objective_stable_key": "journey",
+                "kind": "practice_task",
+                "title": "Practice the next Roadmap capability",
+                "description": "Representative target-linked learning action.",
+                "action": {
+                    "kind": "practice_task",
+                    "instructions": "Practice the capability with a small deliverable.",
+                },
+                "status": "active",
+                "provenance": "roadmap_fixture",
+                "order_index": 0,
+                "minimum_useful_duration_ms": 900000,
+                "preferred_duration_ms": 1800000,
+                "maximum_useful_duration_ms": 2700000,
+                "targets": [
+                    {
+                        "semantic_definition_id": definition_ids[foundation_count],
+                        "criterion_definition_id": criterion_ids[foundation_count],
+                        "scale_version_id": technical["id"],
+                        "dimension_id": None,
+                        "intended_learning_outcome": "Advance one target capability.",
+                        "minimum_level_id": familiar["id"],
+                        "maximum_level_id": independent["id"],
+                        "supports_unassessed": True,
+                        "role": "primary",
+                        "order_index": 0,
+                    }
+                ],
+                "requirements": [],
+                "evidence_opportunities": [],
+            }
+        ],
+        "assessment_rubrics": [],
+    }
     journey_version = client.request(
         "POST",
         f"/api/v2/curricula/{journey_curriculum['id']}/versions",
-        {
-            "title": f"Roadmap journey actions {size}",
-            "description": "Representative available work for the Roadmap Today overlay.",
-            "effective_at": effective_at,
-            "creation_source": "roadmap_fixture",
-            "objectives": [
-                {
-                    "stable_key": "journey",
-                    "title": "Journey",
-                    "description": "Continue the target path.",
-                    "order_index": 0,
-                }
-            ],
-            "units": [
-                {
-                    "stable_key": "journey-practice",
-                    "objective_stable_key": "journey",
-                    "kind": "practice_task",
-                    "title": "Practice the next Roadmap capability",
-                    "description": "Representative target-linked learning action.",
-                    "action": {
-                        "kind": "practice_task",
-                        "instructions": "Practice the capability with a small deliverable.",
-                    },
-                    "status": "active",
-                    "provenance": "roadmap_fixture",
-                    "order_index": 0,
-                    "minimum_useful_duration_ms": 900000,
-                    "preferred_duration_ms": 1800000,
-                    "maximum_useful_duration_ms": 2700000,
-                    "targets": [
-                        {
-                            "semantic_definition_id": definition_ids[foundation_count],
-                            "criterion_definition_id": criterion_ids[foundation_count],
-                            "scale_version_id": technical["id"],
-                            "dimension_id": None,
-                            "intended_learning_outcome": "Advance one target capability.",
-                            "minimum_level_id": familiar["id"],
-                            "maximum_level_id": independent["id"],
-                            "supports_unassessed": True,
-                            "role": "primary",
-                            "order_index": 0,
-                        }
-                    ],
-                    "requirements": [],
-                    "evidence_opportunities": [],
-                }
-            ],
-            "assessment_rubrics": [],
-        },
+        journey_version_payload,
         expected=201,
     )
     client.request(
@@ -1055,6 +1092,16 @@ def _seed_roadmap_scale(client: PublicApiClient, run: FixtureRun, size: int) -> 
             "source": "roadmap_fixture",
             "idempotency_key": f"roadmap-fixture-curriculum-{size}",
         },
+    )
+    client.request(
+        "POST",
+        f"/api/v2/curricula/{journey_curriculum['id']}/versions",
+        {
+            **journey_version_payload,
+            "title": f"Roadmap journey actions {size} revision preview",
+            "description": "Inactive immutable revision for explicit activation review.",
+        },
+        expected=201,
     )
     evidence_source_index = foundation_count - 1
     evidence_project = client.request(
@@ -1235,7 +1282,7 @@ def _seed_roadmap_scale(client: PublicApiClient, run: FixtureRun, size: int) -> 
         },
         expected=201,
     )
-    client.request(
+    submitted_evidence = client.request(
         "POST",
         f"/api/v2/projects/{evidence_project['id']}/evidence",
         {
@@ -1247,6 +1294,16 @@ def _seed_roadmap_scale(client: PublicApiClient, run: FixtureRun, size: int) -> 
             "artifact_hash": "a" * 64,
             "rubric_result": "passed",
             "idempotency_key": f"roadmap-fixture-project-evidence-{size}",
+        },
+        expected=201,
+    )
+    evidence_criterion = evidence_project_version["criteria"][0]
+    client.request(
+        "POST",
+        f"/api/v2/projects/criteria/{evidence_criterion['id']}/evaluations",
+        {
+            "evidence_ids": [submitted_evidence["id"]],
+            "idempotency_key": f"roadmap-fixture-project-evaluation-{size}",
         },
         expected=201,
     )
@@ -1465,7 +1522,13 @@ def run_roadmap_fixture(size: int, timezone: str, clock_at: str | None) -> JsonO
             print(f"Fixture failure artifacts retained at {run.root}", file=sys.stderr)
 
 
-def run_roadmap_playwright(size: int, timezone: str, clock_at: str | None) -> JsonObject:
+def run_roadmap_playwright(
+    size: int,
+    timezone: str,
+    clock_at: str | None,
+    *,
+    grep_pattern: str = "Roadmap",
+) -> JsonObject:
     if size not in {25, 100, 250}:
         raise ValueError("Roadmap fixture size must be 25, 100, or 250.")
     scenario = cast(ScenarioName, f"roadmap-{size}")
@@ -1488,7 +1551,7 @@ def run_roadmap_playwright(size: int, timezone: str, clock_at: str | None) -> Js
         )
         with (run.root / "playwright.log").open("wb") as playwright_log:
             result = subprocess.run(
-                ["npm", "run", "test:e2e:product", "--", "--grep", "Roadmap"],
+                ["npm", "run", "test:e2e:product", "--", "--grep", grep_pattern],
                 cwd=FRONTEND_ROOT,
                 env=environment,
                 stdout=playwright_log,
@@ -1544,6 +1607,12 @@ def main() -> int:
     roadmap_browser.add_argument("--size", type=int, choices=(25, 100, 250), default=25)
     roadmap_browser.add_argument("--timezone", default=DEFAULT_TIMEZONE)
     roadmap_browser.add_argument("--clock", default=DEFAULT_CLOCK)
+    checkpoint_four_browser = subparsers.add_parser(
+        "checkpoint4-playwright",
+        help="Run Profile, Learn, Projects, and Activity browser checks on the populated fixture.",
+    )
+    checkpoint_four_browser.add_argument("--timezone", default=DEFAULT_TIMEZONE)
+    checkpoint_four_browser.add_argument("--clock", default=DEFAULT_CLOCK)
     arguments = parser.parse_args()
     if arguments.command == "smoke":
         result = run_smoke(arguments.scenario, arguments.timezone, arguments.clock)
@@ -1571,6 +1640,25 @@ def main() -> int:
         return 0
     if arguments.command == "roadmap-playwright":
         result = run_roadmap_playwright(arguments.size, arguments.timezone, arguments.clock)
+        print(
+            json.dumps(
+                {
+                    "scenarioId": result["scenarioId"],
+                    "fixtureHash": result["fixtureHash"],
+                    "productionBuildHash": result["productionBuildHash"],
+                    "roadmapProjection": result["roadmapProjection"],
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+    if arguments.command == "checkpoint4-playwright":
+        result = run_roadmap_playwright(
+            25,
+            arguments.timezone,
+            arguments.clock,
+            grep_pattern="Checkpoint 4",
+        )
         print(
             json.dumps(
                 {

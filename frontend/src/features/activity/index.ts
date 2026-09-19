@@ -1,1 +1,1 @@
-export { SessionsPage } from '../../pages/SessionsPage'
+export { SessionsPage } from './ActivityPage'

@@ -1,1 +1,1 @@
-export { ProfileCapabilityPage } from '../../pages/ProfileCapabilityPage'
+export { ProfileCapabilityPage } from './ProfileCapabilityPage'

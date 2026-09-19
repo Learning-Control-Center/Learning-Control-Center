@@ -88,10 +88,13 @@ describe('critical learning workflows', () => {
     }
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
-      if (url.includes('/roadmap/current')) return json({ configured: false })
+      if (url.includes('/api/v2/activities')) return json([])
+      if (url.includes('/api/v2/roadmap-projection/current')) return json({ configured: false, nodes: [], edges: [] })
+      if (url.includes('/api/v2/curricula/catalog/active')) return json({ units: [] })
+      if (url.includes('/api/v2/projects/catalog/current')) return json({ candidates: [] })
       if (url.includes('/sessions/active')) return json({ active: true, session: activeSession })
       if (url.includes('/sessions?')) return json({ items: [] })
-      if (url.includes('/sessions/session-1/pause') && init?.method === 'POST') return json(activeSession)
+      if (url.includes('/api/v2/sessions/session-1/pause') && init?.method === 'POST') return json(activeSession)
       return json({})
     })
     vi.stubGlobal('fetch', fetchMock)
@@ -104,7 +107,7 @@ describe('critical learning workflows', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Pause' }))
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
-        '/api/v1/sessions/session-1/pause',
+        '/api/v2/sessions/session-1/pause',
         expect.objectContaining({ method: 'POST' }),
       ),
     )
