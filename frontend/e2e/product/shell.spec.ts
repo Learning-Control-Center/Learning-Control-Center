@@ -1,7 +1,7 @@
 import AxeBuilder from '@axe-core/playwright'
 import { expect, test } from '@playwright/test'
 
-const expectedAuthority = process.env.LCC_PRODUCT_SCENARIO === 'v2-shell' ? 'V2' : 'V1 compatibility'
+const expectedAuthority = process.env.LCC_PRODUCT_SCENARIO === 'legacy-shell' ? 'V1 compatibility' : 'V2'
 
 test('isolated fixture exposes an accessible, reduced-motion product shell without overflow', async ({ page }) => {
   await page.goto('/')

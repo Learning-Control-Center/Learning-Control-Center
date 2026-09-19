@@ -30,9 +30,9 @@
   "fixtures": {
     "sizes": [25, 100, 250],
     "semanticFixtureHashes": {
-      "25": "7f8f4ac9df3b8f846ceb1e0c754b0b8e676fc305549557938de826ed6b36f5a6",
-      "100": "b85bd5d2d953f69d1d4ff80a206e241e245ea739a4b1272d4f6ba553fa5ac9fa",
-      "250": "bac7e5c6be4496bea9958b47bb1b2b388b776eb15c9804a37a1c777f96a717e5"
+      "25": "fc7771887648d5c0be5bd6c98617c81093561e304683aae59644558db3dd9aac",
+      "100": "807de49e261396e89ad9bf2d6ffdf907f9dd8c0f08e6fabff29dd383f3b1550b",
+      "250": "c0a95b7ed5b180248f6cbe4bfb3336452a033d77c2054c7ae1e3871401b13d57"
     },
     "seedCommand": ".venv/bin/python scripts/product_fixture_harness.py roadmap --size <size> --clock 2026-09-19T10:00:00Z",
     "pureLayoutCommand": ".venv/bin/python scripts/roadmap_layout_benchmark.py",
@@ -65,7 +65,7 @@
     "selectionTargetStableKey": "fixture.roadmap.005",
     "selectionWindow": "trusted activation timestamp for the declared target through data-roadmap-detail-settled=<node-id>; run alternating keyboard and pointer samples",
     "longTaskWindow": "PerformanceObserver longtask entries whose startTime falls within the timed navigation or selection window; report count and total duration separately for each window",
-    "reactCommitWindow": "a production-safe test probe counts Roadmap subtree commits after declared target activation and stops at detail-settled; the probe is enabled only by the measurement runner",
+    "reactCommitWindow": "production-safe probes count Roadmap page renders and custom journey-node renders after declared target activation and stop at detail-settled; all representative nodes remain mounted in measurement-only geometry mode so the runner gates both values and parent renders cannot hide whole-canvas React Flow descendant churn",
     "resultSchema": {
       "required": [
         "schemaVersion",
@@ -88,7 +88,8 @@
         "navigationLongTaskTotalMs",
         "selectionLongTaskCount",
         "selectionLongTaskTotalMs",
-        "reactCommitsPerSelection"
+        "reactCommitsPerSelection",
+        "journeyNodeRendersPerSelection"
       ],
       "percentileMethod": "nearest-rank: sorted[ceil(0.95 * sampleCount) - 1]"
     },
@@ -139,6 +140,14 @@
       "stress250": { "medianMax": 8, "p95Max": 14 },
       "baselineRegressionMaxPercent": 20
     },
+    "journeyNodeRendersPerSelection": {
+      "fixtureSize": 100,
+      "medianMax": 10,
+      "p95Max": 16,
+      "stress250": { "medianMax": 12, "p95Max": 20 },
+      "baselineRegressionMaxPercent": 20,
+      "notes": "Complementary descendant-render gate added before the first compliant Checkpoint 3 baseline; its ceiling permits the seven-node target/prerequisite closure to mount while preventing whole-canvas churn."
+    },
     "compressedRoadmapRouteKiB": {
       "absoluteMax": 220,
       "phase2RegressionMaxPercent": 20,
@@ -159,6 +168,49 @@
     "combinedGzipBytes": 189938,
     "phase2CombinedGzipBytes": 189305,
     "phase2RegressionPercent": 0.33
+  },
+  "checkpoint3FirstCompliantObservation": {
+    "capturedFromRef": "9f69398150741a09cc602bae5804cb0d10404ee1 plus the uncommitted Checkpoint 3 worktree",
+    "productionBuildHash": "6ca1cf1ec34bc7614c088f9f05b2e02d41639cffa3be2254a35f9b07482b103c",
+    "browser": "Google Chrome 153.0.8010.52",
+    "sampling": { "warmups": 5, "repeats": 30, "cacheModes": ["cold", "warm"] },
+    "measurementMode": "Production Map with measurement-only all-node geometry; Fit all and an untimed viewport pan that clears the fixed navigation complete before timing while the full representative canvas remains mounted; trusted click/keydown timestamp through settled detail; all journey-node renders are counted.",
+    "fixture100": {
+      "coldNavigationMedianMs": 1073.3,
+      "coldNavigationP95Ms": 1188.2,
+      "warmNavigationMedianMs": 822.1,
+      "warmNavigationP95Ms": 827.2,
+      "selectionMedianMaxMs": 60.3,
+      "selectionP95MaxMs": 105.9,
+      "reactCommitsMedianMax": 2,
+      "reactCommitsP95Max": 2,
+      "journeyNodeRendersMedianMax": 7,
+      "journeyNodeRendersP95Max": 7
+    },
+    "fixture250": {
+      "coldNavigationMedianMs": 2173.4,
+      "coldNavigationP95Ms": 2262.4,
+      "warmNavigationMedianMs": 1397.3,
+      "warmNavigationP95Ms": 2014.8,
+      "selectionMedianMaxMs": 88.7,
+      "selectionP95MaxMs": 130.2,
+      "reactCommitsMedianMax": 2,
+      "reactCommitsP95Max": 2,
+      "journeyNodeRendersMedianMax": 7,
+      "journeyNodeRendersP95Max": 7
+    },
+    "bundleCombinedGzipBytes": 202442,
+    "phase2BundleRegressionPercent": 6.94,
+    "budgetVerdicts": {
+      "navigation": true,
+      "selection": true,
+      "longTasks": true,
+      "reactCommits": true,
+      "journeyNodeRenders": true,
+      "pureLayout": true,
+      "bundle": true
+    },
+    "status": "First compliant Checkpoint 3 full-canvas observation; raw audited runs are retained for this checkpoint session at /tmp/lcc-roadmap-v3-100-final-all-nodes.json and /tmp/lcc-roadmap-v3-250-final-all-nodes.json."
   },
   "reviewRules": {
     "absoluteAndRelativeBudgetsBothApply": true,

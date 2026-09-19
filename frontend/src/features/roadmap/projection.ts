@@ -30,6 +30,7 @@ export type RoadmapProjectionNode = {
   semanticDefinitionId: string
   stableKey: string
   title: string
+  description?: string | null
   profileDomain: { id: string; title: string; orderIndex: number } | null
   profileTarget: RoadmapProfileTarget | null
   profileTargets?: RoadmapProfileTarget[]
@@ -40,6 +41,9 @@ export type RoadmapProjectionNode = {
       confidence: string
       freshness: string
       reviewDue: boolean | null
+      levelId?: string | null
+      levelKey?: string | null
+      levelTitle?: string | null
     }[]
   }
   canonicalPosition?: { x: number; y: number }
@@ -52,6 +56,34 @@ export type RoadmapProjectionNode = {
   layoutLane?: { id: string; title: string; orderIndex: number }
   layoutColumn?: number
   layoutRow?: number
+}
+
+export type RoadmapProjectionEdge = {
+  id: string
+  edgeType: 'prerequisite' | 'recommended_before' | 'supports' | 'specialization' | 'related'
+  source: string
+  target: string
+  visibleByDefault: boolean
+  eligibilityAuthority: boolean
+  satisfaction: {
+    aggregate_state: string
+    unknown_reasons: string[]
+    criterion_states?: { criterionDefinitionId: string; state: string }[]
+  }
+}
+
+export type RoadmapProjection = {
+  configured: boolean
+  guidance?: string
+  authority: string
+  scopeKey?: string
+  projectionPolicyVersion?: string
+  layoutPolicyVersion?: string
+  outputHash?: string
+  relationshipVisibility?: Record<string, boolean>
+  nodes?: RoadmapProjectionNode[]
+  edges?: RoadmapProjectionEdge[]
+  legacyPhaseAuthority?: boolean
 }
 
 export type CompatibleRoadmapProjectionNode = RoadmapProjectionNode & {

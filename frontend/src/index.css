@@ -174,11 +174,44 @@ input[type='number']::-webkit-outer-spin-button {
   .focus-link {
     @apply rounded-sm underline-offset-4 hover:underline;
   }
+
+  .roadmap-node {
+    @apply h-[140px] w-[240px] overflow-hidden rounded-2xl border-2 border-ink/15 bg-white shadow-md transition-[border-color,box-shadow,transform];
+  }
+
+  .roadmap-node:hover {
+    @apply border-moss/60 shadow-lg;
+  }
+
+  .roadmap-node-selected {
+    @apply border-moss shadow-[0_0_0_4px_rgba(50,102,83,0.16)];
+  }
+
+  .roadmap-node-revealed {
+    @apply border-status-info/60;
+  }
+
+  [data-roadmap-ready] .text-ink\/45,
+  [data-roadmap-ready] .text-ink\/50,
+  [data-roadmap-ready] .text-ink\/55,
+  [data-roadmap-ready] .text-ink\/60,
+  [data-roadmap-ready] .text-ink\/65,
+  [role='dialog'] .text-ink\/45,
+  [role='dialog'] .text-ink\/50,
+  [role='dialog'] .text-ink\/55,
+  [role='dialog'] .text-ink\/60,
+  [role='dialog'] .text-ink\/65 {
+    color: #59615e !important;
+  }
+
+  [role='dialog'][aria-label^='Set position'] [class~='grid-cols-2'] {
+    margin-bottom: 4rem;
+  }
 }
 
 @media (forced-colors: active) {
   :focus-visible { outline: 3px solid CanvasText; }
-  .surface, .status-badge, .notice { border-color: CanvasText; }
+  .surface, .status-badge, .notice, .roadmap-node { border-color: CanvasText; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -189,5 +222,12 @@ input[type='number']::-webkit-outer-spin-button {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+}
+
+@media (max-height: 480px) {
+  [role='dialog'][aria-label^='Set position'] .sticky.bottom-0 {
+    position: static;
+    margin-top: 2rem;
   }
 }

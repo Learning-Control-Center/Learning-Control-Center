@@ -694,6 +694,7 @@ def _seed_roadmap_scale(client: PublicApiClient, run: FixtureRun, size: int) -> 
         item for item in scales if item["stableKey"] == "technical" and item["version"] == "v1"
     )
     familiar = next(item for item in technical["levels"] if item["stableKey"] == "familiar")
+    independent = next(item for item in technical["levels"] if item["stableKey"] == "independent")
     cefr = next(item for item in scales if item["stableKey"] == "cefr" and item["version"] == "v1")
     cefr_b1 = next(item for item in cefr["levels"] if item["stableKey"] == "b1")
     speaking = next(item for item in cefr["dimensions"] if item["stableKey"] == "speaking")
@@ -701,6 +702,8 @@ def _seed_roadmap_scale(client: PublicApiClient, run: FixtureRun, size: int) -> 
     dimension_index = foundation_count + 1
     competency_ids: list[str] = []
     definition_ids: list[str] = []
+    criterion_ids: list[str] = []
+    criterion_identity_ids: list[str] = []
     prerequisite_requirements: list[JsonObject] = []
     for index in range(size):
         stable_key = f"fixture.roadmap.{index:03d}"
@@ -770,6 +773,8 @@ def _seed_roadmap_scale(client: PublicApiClient, run: FixtureRun, size: int) -> 
         )
         competency_ids.append(competency_id)
         definition_ids.append(str(definition["id"]))
+        criterion_ids.append(str(definition["criteria"][0]["id"]))
+        criterion_identity_ids.append(str(definition["criteria"][0]["identityId"]))
         prerequisite_requirements.append(
             {
                 "kind": "capability_at_least",
@@ -980,6 +985,288 @@ def _seed_roadmap_scale(client: PublicApiClient, run: FixtureRun, size: int) -> 
         },
         expected=201,
     )
+
+    journey_curriculum = client.request(
+        "POST",
+        "/api/v2/curricula",
+        {"stable_key": f"roadmap-journey-{size}", "creation_source": "roadmap_fixture"},
+        expected=201,
+    )
+    journey_version = client.request(
+        "POST",
+        f"/api/v2/curricula/{journey_curriculum['id']}/versions",
+        {
+            "title": f"Roadmap journey actions {size}",
+            "description": "Representative available work for the Roadmap Today overlay.",
+            "effective_at": effective_at,
+            "creation_source": "roadmap_fixture",
+            "objectives": [
+                {
+                    "stable_key": "journey",
+                    "title": "Journey",
+                    "description": "Continue the target path.",
+                    "order_index": 0,
+                }
+            ],
+            "units": [
+                {
+                    "stable_key": "journey-practice",
+                    "objective_stable_key": "journey",
+                    "kind": "practice_task",
+                    "title": "Practice the next Roadmap capability",
+                    "description": "Representative target-linked learning action.",
+                    "action": {
+                        "kind": "practice_task",
+                        "instructions": "Practice the capability with a small deliverable.",
+                    },
+                    "status": "active",
+                    "provenance": "roadmap_fixture",
+                    "order_index": 0,
+                    "minimum_useful_duration_ms": 900000,
+                    "preferred_duration_ms": 1800000,
+                    "maximum_useful_duration_ms": 2700000,
+                    "targets": [
+                        {
+                            "semantic_definition_id": definition_ids[foundation_count],
+                            "criterion_definition_id": criterion_ids[foundation_count],
+                            "scale_version_id": technical["id"],
+                            "dimension_id": None,
+                            "intended_learning_outcome": "Advance one target capability.",
+                            "minimum_level_id": familiar["id"],
+                            "maximum_level_id": independent["id"],
+                            "supports_unassessed": True,
+                            "role": "primary",
+                            "order_index": 0,
+                        }
+                    ],
+                    "requirements": [],
+                    "evidence_opportunities": [],
+                }
+            ],
+            "assessment_rubrics": [],
+        },
+        expected=201,
+    )
+    client.request(
+        "POST",
+        f"/api/v2/curricula/{journey_curriculum['id']}/versions/{journey_version['id']}/activate",
+        {
+            "reason": "Roadmap fixture action",
+            "source": "roadmap_fixture",
+            "idempotency_key": f"roadmap-fixture-curriculum-{size}",
+        },
+    )
+    evidence_source_index = foundation_count - 1
+    evidence_project = client.request(
+        "POST",
+        "/api/v2/projects",
+        {"stable_key": f"roadmap-evidence-{size}", "creation_source": "roadmap_fixture"},
+        expected=201,
+    )
+    evidence_project_version = client.request(
+        "POST",
+        f"/api/v2/projects/{evidence_project['id']}/versions",
+        {
+            "title": "Roadmap prerequisite evidence",
+            "description": (
+                "A completed fixture project that establishes a known current capability."
+            ),
+            "effective_at": effective_at,
+            "creation_source": "roadmap_fixture",
+            "goals": [
+                {
+                    "stable_key": "prove",
+                    "title": "Prove the prerequisite",
+                    "description": "Demonstrate the shared foundation.",
+                    "order_index": 0,
+                }
+            ],
+            "milestones": [
+                {
+                    "stable_key": "evidence",
+                    "title": "Evidence",
+                    "description": "Capture an assessed artifact.",
+                    "order_index": 0,
+                }
+            ],
+            "tasks": [
+                {
+                    "stable_key": "demonstrate",
+                    "title": "Demonstrate the shared foundation",
+                    "description": "Produce an independently assessed artifact.",
+                    "instructions": "Complete and assess the representative artifact.",
+                    "milestone_stable_key": "evidence",
+                    "status": "active",
+                    "order_index": 0,
+                    "minimum_useful_duration_ms": 300000,
+                    "preferred_duration_ms": 600000,
+                    "maximum_useful_duration_ms": 900000,
+                }
+            ],
+            "criteria": [
+                {
+                    "stable_key": "artifact-passes",
+                    "title": "Artifact passes",
+                    "description": "The representative artifact satisfies the fixture rubric.",
+                    "milestone_stable_key": "evidence",
+                    "evaluation_policy_version": "project-criterion-policy/v1",
+                    "order_index": 0,
+                }
+            ],
+            "targets": [
+                {
+                    "semantic_definition_id": definition_ids[evidence_source_index],
+                    "criterion_definition_id": criterion_ids[evidence_source_index],
+                    "scale_version_id": technical["id"],
+                    "dimension_id": None,
+                    "level_id": independent["id"],
+                    "intended_outcome": "Practice the shared foundation.",
+                    "role": "primary",
+                    "task_stable_key": "demonstrate",
+                    "order_index": 0,
+                },
+                {
+                    "semantic_definition_id": definition_ids[evidence_source_index],
+                    "criterion_definition_id": criterion_ids[evidence_source_index],
+                    "scale_version_id": technical["id"],
+                    "dimension_id": None,
+                    "level_id": independent["id"],
+                    "intended_outcome": "Demonstrate the shared foundation.",
+                    "role": "primary",
+                    "project_criterion_stable_key": "artifact-passes",
+                    "order_index": 1,
+                },
+            ],
+            "requirements": [],
+            "dependencies": [],
+            "evidence_opportunities": [
+                {
+                    "stable_key": "assessed-artifact",
+                    "task_stable_key": "demonstrate",
+                    "project_criterion_stable_key": "artifact-passes",
+                    "evidence_kind": "project",
+                    "intended_strengths": ["strong"],
+                    "intended_independence_modes": ["independent"],
+                    "requires_artifact": True,
+                    "order_index": 0,
+                }
+            ],
+        },
+        expected=201,
+    )
+    client.request(
+        "POST",
+        f"/api/v2/projects/{evidence_project['id']}/versions/{evidence_project_version['id']}/activate",
+        {
+            "reason": "Roadmap fixture evidence",
+            "source": "roadmap_fixture",
+            "idempotency_key": f"roadmap-fixture-project-{size}",
+        },
+    )
+    client.request(
+        "POST",
+        f"/api/v2/projects/{evidence_project['id']}/events",
+        {
+            "event_type": "project_lifecycle",
+            "project_lifecycle_state": "active",
+            "source": "roadmap_fixture",
+            "idempotency_key": f"roadmap-fixture-project-active-{size}",
+        },
+        expected=201,
+    )
+    evidence_task = next(
+        item for item in evidence_project_version["tasks"] if item["stableKey"] == "demonstrate"
+    )
+    evidence_opportunity = evidence_project_version["evidenceOpportunities"][0]
+    evidence_activity = client.request(
+        "POST",
+        "/api/v2/activities",
+        {
+            "title": "Completed Roadmap prerequisite",
+            "category_stable_key": "project",
+            "occurred_at": effective_at,
+            "outcome_classification": "completed",
+        },
+        expected=201,
+    )
+    evidence_activity_link = client.request(
+        "POST",
+        "/api/v2/projects/activity-links",
+        {
+            "activity_id": evidence_activity["id"],
+            "task_definition_id": evidence_task["id"],
+            "provenance": "user_confirmed",
+            "idempotency_key": f"roadmap-fixture-activity-link-{size}",
+        },
+        expected=201,
+    )
+    evidence_session_started_at = str(evidence_activity_link["createdAt"])
+    evidence_occurred_at = (
+        (
+            datetime.fromisoformat(evidence_session_started_at.replace("Z", "+00:00"))
+            + timedelta(milliseconds=2)
+        )
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+    client.request(
+        "POST",
+        "/api/v2/sessions/manual",
+        {
+            "activity_id": evidence_activity["id"],
+            "assistance_mode": "none",
+            "started_at": evidence_session_started_at,
+            "duration_ms": 1,
+            "outcome": "completed",
+            "contributions": [
+                {
+                    "target_type": "competency",
+                    "competency_identity_id": competency_ids[evidence_source_index],
+                    "relevance": "primary",
+                },
+                {
+                    "target_type": "project",
+                    "project_id": evidence_project["id"],
+                    "project_version_id": evidence_project_version["id"],
+                    "project_task_definition_id": evidence_task["id"],
+                    "relevance": "primary",
+                },
+            ],
+        },
+        expected=201,
+    )
+    client.request(
+        "POST",
+        f"/api/v2/projects/{evidence_project['id']}/evidence",
+        {
+            "activity_project_task_link_id": evidence_activity_link["id"],
+            "opportunity_id": evidence_opportunity["id"],
+            "title": "Passing Roadmap prerequisite artifact",
+            "description": "Representative independent project evidence.",
+            "occurred_at": evidence_occurred_at,
+            "artifact_hash": "a" * 64,
+            "rubric_result": "passed",
+            "idempotency_key": f"roadmap-fixture-project-evidence-{size}",
+        },
+        expected=201,
+    )
+    analysis = client.request(
+        "POST",
+        "/api/v2/analysis/runs",
+        {"idempotency_key": f"roadmap-fixture-analysis-{size}", "purpose": "learning_control"},
+        expected=201,
+    )
+    client.request(
+        "POST",
+        "/api/v2/today/generations",
+        {
+            "idempotency_key": f"roadmap-fixture-today-{size}",
+            "analysis_snapshot_id": analysis["id"],
+            "available_time_ms": 3600000,
+            "context_costs": [],
+        },
+        expected=201,
+    )
     projection = client.request("POST", "/api/v2/roadmap-projection/rebuild")
     if not isinstance(projection, dict):
         raise RuntimeError("Roadmap fixture projection was not an object.")
@@ -999,6 +1286,10 @@ def _seed_roadmap_scale(client: PublicApiClient, run: FixtureRun, size: int) -> 
         raise RuntimeError("Roadmap fixture lost cross-domain dimension targets.")
     if sum(not item.get("isTargeted", False) for item in projection["nodes"]) != foundation_count:
         raise RuntimeError("Roadmap fixture lost its shared foundation entry structure.")
+    if not any(item.get("isToday", False) for item in projection["nodes"]):
+        raise RuntimeError("Roadmap fixture did not expose a Today journey marker.")
+    if not any(item.get("capability", {}).get("scopes") for item in projection["nodes"]):
+        raise RuntimeError("Roadmap fixture did not expose a known current capability.")
     repeated = client.request("POST", "/api/v2/roadmap-projection/rebuild")
     if not isinstance(repeated, dict):
         raise RuntimeError("Repeated Roadmap projection was not an object.")
@@ -1174,6 +1465,55 @@ def run_roadmap_fixture(size: int, timezone: str, clock_at: str | None) -> JsonO
             print(f"Fixture failure artifacts retained at {run.root}", file=sys.stderr)
 
 
+def run_roadmap_playwright(size: int, timezone: str, clock_at: str | None) -> JsonObject:
+    if size not in {25, 100, 250}:
+        raise ValueError("Roadmap fixture size must be 25, 100, or 250.")
+    scenario = cast(ScenarioName, f"roadmap-{size}")
+    run = FixtureRun(scenario=scenario, timezone=timezone, clock_at=clock_at)
+    success = False
+    try:
+        client = run.start()
+        projection = _seed_roadmap_scale(client, run, size)
+        authority = client.request("GET", "/api/v2/authority")
+        authority = _verify_authority_read_parity(client, authority, "v2")
+        metadata_path = run.write_metadata(client, authority, "v2")
+        assert run.root is not None
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "LCC_PRODUCT_BASE_URL": run.frontend_url,
+                "LCC_PRODUCT_SCENARIO": scenario,
+                "LCC_PRODUCT_ARTIFACT_DIR": str(run.root / "artifacts" / "playwright"),
+            }
+        )
+        with (run.root / "playwright.log").open("wb") as playwright_log:
+            result = subprocess.run(
+                ["npm", "run", "test:e2e:product", "--", "--grep", "Roadmap"],
+                cwd=FRONTEND_ROOT,
+                env=environment,
+                stdout=playwright_log,
+                stderr=subprocess.STDOUT,
+                check=False,
+            )
+        if result.returncode != 0:
+            raise RuntimeError(f"Roadmap Playwright failed; see {run.root / 'playwright.log'}.")
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["roadmapProjection"] = {
+            "size": size,
+            "scopeKey": projection["scopeKey"],
+            "layoutPolicyVersion": projection["layoutPolicyVersion"],
+            "outputHash": projection["outputHash"],
+            "nodeCount": len(projection["nodes"]),
+            "edgeCount": len(projection["edges"]),
+        }
+        success = True
+        return metadata
+    finally:
+        run.finish(success=success)
+        if not success:
+            print(f"Fixture failure artifacts retained at {run.root}", file=sys.stderr)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1197,6 +1537,13 @@ def main() -> int:
     roadmap.add_argument("--size", type=int, choices=(25, 100, 250), required=True)
     roadmap.add_argument("--timezone", default=DEFAULT_TIMEZONE)
     roadmap.add_argument("--clock", default=DEFAULT_CLOCK)
+    roadmap_browser = subparsers.add_parser(
+        "roadmap-playwright",
+        help="Run Roadmap journey browser checks on a disposable scale fixture.",
+    )
+    roadmap_browser.add_argument("--size", type=int, choices=(25, 100, 250), default=25)
+    roadmap_browser.add_argument("--timezone", default=DEFAULT_TIMEZONE)
+    roadmap_browser.add_argument("--clock", default=DEFAULT_CLOCK)
     arguments = parser.parse_args()
     if arguments.command == "smoke":
         result = run_smoke(arguments.scenario, arguments.timezone, arguments.clock)
@@ -1216,6 +1563,20 @@ def main() -> int:
                     "productionBuildHash": result["productionBuildHash"],
                     "repositoryRevision": result["repositoryRevision"],
                     "expectedAuthority": result["expectedAuthority"],
+                    "roadmapProjection": result["roadmapProjection"],
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+    if arguments.command == "roadmap-playwright":
+        result = run_roadmap_playwright(arguments.size, arguments.timezone, arguments.clock)
+        print(
+            json.dumps(
+                {
+                    "scenarioId": result["scenarioId"],
+                    "fixtureHash": result["fixtureHash"],
+                    "productionBuildHash": result["productionBuildHash"],
                     "roadmapProjection": result["roadmapProjection"],
                 },
                 sort_keys=True,

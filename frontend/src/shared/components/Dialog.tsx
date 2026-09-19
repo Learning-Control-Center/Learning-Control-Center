@@ -1,4 +1,5 @@
 import { useEffect, useRef, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 
 const focusableSelector = [
   'a[href]',
@@ -27,7 +28,9 @@ export function Dialog({
   const dialogRef = useRef<HTMLDivElement>(null)
   const invokerRef = useRef<HTMLElement | null>(null)
   const restoreFocusRef = useRef(restoreFocus)
+  const dismissRef = useRef(onDismiss)
   restoreFocusRef.current = restoreFocus
+  dismissRef.current = onDismiss
 
   useEffect(() => {
     if (!open) return
@@ -44,7 +47,7 @@ export function Dialog({
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.preventDefault()
-        onDismiss()
+        dismissRef.current()
         return
       }
       if (event.key !== 'Tab' || !dialogRef.current) return
@@ -76,10 +79,10 @@ export function Dialog({
         else document.getElementById('main-content')?.focus({ preventScroll: true })
       }
     }
-  }, [open, onDismiss])
+  }, [open])
 
   if (!open) return null
-  return (
+  return createPortal(
     <div className="fixed inset-0 z-50" role="presentation">
       <div className="absolute inset-0 bg-ink/45" onMouseDown={onDismiss} aria-hidden="true" />
       <div
@@ -92,6 +95,7 @@ export function Dialog({
       >
         {children}
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }

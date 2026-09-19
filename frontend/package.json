@@ -10,7 +10,8 @@
     "lint": "eslint .",
     "test": "vitest --config vite.config.ts run",
     "test:e2e:production": "playwright test",
-    "test:e2e:product": "playwright test --config playwright.product.config.ts"
+    "test:e2e:product": "playwright test --config playwright.product.config.ts",
+    "measure:roadmap": "../.venv/bin/python ../scripts/roadmap_measure.py"
   },
   "dependencies": {
     "@xyflow/react": "^12.4.4",

@@ -34,6 +34,19 @@ function RemovedInvokerHarness() {
   )
 }
 
+function RerenderingDialogHarness() {
+  const [count, setCount] = useState(0)
+  return (
+    <>
+      <div id="application-background" />
+      <Dialog open label="Rerendering" onDismiss={() => undefined}>
+        <button>First action</button>
+        <button onClick={() => setCount((value) => value + 1)}>Update content {count}</button>
+      </Dialog>
+    </>
+  )
+}
+
 describe('focus-managed dialog', () => {
   it('focuses the first control, makes the background inert, traps Tab, and restores the invoker on Escape', async () => {
     const user = userEvent.setup()
@@ -77,5 +90,15 @@ describe('focus-managed dialog', () => {
     await user.click(screen.getByRole('button', { name: 'Remove opener' }))
     await user.click(screen.getByRole('button', { name: 'Close transient dialog' }))
     await waitFor(() => expect(document.getElementById('main-content')).toHaveFocus())
+  })
+
+  it('does not restart focus and inert management when an open dialog rerenders', async () => {
+    const user = userEvent.setup()
+    render(<RerenderingDialogHarness />)
+    const update = await screen.findByRole('button', { name: 'Update content 0' })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'First action' })).toHaveFocus())
+    await user.click(update)
+    expect(screen.getByRole('button', { name: 'Update content 1' })).toHaveFocus()
+    expect(document.getElementById('application-background')).toHaveAttribute('inert')
   })
 })

@@ -424,6 +424,7 @@ def test_roadmap_performance_protocol_is_pinned_and_machine_readable() -> None:
         "selectionToSettledDetailMs",
         "longTasks",
         "reactCommitsPerSelection",
+        "journeyNodeRendersPerSelection",
         "compressedRoadmapRouteKiB",
     }
 
