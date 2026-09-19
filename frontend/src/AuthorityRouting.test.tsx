@@ -1,4 +1,5 @@
 import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -15,7 +16,7 @@ function json(value: unknown, status = 200) {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('learning-control authority routing', () => {
-  it('makes Today V2 the default after activation and keeps labeled legacy history links', async () => {
+  it('makes Today V2 the default after activation and keeps labeled legacy history discoverable through Insights', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
       if (url.endsWith('/api/v1/auth/session')) {
@@ -51,8 +52,12 @@ describe('learning-control authority routing', () => {
     )
 
     expect(await screen.findByRole('heading', { name: 'Today V2' })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: 'Legacy Today history' })).toHaveAttribute('href', '/legacy-today')
-    expect(screen.getByRole('link', { name: 'Legacy Roadmap history' })).toHaveAttribute('href', '/legacy-roadmap')
+    await userEvent.click(screen.getByRole('link', { name: 'Insights' }))
+    expect(await screen.findByRole('heading', { name: 'Insights' })).toBeInTheDocument()
+    expect(screen.getAllByRole('link', { name: 'Legacy V1 history' })).not.toHaveLength(0)
+    for (const link of screen.getAllByRole('link', { name: 'Legacy V1 history' })) {
+      expect(link).toHaveAttribute('href', '/insights/legacy')
+    }
     expect(screen.getByText('Center / V2')).toBeInTheDocument()
     await waitFor(() => expect(fetchMock).not.toHaveBeenCalledWith('/api/v1/recommendations/today', expect.anything()))
   })

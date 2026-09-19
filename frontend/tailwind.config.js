@@ -15,6 +15,16 @@ export default {
         fern: '#74a88c',
         copper: '#c47745',
         fog: '#dfe5dd',
+        status: {
+          neutral: '#55635d',
+          info: '#245b78',
+          success: '#236143',
+          warning: '#8a4b18',
+          critical: '#9b2f35',
+          today: '#5e3f91',
+          unknown: '#695b2f',
+          legacy: '#5f5868',
+        },
       },
       boxShadow: {
         soft: '0 18px 50px rgba(20, 33, 28, 0.10)',

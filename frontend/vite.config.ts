@@ -46,7 +46,12 @@ export default defineConfig({
   plugins: [react(), formatGuidePlugin()],
   server: {
     proxy: {
-      '/api': 'http://127.0.0.1:8000',
+      '/api': process.env.LCC_VITE_BACKEND_URL ?? 'http://127.0.0.1:8000',
+    },
+  },
+  preview: {
+    proxy: {
+      '/api': process.env.LCC_VITE_BACKEND_URL ?? 'http://127.0.0.1:8000',
     },
   },
   test: {

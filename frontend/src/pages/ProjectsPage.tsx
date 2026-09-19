@@ -217,7 +217,7 @@ export function ProjectsPage() {
                 <h2 className="mt-2 font-display text-xl font-semibold">{activeVersion?.title ?? 'No active version'}</h2>
                 <p className="mt-1 text-sm text-ink/60">{activeVersion?.description || 'No description.'}</p>
               </div>
-              <Link className="rounded-lg border border-ink/15 px-3 py-2 text-xs" to="/sessions">
+              <Link className="rounded-lg border border-ink/15 px-3 py-2 text-xs" to="/activity">
                 Log actual work
               </Link>
             </div>

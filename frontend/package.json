@@ -5,10 +5,12 @@
   "type": "module",
   "scripts": {
     "dev": "vite --config vite.config.ts --host 127.0.0.1",
+    "preview": "vite --config vite.config.ts preview --host 127.0.0.1",
     "build": "tsc -b && vite --config vite.config.ts build",
     "lint": "eslint .",
     "test": "vitest --config vite.config.ts run",
-    "test:e2e:production": "playwright test"
+    "test:e2e:production": "playwright test",
+    "test:e2e:product": "playwright test --config playwright.product.config.ts"
   },
   "dependencies": {
     "@xyflow/react": "^12.4.4",
@@ -20,6 +22,7 @@
     "recharts": "^2.15.1"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.13.0",
     "@eslint/js": "^9.19.0",
     "@playwright/test": "^1.63.0",
     "@testing-library/jest-dom": "^6.6.3",

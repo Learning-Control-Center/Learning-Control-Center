@@ -194,7 +194,7 @@ export function RoadmapV2Page() {
         </div>
       </header>
       {error ? <ErrorState message={error} retry={() => void load()} /> : null}
-      <div className="panel flex flex-wrap items-center justify-between gap-3 p-4">
+      <div className="surface flex flex-wrap items-center justify-between gap-3 p-4">
         <label className="flex min-h-11 items-center gap-3 text-sm font-medium text-ink">
           <input
             type="checkbox"
@@ -209,7 +209,7 @@ export function RoadmapV2Page() {
       </div>
       <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_22rem]">
         <div className="space-y-4">
-          <div className="panel h-[38rem] overflow-hidden" aria-label="Roadmap Projection graph">
+          <div className="surface h-[38rem] overflow-hidden" aria-label="Roadmap Projection graph">
             <ReactFlow
               key={`${projection.outputHash ?? projection.scopeKey}:${showPrerequisites}:${[...collapsed].sort().join(',')}`}
               defaultNodes={flowNodes}
@@ -225,7 +225,7 @@ export function RoadmapV2Page() {
           {groups.map((group) => {
             const isCollapsed = collapsed.has(group.id)
             return (
-              <article key={group.id} className="panel overflow-hidden">
+              <article key={group.id} className="surface overflow-hidden">
                 <button
                   className="flex min-h-12 w-full items-center justify-between border-b border-ink/10 px-5 py-3 text-left"
                   onClick={() => setCollapsed((current) => {
@@ -248,7 +248,7 @@ export function RoadmapV2Page() {
             )
           })}
         </div>
-        <aside className="panel h-fit p-5">
+        <aside className="surface h-fit p-5">
           <div className="mb-4 flex items-center gap-2">
             <GitBranch className="size-4 text-fern" aria-hidden="true" />
             <h2 className="font-display font-semibold">Relationships</h2>

@@ -198,7 +198,7 @@ export function RoadmapPage() {
             detail="Import a roadmap package to establish phases, tracks, competencies, and stable identities."
             className="lg:min-h-72 2xl:min-h-80"
             action={
-              <Link className="button-primary mt-2" to="/transfer">
+              <Link className="button-primary mt-2" to="/data-transfer">
                 <Upload className="size-4" aria-hidden="true" />
                 Import roadmap
               </Link>

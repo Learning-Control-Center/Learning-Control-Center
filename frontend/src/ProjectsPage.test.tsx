@@ -30,7 +30,7 @@ describe('Projects V2 thin workflow', () => {
     expect(await screen.findByRole('heading', { name: 'Projects' })).toBeInTheDocument()
     expect(await screen.findByText('Build service')).toBeInTheDocument()
     expect(await screen.findByText('demonstrated · 1 Evidence records')).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: 'Log actual work' })).toHaveAttribute('href', '/sessions')
+    expect(screen.getByRole('link', { name: 'Log actual work' })).toHaveAttribute('href', '/activity')
 
     await user.click(screen.getByRole('button', { name: 'Start task' }))
     await waitFor(() => expect(fetch).toHaveBeenCalledWith(

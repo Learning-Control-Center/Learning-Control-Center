@@ -53,7 +53,7 @@ describe('critical learning workflows', () => {
       <MemoryRouter initialEntries={['/']}>
         <Routes>
           <Route path="/" element={<TodayPage />} />
-          <Route path="/sessions" element={<p>Session opened</p>} />
+          <Route path="/activity" element={<p>Session opened</p>} />
         </Routes>
       </MemoryRouter>,
     )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from functools import lru_cache
 from ipaddress import ip_network
 from pathlib import Path
@@ -29,6 +30,8 @@ class Settings(BaseSettings):
     environment: Literal["development", "test", "production"] = "development"
     database_url: str = "sqlite:///./data/lcc.db"
     app_timezone: str = "UTC"
+    fixture_clock_at: datetime | None = None
+    fixture_clock_step_ms: int = Field(default=0, ge=0, le=60_000)
     bootstrap_token: str | None = None
     security_secret: str | None = None
     public_origin: str = "http://localhost:5173"
@@ -51,6 +54,15 @@ class Settings(BaseSettings):
         ZoneInfo(value)
         return value
 
+    @field_validator("fixture_clock_at")
+    @classmethod
+    def validate_fixture_clock_at(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("fixture_clock_at must include a timezone offset")
+        return value.astimezone(UTC)
+
     @field_validator("trusted_proxy_cidrs")
     @classmethod
     def validate_proxy_cidrs(cls, values: list[str]) -> list[str]:
@@ -63,7 +75,11 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_static_production_security(self) -> Settings:
         if self.environment != "production":
+            if self.fixture_clock_step_ms and self.fixture_clock_at is None:
+                raise ValueError("fixture_clock_step_ms requires fixture_clock_at.")
             return self
+        if self.fixture_clock_at is not None or self.fixture_clock_step_ms:
+            raise ValueError("Production cannot enable fixture_clock_at.")
         origin = urlparse(self.public_origin)
         if (
             origin.scheme != "https"

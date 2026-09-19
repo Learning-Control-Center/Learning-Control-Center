@@ -1,0 +1,810 @@
+#!/usr/bin/env python3
+"""Disposable full-stack product fixture harness for Phase 3 browser scenarios.
+
+This is intentionally separate from the serialized production TLS/security/recovery
+journey. Every invocation owns its processes, ports, logs, and SQLite database.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import http.cookiejar
+import json
+import os
+import re
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any, Literal
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+BACKEND_ROOT = REPOSITORY_ROOT / "backend"
+FRONTEND_ROOT = REPOSITORY_ROOT / "frontend"
+PYTHON = REPOSITORY_ROOT / ".venv" / "bin" / "python"
+DEFAULT_CLOCK = "2026-09-19T10:00:00Z"
+DEFAULT_TIMEZONE = "UTC"
+BOOTSTRAP_TOKEN = "fixture-bootstrap-token-with-enough-entropy-47"
+USERNAME = "fixture-learner"
+PASSWORD = "fixture-password-with-enough-entropy"
+
+JsonObject = dict[str, Any]
+ScenarioName = Literal["legacy-shell", "v2-shell"]
+UUID_PATTERN = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+    re.IGNORECASE,
+)
+INSTANT_PATTERN = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$"
+)
+SENSITIVE_FIXTURE_KEYS = {"password", "bootstrap_token", "csrf_token"}
+
+
+def _sanitize_fixture_value(value: Any, *, key: str | None = None) -> Any:
+    """Retain semantic fixture inputs while removing secrets and run-specific values."""
+
+    if key in SENSITIVE_FIXTURE_KEYS:
+        return "<redacted>"
+    if isinstance(value, dict):
+        return {
+            str(item_key): _sanitize_fixture_value(item_value, key=str(item_key))
+            for item_key, item_value in value.items()
+        }
+    if isinstance(value, list):
+        return [_sanitize_fixture_value(item) for item in value]
+    if isinstance(value, str):
+        normalized = UUID_PATTERN.sub("<id>", value)
+        return "<instant>" if INSTANT_PATTERN.fullmatch(normalized) else normalized
+    return value
+
+
+def _dynamic_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        return int(listener.getsockname()[1])
+
+
+def _parse_clock(value: str | None) -> str | None:
+    if value is None or value == "real":
+        return None
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("Fixture clock must include a timezone offset.")
+    return parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _fixture_hash(
+    scenario: ScenarioName,
+    timezone: str,
+    clock_at: str | None,
+    calls: list[dict[str, Any]],
+) -> str:
+    normalized_calls = [_sanitize_fixture_value(call) for call in calls]
+    payload = {
+        "scenario": scenario,
+        "timezone": timezone,
+        "clockAt": clock_at,
+        "publicContractCalls": normalized_calls,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _repository_revision() -> str:
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=REPOSITORY_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+def _production_build_hash() -> str:
+    digest = hashlib.sha256()
+    for path in sorted((FRONTEND_ROOT / "dist").rglob("*")):
+        if not path.is_file():
+            continue
+        digest.update(path.relative_to(FRONTEND_ROOT / "dist").as_posix().encode("utf-8"))
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def _wait_for_url(url: str, process: subprocess.Popen[bytes], timeout: float = 45.0) -> None:
+    deadline = time.monotonic() + timeout
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(
+                f"Process exited before {url} became ready (code {process.returncode})."
+            )
+        try:
+            with urllib.request.urlopen(url, timeout=1) as response:
+                if response.status < 500:
+                    return
+        except (OSError, urllib.error.URLError) as exc:
+            last_error = exc
+        time.sleep(0.1)
+    raise RuntimeError(f"Timed out waiting for {url}: {last_error}")
+
+
+class PublicApiClient:
+    """Small public-contract client shared by fixture scenarios and browser setup."""
+
+    def __init__(self, base_url: str) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.csrf_token = ""
+        self.calls: list[dict[str, Any]] = []
+        self._cookies = http.cookiejar.CookieJar()
+        self._opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(self._cookies)
+        )
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        payload: JsonObject | None = None,
+        *,
+        expected: int = 200,
+    ) -> Any:
+        body = None if payload is None else json.dumps(payload).encode("utf-8")
+        headers = {"Content-Type": "application/json"} if body is not None else {}
+        if method not in {"GET", "HEAD", "OPTIONS"} and self.csrf_token:
+            headers["X-CSRF-Token"] = self.csrf_token
+        request = urllib.request.Request(
+            f"{self.base_url}{path}", data=body, headers=headers, method=method
+        )
+        try:
+            with self._opener.open(request, timeout=20) as response:
+                content = response.read()
+                status = response.status
+        except urllib.error.HTTPError as exc:
+            content = exc.read()
+            status = exc.code
+        parsed = json.loads(content) if content else None
+        call: dict[str, Any] = {"method": method, "path": path, "status": status}
+        if payload is not None:
+            call["payload"] = _sanitize_fixture_value(payload)
+        self.calls.append(call)
+        if status != expected:
+            raise RuntimeError(
+                f"{method} {path} returned {status}, expected {expected}: {parsed!r}"
+            )
+        return parsed
+
+    def bootstrap(self) -> JsonObject:
+        result = self.request(
+            "POST",
+            "/api/v1/auth/bootstrap",
+            {
+                "username": USERNAME,
+                "password": PASSWORD,
+                "bootstrap_token": BOOTSTRAP_TOKEN,
+            },
+            expected=201,
+        )
+        assert isinstance(result, dict)
+        self.csrf_token = str(result["csrf_token"])
+        return result
+
+    def login(self) -> JsonObject:
+        self._cookies.clear()
+        self.csrf_token = ""
+        result = self.request(
+            "POST",
+            "/api/v1/auth/login",
+            {"username": USERNAME, "password": PASSWORD},
+        )
+        assert isinstance(result, dict)
+        self.csrf_token = str(result["csrf_token"])
+        return result
+
+
+@dataclass
+class FixtureRun:
+    scenario: ScenarioName
+    timezone: str = DEFAULT_TIMEZONE
+    clock_at: str | None = DEFAULT_CLOCK
+    root: Path | None = None
+    backend_port: int = field(default_factory=_dynamic_port)
+    frontend_port: int = field(default_factory=_dynamic_port)
+    processes: list[subprocess.Popen[bytes]] = field(default_factory=list)
+    _logs: list[Any] = field(default_factory=list)
+    backend_process: subprocess.Popen[bytes] | None = None
+    frontend_process: subprocess.Popen[bytes] | None = None
+    declared_clock_at: str | None = field(init=False, default=None)
+
+    def __post_init__(self) -> None:
+        self.clock_at = _parse_clock(self.clock_at)
+        self.declared_clock_at = self.clock_at
+        if self.root is None:
+            self.root = Path(tempfile.mkdtemp(prefix=f"lcc-product-{self.scenario}-"))
+        else:
+            self.root.mkdir(mode=0o700, parents=True, exist_ok=False)
+        (self.root / "data").mkdir(mode=0o700)
+        (self.root / "backups").mkdir(mode=0o700)
+        (self.root / "artifacts").mkdir(mode=0o700)
+
+    @property
+    def backend_url(self) -> str:
+        return f"http://127.0.0.1:{self.backend_port}"
+
+    @property
+    def frontend_url(self) -> str:
+        return f"http://127.0.0.1:{self.frontend_port}"
+
+    @property
+    def database_path(self) -> Path:
+        assert self.root is not None
+        return self.root / "data" / "fixture.sqlite3"
+
+    def backend_environment(self) -> dict[str, str]:
+        assert self.root is not None
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "PYTHONPATH": str(BACKEND_ROOT),
+                "LCC_ENVIRONMENT": "test",
+                "LCC_DATABASE_URL": f"sqlite:///{self.database_path}",
+                "LCC_BACKUP_DIRECTORY": str(self.root / "backups"),
+                "LCC_BOOTSTRAP_TOKEN": BOOTSTRAP_TOKEN,
+                "LCC_SECURITY_SECRET": "fixture-process-security-key-with-enough-entropy",
+                "LCC_APP_TIMEZONE": self.timezone,
+                "LCC_PUBLIC_ORIGIN": self.frontend_url,
+                "LCC_ALLOWED_ORIGINS": json.dumps([self.frontend_url]),
+            }
+        )
+        if self.clock_at is not None:
+            environment["LCC_FIXTURE_CLOCK_AT"] = self.clock_at
+            environment["LCC_FIXTURE_CLOCK_STEP_MS"] = "10"
+        else:
+            environment.pop("LCC_FIXTURE_CLOCK_AT", None)
+            environment.pop("LCC_FIXTURE_CLOCK_STEP_MS", None)
+        return environment
+
+    def _start_backend(self) -> None:
+        assert self.root is not None
+        backend_log = (self.root / "backend.log").open("ab")
+        self._logs.append(backend_log)
+        backend = subprocess.Popen(
+            [
+                str(PYTHON),
+                "-m",
+                "uvicorn",
+                "app.main:app",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(self.backend_port),
+                "--workers",
+                "1",
+                "--no-proxy-headers",
+            ],
+            cwd=BACKEND_ROOT,
+            env=self.backend_environment(),
+            stdout=backend_log,
+            stderr=subprocess.STDOUT,
+        )
+        self.processes.append(backend)
+        self.backend_process = backend
+        _wait_for_url(f"{self.backend_url}/api/v1/health", backend)
+
+    def _start_frontend(self) -> None:
+        assert self.root is not None
+        build_log_path = self.root / "build.log"
+        with build_log_path.open("wb") as build_log:
+            build = subprocess.run(
+                ["npm", "run", "build"],
+                cwd=FRONTEND_ROOT,
+                env=os.environ.copy(),
+                stdout=build_log,
+                stderr=subprocess.STDOUT,
+                check=False,
+            )
+        if build.returncode != 0:
+            raise RuntimeError(f"Frontend production build failed; see {build_log_path}.")
+        frontend_log = (self.root / "frontend.log").open("ab")
+        self._logs.append(frontend_log)
+        frontend_environment = os.environ.copy()
+        frontend_environment["LCC_VITE_BACKEND_URL"] = self.backend_url
+        frontend = subprocess.Popen(
+            [
+                "npm",
+                "run",
+                "preview",
+                "--",
+                "--port",
+                str(self.frontend_port),
+                "--strictPort",
+            ],
+            cwd=FRONTEND_ROOT,
+            env=frontend_environment,
+            stdout=frontend_log,
+            stderr=subprocess.STDOUT,
+        )
+        self.processes.append(frontend)
+        self.frontend_process = frontend
+        _wait_for_url(self.frontend_url, frontend)
+
+    def start(self) -> PublicApiClient:
+        if not PYTHON.is_file():
+            raise RuntimeError(f"Repository virtual environment is missing: {PYTHON}")
+        self._start_backend()
+        self._start_frontend()
+        return PublicApiClient(self.backend_url)
+
+    def restart_backend(self, clock_at: str) -> PublicApiClient:
+        if self.backend_process is None:
+            raise RuntimeError("Cannot restart a backend that is not running.")
+        process = self.backend_process
+        process.send_signal(signal.SIGTERM)
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+        self.processes.remove(process)
+        self.backend_process = None
+        self.clock_at = _parse_clock(clock_at)
+        self._start_backend()
+        return PublicApiClient(self.backend_url)
+
+    def stop(self) -> None:
+        for process in reversed(self.processes):
+            if process.poll() is None:
+                process.send_signal(signal.SIGTERM)
+        for process in reversed(self.processes):
+            if process.poll() is None:
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+        self.processes.clear()
+        self.backend_process = None
+        self.frontend_process = None
+        for handle in self._logs:
+            handle.close()
+        self._logs.clear()
+
+    def finish(self, *, success: bool) -> None:
+        # A fixture database is never removed or replaced while its application is alive.
+        self.stop()
+        assert self.root is not None
+        if success:
+            shutil.rmtree(self.root)
+
+    def write_metadata(
+        self,
+        client: PublicApiClient,
+        authority: JsonObject,
+        expected_authority: str,
+    ) -> Path:
+        assert self.root is not None
+        metadata = {
+            "scenarioId": self.scenario,
+            "databasePath": str(self.database_path),
+            "timezone": self.timezone,
+            "clockMode": "fixed" if self.clock_at is not None else "real",
+            "declaredClockAt": self.declared_clock_at,
+            "clockAt": self.clock_at,
+            "backendUrl": self.backend_url,
+            "frontendUrl": self.frontend_url,
+            "authority": authority,
+            "expectedAuthority": expected_authority,
+            "authorityReadParity": {
+                "matchesExpectedCanonicalAuthority": True,
+                "matchesSeedResponse": True,
+            },
+            "repositoryRevision": _repository_revision(),
+            "productionBuildHash": _production_build_hash(),
+            "publicContractCalls": client.calls,
+            "fixtureHash": _fixture_hash(self.scenario, self.timezone, self.clock_at, client.calls),
+        }
+        path = self.root / "artifacts" / "fixture-metadata.json"
+        path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return path
+
+
+def _seed_legacy_shell(client: PublicApiClient) -> JsonObject:
+    client.bootstrap()
+    client.login()
+    authority = client.request("GET", "/api/v2/authority")
+    if not isinstance(authority, dict):
+        raise RuntimeError("Legacy shell authority response was not an object.")
+    if authority["canonicalLearningAuthority"] != "legacy_v1":
+        raise RuntimeError("Legacy shell fixture did not retain legacy authority.")
+    return authority
+
+
+def _seed_v2_shell(
+    client: PublicApiClient, run: FixtureRun
+) -> tuple[JsonObject, PublicApiClient]:
+    client.bootstrap()
+    client.login()
+    clock_cursor = (
+        datetime.fromisoformat(run.clock_at.replace("Z", "+00:00"))
+        if run.clock_at is not None
+        else None
+    )
+
+    def advance_fixture_clock(active_client: PublicApiClient) -> PublicApiClient:
+        nonlocal clock_cursor
+        if clock_cursor is None:
+            return active_client
+        clock_cursor += timedelta(minutes=1)
+        restarted = run.restart_backend(clock_cursor.isoformat().replace("+00:00", "Z"))
+        restarted.calls = active_client.calls
+        restarted.login()
+        return restarted
+
+    def current_fixture_instant() -> str:
+        return run.clock_at or datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+    # The application creates an initial empty Analysis snapshot on startup.
+    # Advance before adding effective-dated facts so that the fixture never
+    # backdates new canonical history into that immutable startup cutoff.
+    client = advance_fixture_clock(client)
+    effective_at = current_fixture_instant()
+
+    competency = client.request(
+        "POST",
+        "/api/v2/competencies",
+        {"stable_key": "fixture.shell", "creation_source": "product_fixture"},
+        expected=201,
+    )
+    competency_id = str(competency["id"])
+    definition = client.request(
+        "POST",
+        f"/api/v2/competencies/{competency_id}/definitions",
+        {
+            "title": "Fixture shell capability",
+            "description": "Minimal canonical capability for the V2 shell scenario.",
+            "scope": "Fixture-only public API readiness proof",
+            "scale_stable_key": "technical",
+            "scale_version": "v1",
+            "dimension_keys": [],
+            "effective_at": effective_at,
+            "creation_source": "product_fixture",
+            "criteria": [
+                {
+                    "stable_key": "fixture.shell.independent",
+                    "level_stable_key": "independent",
+                    "dimension_key": None,
+                    "requirement_type": "required",
+                    "demonstration_rule": "independent_performance",
+                    "description": "Demonstrate the shell fixture capability independently.",
+                }
+            ],
+        },
+        expected=201,
+    )
+    client.request(
+        "POST",
+        f"/api/v2/competencies/{competency_id}/definitions/{definition['id']}/activate",
+        {
+            "reason": "Fixture readiness",
+            "source": "product_fixture",
+            "idempotency_key": "fixture-definition-active",
+        },
+    )
+    client = advance_fixture_clock(client)
+
+    profile = client.request(
+        "POST",
+        "/api/v2/target-profiles",
+        {
+            "stable_key": "fixture-shell-profile",
+            "creation_source": "product_fixture",
+            "version": {
+                "title": "Fixture shell profile",
+                "description": "Minimal V2 shell profile.",
+                "creation_source": "product_fixture",
+                "effective_at": current_fixture_instant(),
+                "domains": [
+                    {
+                        "stable_key": "learning",
+                        "title": "Learning",
+                        "minimum_percent": 100,
+                        "maximum_percent": 100,
+                        "order_index": 0,
+                    }
+                ],
+                "targets": [
+                    {
+                        "stable_key": "fixture-shell-target",
+                        "competency_identity_id": competency_id,
+                        "dimension_key": None,
+                        "domain_stable_key": "learning",
+                        "scale_stable_key": "technical",
+                        "scale_version": "v1",
+                        "target_level_stable_key": "independent",
+                        "priority": "core",
+                    }
+                ],
+                "milestones": [],
+                "readiness_gates": [],
+            },
+        },
+        expected=201,
+    )
+    client.request(
+        "POST",
+        f"/api/v2/target-profiles/{profile['profileId']}/versions/{profile['versionId']}/activate",
+        {
+            "reason": "Fixture readiness",
+            "source": "product_fixture",
+            "idempotency_key": "fixture-profile-active",
+        },
+    )
+    client = advance_fixture_clock(client)
+
+    graph = client.request(
+        "POST",
+        "/api/v2/learning-graphs",
+        {"stable_key": "fixture-shell-graph", "creation_source": "product_fixture"},
+        expected=201,
+    )
+    graph_version = client.request(
+        "POST",
+        f"/api/v2/learning-graphs/{graph['id']}/versions",
+        {
+            "title": "Fixture shell graph",
+            "description": "Minimal V2 shell graph.",
+            "effective_at": current_fixture_instant(),
+            "creation_source": "product_fixture",
+            "edges": [],
+        },
+        expected=201,
+    )
+    client.request(
+        "POST",
+        f"/api/v2/learning-graphs/{graph['id']}/versions/{graph_version['id']}/activate",
+        {
+            "reason": "Fixture readiness",
+            "source": "product_fixture",
+            "idempotency_key": "fixture-graph-active",
+        },
+        expected=201,
+    )
+    client = advance_fixture_clock(client)
+
+    curriculum = client.request(
+        "POST",
+        "/api/v2/curricula",
+        {"stable_key": "fixture-shell-curriculum", "creation_source": "product_fixture"},
+        expected=201,
+    )
+    curriculum_version = client.request(
+        "POST",
+        f"/api/v2/curricula/{curriculum['id']}/versions",
+        {
+            "title": "Fixture shell curriculum",
+            "description": "Minimal authored catalog for V2 readiness.",
+            "effective_at": current_fixture_instant(),
+            "creation_source": "product_fixture",
+            "objectives": [],
+            "units": [],
+            "assessment_rubrics": [],
+        },
+        expected=201,
+    )
+    client.request(
+        "POST",
+        f"/api/v2/curricula/{curriculum['id']}/versions/{curriculum_version['id']}/activate",
+        {
+            "reason": "Fixture readiness",
+            "source": "product_fixture",
+            "idempotency_key": "fixture-curriculum-active",
+        },
+    )
+    client = advance_fixture_clock(client)
+
+    scales = client.request("GET", "/api/v2/capability-scales")
+    technical = next(
+        item for item in scales if item["stableKey"] == "technical" and item["version"] == "v1"
+    )
+    independent = next(item for item in technical["levels"] if item["stableKey"] == "independent")
+    criterion = definition["criteria"][0]
+    for index in range(2):
+        occurred_at = (
+            datetime.fromisoformat(current_fixture_instant().replace("Z", "+00:00"))
+            - timedelta(seconds=5)
+        ).isoformat().replace("+00:00", "Z")
+        client.request(
+            "POST",
+            "/api/v2/evidence",
+            {
+                "idempotency_key": f"fixture-shell-evidence-{index}",
+                "evidence_type": "assessment",
+                "title": f"Fixture readiness evidence {index + 1}",
+                "description": "Independent public-API fixture evidence.",
+                "strength": "moderate",
+                "independence": "independent",
+                "occurred_at": occurred_at,
+                "capture_method": "product_fixture",
+                "authoritative_reassessment": False,
+                "maximum_supported_level_id": None,
+                "links": [
+                    {
+                        "competency_identity_id": competency_id,
+                        "criterion_identity_id": criterion["identityId"],
+                        "criterion_definition_id": criterion["id"],
+                        "scale_version_id": technical["id"],
+                        "dimension_id": None,
+                        "level_id": independent["id"],
+                        "effect": "supports",
+                        "relevance": "primary",
+                    }
+                ],
+            },
+            expected=201,
+        )
+        client = advance_fixture_clock(client)
+    client.request(
+        "POST",
+        "/api/v2/analysis/runs",
+        {
+            "idempotency_key": "fixture-shell-analysis",
+            "purpose": "learning_control",
+        },
+        expected=201,
+    )
+    readiness = client.request("GET", "/api/v2/authority/readiness")
+    if not readiness["ready"]:
+        raise RuntimeError(f"V2 shell readiness failed: {readiness!r}")
+    authority = client.request(
+        "POST",
+        "/api/v2/authority/activate-v2",
+        {
+            "idempotency_key": "fixture-shell-activate-v2",
+            "reason": "Disposable product fixture passed runtime readiness.",
+        },
+    )
+    if authority["canonicalLearningAuthority"] != "v2":
+        raise RuntimeError("V2 shell fixture did not activate V2 authority.")
+    return authority, client
+
+
+def _verify_authority_read_parity(
+    client: PublicApiClient,
+    seed_authority: JsonObject,
+    expected_authority: str,
+) -> JsonObject:
+    public_read = client.request("GET", "/api/v2/authority")
+    if not isinstance(public_read, dict):
+        raise RuntimeError("Authority public read did not return an object.")
+    if public_read.get("canonicalLearningAuthority") != expected_authority:
+        raise RuntimeError(
+            "Authority public read did not match the scenario expectation: "
+            f"{public_read!r}."
+        )
+    if public_read != seed_authority:
+        raise RuntimeError(
+            "Authority public read did not match the seed/activation response: "
+            f"seed={seed_authority!r}, read={public_read!r}."
+        )
+    return public_read
+
+
+def run_smoke(scenario: ScenarioName, timezone: str, clock_at: str | None) -> JsonObject:
+    run = FixtureRun(scenario=scenario, timezone=timezone, clock_at=clock_at)
+    success = False
+    try:
+        client = run.start()
+        if scenario == "legacy-shell":
+            authority = _seed_legacy_shell(client)
+            expected_authority = "legacy_v1"
+        else:
+            authority, client = _seed_v2_shell(client, run)
+            expected_authority = "v2"
+        authority = _verify_authority_read_parity(
+            client, authority, expected_authority
+        )
+        with urllib.request.urlopen(run.frontend_url, timeout=10) as response:
+            if response.status != 200 or b'<div id="root"></div>' not in response.read():
+                raise RuntimeError("The product frontend did not serve its application shell.")
+        metadata_path = run.write_metadata(client, authority, expected_authority)
+        result = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if not isinstance(result, dict):
+            raise RuntimeError("Fixture metadata was not an object.")
+        success = True
+        return result
+    finally:
+        run.finish(success=success)
+        if not success:
+            print(f"Fixture failure artifacts retained at {run.root}", file=sys.stderr)
+
+
+def run_playwright(scenario: ScenarioName, timezone: str, clock_at: str | None) -> JsonObject:
+    run = FixtureRun(scenario=scenario, timezone=timezone, clock_at=clock_at)
+    success = False
+    try:
+        client = run.start()
+        if scenario == "legacy-shell":
+            authority = _seed_legacy_shell(client)
+            expected_authority = "legacy_v1"
+        else:
+            authority, client = _seed_v2_shell(client, run)
+            expected_authority = "v2"
+        authority = _verify_authority_read_parity(
+            client, authority, expected_authority
+        )
+        metadata_path = run.write_metadata(client, authority, expected_authority)
+        assert run.root is not None
+        run_root = run.root
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "LCC_PRODUCT_BASE_URL": run.frontend_url,
+                "LCC_PRODUCT_SCENARIO": scenario,
+                "LCC_PRODUCT_ARTIFACT_DIR": str(run_root / "artifacts" / "playwright"),
+            }
+        )
+        playwright_log = (run_root / "playwright.log").open("wb")
+        try:
+            result = subprocess.run(
+                ["npm", "run", "test:e2e:product"],
+                cwd=FRONTEND_ROOT,
+                env=environment,
+                stdout=playwright_log,
+                stderr=subprocess.STDOUT,
+                check=False,
+            )
+        finally:
+            playwright_log.close()
+        if result.returncode != 0:
+            raise RuntimeError(f"Product Playwright failed; see {run_root / 'playwright.log'}.")
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if not isinstance(metadata, dict):
+            raise RuntimeError("Fixture metadata was not an object.")
+        success = True
+        return metadata
+    finally:
+        run.finish(success=success)
+        if not success:
+            print(f"Fixture failure artifacts retained at {run.root}", file=sys.stderr)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    smoke = subparsers.add_parser("smoke", help="Seed and verify one disposable shell scenario.")
+    smoke.add_argument("--scenario", choices=("legacy-shell", "v2-shell"), required=True)
+    smoke.add_argument("--timezone", default=DEFAULT_TIMEZONE)
+    smoke.add_argument(
+        "--clock",
+        default=DEFAULT_CLOCK,
+        help="Timezone-aware RFC3339 instant, or 'real' to omit LCC_FIXTURE_CLOCK_AT.",
+    )
+    browser = subparsers.add_parser(
+        "playwright", help="Run the isolated desktop/mobile product shell browser smoke."
+    )
+    browser.add_argument("--scenario", choices=("legacy-shell", "v2-shell"), required=True)
+    browser.add_argument("--timezone", default=DEFAULT_TIMEZONE)
+    browser.add_argument("--clock", default=DEFAULT_CLOCK)
+    arguments = parser.parse_args()
+    if arguments.command == "smoke":
+        result = run_smoke(arguments.scenario, arguments.timezone, arguments.clock)
+        print(json.dumps(result, sort_keys=True))
+        return 0
+    if arguments.command == "playwright":
+        result = run_playwright(arguments.scenario, arguments.timezone, arguments.clock)
+        print(json.dumps(result, sort_keys=True))
+        return 0
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

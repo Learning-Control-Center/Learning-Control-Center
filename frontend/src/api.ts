@@ -55,24 +55,7 @@ async function apiVersioned<T>(prefix: string, path: string, init: RequestInit):
   return response.json() as Promise<T>
 }
 
-export function formatDuration(milliseconds: number | null | undefined, includeSeconds = false) {
-  if (milliseconds == null) return 'N/A'
-  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000))
-  const hours = Math.floor(totalSeconds / 3600)
-  const minutes = Math.floor((totalSeconds % 3600) / 60)
-  const seconds = totalSeconds % 60
-  if (includeSeconds) {
-    return hours > 0
-      ? `${hours}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`
-      : `${minutes}:${seconds.toString().padStart(2, '0')}`
-  }
-  if (hours > 0) return `${hours}h ${minutes}m`
-  return `${minutes}m`
-}
-
-export function formatRatio(value: number | null | undefined) {
-  return value == null ? 'N/A' : `${Math.round(value * 100)}%`
-}
+export { formatDuration, formatRatio } from './shared/formatting'
 
 export function downloadText(content: string, filename: string, type: string) {
   const url = URL.createObjectURL(new Blob([content], { type }))

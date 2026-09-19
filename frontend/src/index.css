@@ -26,10 +26,18 @@ body {
   min-width: 320px;
   min-height: 100vh;
   margin: 0;
-  overflow-x: hidden;
   background:
     radial-gradient(circle at 80% -10%, rgba(116, 168, 140, 0.22), transparent 34rem),
     linear-gradient(180deg, #f8f6f0 0%, #f1eee5 100%);
+}
+
+body.dialog-open {
+  overflow: hidden;
+}
+
+[inert] {
+  pointer-events: none;
+  user-select: none;
 }
 
 button,
@@ -49,6 +57,17 @@ textarea {
 
 :focus-visible {
   outline: 2px solid #326653;
+}
+
+.bg-ink :focus-visible {
+  outline-color: #ffffff;
+}
+
+h1,
+h2,
+h3,
+[tabindex='-1'] {
+  scroll-margin-top: 5rem;
 }
 
 input[type='checkbox'],
@@ -76,12 +95,40 @@ input[type='number']::-webkit-outer-spin-button {
     @apply rounded-2xl border border-ink/10 bg-white/75 shadow-soft backdrop-blur-sm;
   }
 
+  .page-container {
+    @apply mx-auto w-full max-w-[144rem] px-4 py-6 sm:px-6 sm:py-8 xl:px-10;
+  }
+
+  .page-stack {
+    @apply space-y-6 sm:space-y-8;
+  }
+
+  .responsive-card-grid {
+    @apply grid gap-4 md:grid-cols-2 xl:grid-cols-3;
+  }
+
+  .skip-link {
+    @apply fixed left-3 top-3 z-[100] -translate-y-24 rounded-lg bg-white px-4 py-3 font-semibold text-ink shadow-soft transition focus:translate-y-0;
+  }
+
+  .navigation-link {
+    @apply flex min-h-11 items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-white/75 transition hover:bg-white/10 hover:text-white;
+  }
+
+  .navigation-link-active {
+    @apply bg-white text-ink hover:bg-white hover:text-ink;
+  }
+
   .button-primary {
     @apply inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-ink px-4 py-2.5 font-semibold text-white transition hover:bg-moss disabled:cursor-not-allowed disabled:opacity-50;
   }
 
   .button-secondary {
     @apply inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-ink/15 bg-white/60 px-4 py-2.5 font-semibold text-ink transition hover:border-moss/40 hover:bg-white disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .button-quiet {
+    @apply inline-flex min-h-11 items-center justify-center gap-2 rounded-xl px-3 py-2 font-semibold text-ink transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-50;
   }
 
   .field {
@@ -95,6 +142,43 @@ input[type='number']::-webkit-outer-spin-button {
   .page-title {
     @apply font-display text-3xl font-semibold tracking-tight text-ink sm:text-4xl;
   }
+
+  .state-surface {
+    @apply flex min-h-48 flex-col items-center justify-center gap-3 p-8 text-ink/65;
+  }
+
+  .skeleton {
+    @apply animate-pulse rounded-lg bg-ink/10 motion-reduce:animate-none;
+  }
+
+  .status-badge {
+    @apply inline-flex min-h-7 items-center rounded-full border px-2.5 py-1 text-xs font-semibold;
+  }
+
+  .status-badge-neutral { @apply border-status-neutral/25 bg-status-neutral/10 text-status-neutral; }
+  .status-badge-info { @apply border-status-info/25 bg-status-info/10 text-status-info; }
+  .status-badge-success { @apply border-status-success/25 bg-status-success/10 text-status-success; }
+  .status-badge-warning { @apply border-status-warning/25 bg-status-warning/10 text-status-warning; }
+  .status-badge-critical { @apply border-status-critical/25 bg-status-critical/10 text-status-critical; }
+  .status-badge-today { @apply border-status-today/25 bg-status-today/10 text-status-today; }
+  .status-badge-unknown { @apply border-status-unknown/25 bg-status-unknown/10 text-status-unknown; }
+  .status-badge-legacy { @apply border-status-legacy/25 bg-status-legacy/10 text-status-legacy; }
+
+  .notice {
+    @apply flex items-start gap-2 rounded-xl border p-4 text-sm leading-6;
+  }
+  .notice-warning { @apply border-status-warning/25 bg-status-warning/5 text-status-warning; }
+  .notice-critical { @apply border-status-critical/25 bg-status-critical/5 text-status-critical; }
+  .notice-legacy { @apply border-status-legacy/25 bg-status-legacy/5 text-status-legacy; }
+
+  .focus-link {
+    @apply rounded-sm underline-offset-4 hover:underline;
+  }
+}
+
+@media (forced-colors: active) {
+  :focus-visible { outline: 3px solid CanvasText; }
+  .surface, .status-badge, .notice { border-color: CanvasText; }
 }
 
 @media (prefers-reduced-motion: reduce) {

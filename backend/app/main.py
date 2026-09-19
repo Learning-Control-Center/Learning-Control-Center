@@ -50,6 +50,7 @@ from app.roadmap_projection.service import (
 from app.sessions import router as session_router
 from app.settings_api import get_or_create_profile
 from app.settings_api import router as settings_router
+from app.time_utils import configure_process_clock
 from app.today import models as today_models  # noqa: F401
 from app.today.api import router as today_router
 from app.v2_activities import router as v2_activity_router
@@ -80,6 +81,11 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 
 settings = get_settings()
+configure_process_clock(
+    environment=settings.environment,
+    fixed_utc_now=settings.fixture_clock_at,
+    step_ms=settings.fixture_clock_step_ms,
+)
 
 
 def _validate_database_state(db: Session) -> None:

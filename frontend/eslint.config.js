@@ -22,4 +22,26 @@ export default tseslint.config(
       'react-refresh/only-export-components': ['warn', { allowConstantExport: true }],
     },
   },
+  {
+    files: ['src/shared/**/*.{ts,tsx}'],
+    rules: {
+      'no-restricted-imports': ['error', {
+        patterns: [
+          { regex: '(^|/)app/', message: 'Shared code cannot import application composition.' },
+          { regex: '(^|/)features/', message: 'Shared code cannot import feature internals.' },
+        ],
+      }],
+    },
+  },
+  {
+    files: ['src/features/**/*.{ts,tsx}'],
+    rules: {
+      'no-restricted-imports': ['error', {
+        patterns: [
+          { regex: '(^|/)app/', message: 'Features cannot import application composition.' },
+          { group: ['**/features/*/**'], message: 'Features may communicate only through public entry points and shared contracts.' },
+        ],
+      }],
+    },
+  },
 )

@@ -88,7 +88,7 @@ export function TodayPage() {
           }),
         })
       }
-      navigate('/sessions')
+      navigate('/activity')
     } catch (caught) {
       setError(caught instanceof ApiError ? caught.message : 'The session could not be started.')
     } finally {
@@ -195,7 +195,7 @@ export function TodayPage() {
             </div>
             <div className="mt-7 flex flex-wrap gap-3">
               {activeSession ? (
-                <Link className="button-primary" to="/sessions">
+                <Link className="button-primary" to="/activity">
                   Return to active session <ArrowRight className="size-4" />
                 </Link>
               ) : (
@@ -204,7 +204,7 @@ export function TodayPage() {
                   {starting ? 'Starting…' : 'Start focused session'}
                 </button>
               )}
-              <Link className="button-secondary" to="/sessions">
+              <Link className="button-secondary" to="/activity">
                 Log manually
               </Link>
               <button className="button-secondary" onClick={() => void dismissRecommendation()} disabled={dismissed}>Dismiss</button>

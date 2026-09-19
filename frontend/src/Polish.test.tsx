@@ -33,7 +33,7 @@ describe('frontend polish regressions', () => {
     expect(screen.getByText('Competency architecture')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Import roadmap' })).toHaveAttribute(
       'href',
-      '/transfer',
+      '/data-transfer',
     )
   })
 

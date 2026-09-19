@@ -117,7 +117,7 @@ export function ProfileCapabilityPage() {
             ? states.filter((item) => item.dimensionKey === target.dimensionKey)
             : states.filter((item) => item.scopeKey === 'overall')
           return (
-            <article key={target.id} className="panel p-5">
+            <article key={target.id} className="surface p-5">
               <div className="flex items-start justify-between gap-3">
                 <div>
                   <p className="font-display text-lg font-semibold text-ink">{target.stableKey}</p>

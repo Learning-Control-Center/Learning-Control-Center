@@ -2,17 +2,9 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
 
 import { ApiError, apiV2 } from './api'
+import type { AuthorityState } from './shared/contracts/authority'
 
-export type AuthorityState = {
-  canonicalLearningAuthority: 'legacy_v1' | 'v2'
-  recommendationPresentation: 'legacy_v1' | 'v2' | 'v1_read_only'
-  roadmapPresentation: 'legacy_v1' | 'v2' | 'v1_read_only'
-  todayPresentation: 'legacy_v1' | 'v2' | 'v1_read_only'
-  eventSequence: number
-  stateHash: string
-  updatedAt: string
-  policyVersion: string
-}
+export type { AuthorityState } from './shared/contracts/authority'
 
 type AuthorityContextValue = {
   state: AuthorityState | null
@@ -28,22 +20,19 @@ export function AuthorityProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState('')
 
   useEffect(() => {
-    let active = true
-    apiV2<AuthorityState>('/authority')
+    const controller = new AbortController()
+    apiV2<AuthorityState>('/authority', { signal: controller.signal })
       .then((value) => {
-        if (active) setState(value)
+        setState(value)
       })
       .catch((caught) => {
-        if (active) {
-          setError(caught instanceof ApiError ? caught.message : 'Learning authority could not be loaded.')
-        }
+        if (caught instanceof DOMException && caught.name === 'AbortError') return
+        setError(caught instanceof ApiError ? caught.message : 'Learning authority could not be loaded.')
       })
       .finally(() => {
-        if (active) setLoading(false)
+        if (!controller.signal.aborted) setLoading(false)
       })
-    return () => {
-      active = false
-    }
+    return () => controller.abort()
   }, [])
 
   const value = useMemo(() => ({ state, loading, error }), [state, loading, error])
