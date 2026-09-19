@@ -20,6 +20,7 @@ from app.recommendation.v2.public import (
     load_public_recommendation_item,
     thaw_public_json,
 )
+from app.roadmap_projection.policies import ACTIVE_PROJECTION_POLICY
 from app.schemas import SessionContributionCreate
 from app.time_utils import epoch_ms_to_rfc3339, local_date_for_ms, local_day_bounds_ms, utc_now_ms
 from app.today.contracts import TODAY_POLICY_VERSION, TODAY_PRESENTATION_VERSION
@@ -63,7 +64,7 @@ def _invalidate_roadmap_projection(db: Session, *, source_fact_id: str) -> None:
             ProjectionInvalidation.subject_type == "today_overlay",
             ProjectionInvalidation.subject_id == "current",
             ProjectionInvalidation.source_fact_id == source_fact_id,
-            ProjectionInvalidation.target_policy_version == "roadmap-projection/v2.0",
+            ProjectionInvalidation.target_policy_version == ACTIVE_PROJECTION_POLICY,
         )
     )
     if duplicate is None:
@@ -73,7 +74,7 @@ def _invalidate_roadmap_projection(db: Session, *, source_fact_id: str) -> None:
                 subject_type="today_overlay",
                 subject_id="current",
                 source_fact_id=source_fact_id,
-                target_policy_version="roadmap-projection/v2.0",
+                target_policy_version=ACTIVE_PROJECTION_POLICY,
                 status="pending",
                 attempt_count=0,
                 requested_at=utc_now_ms(),

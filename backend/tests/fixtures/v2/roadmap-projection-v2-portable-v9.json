@@ -1,0 +1,1448 @@
+{
+  "analysisV3CurrentCheckpoint": {
+    "checkpointHash": "d5f1150a51fb16f8f46e3f0da2267fd999ecdf5d66d84e3558b7066de8e452aa",
+    "states": []
+  },
+  "authorityCheckpoint": {
+    "checkpointHash": "fc3acb632e72f48111704473dbc164e1a13fe4d3877fb8d60792e7163d77d961",
+    "eventSequence": 1,
+    "historyHash": "9781a57dd4b3177a51a4c49184ac5130ef6bcd17aecb7303b4bc6905a4a76e4e",
+    "stateHash": "3398d80de37ae4536877efa09ecb5296710cdc1a7410e204b521ecb01da48c3f"
+  },
+  "capabilityProjectionCheckpoints": [
+    {
+      "competencyIdentityId": "d7ab75fe-f268-48c5-bf96-82302067c9f9",
+      "evaluationRunId": "8928ff20-1b54-4157-b8da-a00bbee75fd8",
+      "evidenceSetHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "outputHash": "7efef0a8f2c6fade24a1723e6b887ff1bfae9018256a4707a3c04dd42337fe8e",
+      "scopeKey": "overall"
+    },
+    {
+      "competencyIdentityId": "b4f45a12-8bc5-487d-ad26-31c9cb5ca85f",
+      "evaluationRunId": "61ac94bc-6be4-4a52-8a69-94dfe4455036",
+      "evidenceSetHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "outputHash": "7efef0a8f2c6fade24a1723e6b887ff1bfae9018256a4707a3c04dd42337fe8e",
+      "scopeKey": "overall"
+    }
+  ],
+  "curriculumCatalogCheckpoint": {
+    "activeVersionReferences": [],
+    "availabilityHashes": [],
+    "catalogHash": "18f911bcc4bb128939e68861976a8828e5466d15e08d10f824b6c537074dd4e6",
+    "cutoffAt": 1789830912287,
+    "cutoffSemantics": "exclusive",
+    "inputHash": "5ab4d664d438cefccc6cc44b6663cf156bbcccfdf6be5c9093f92e96fbfc4447",
+    "policyVersion": "curriculum-availability-policy/v1",
+    "sourceHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+  },
+  "manifest": {
+    "includedCanonicalDomains": [
+      "learning_state",
+      "target_profiles",
+      "semantic_competency_definitions",
+      "capability_scales",
+      "legacy_criterion_assertions",
+      "activities",
+      "session_contributions",
+      "evidence",
+      "evidence_links",
+      "curriculum",
+      "curriculum_activity_links",
+      "projects",
+      "project_activity_and_session_attribution",
+      "project_evidence_evaluations",
+      "learning_graph",
+      "roadmap_projection_manual_input",
+      "legacy_roadmap_active_state_compatibility",
+      "discipline_configuration_history",
+      "analysis_v3_diagnostics",
+      "recommendation_v2_decision_history",
+      "today_v2_advisory_history",
+      "suggestion_actual_activity_relations",
+      "learning_control_authority_state"
+    ],
+    "includedImmutableHistory": [
+      "analysis_runs",
+      "analysis_snapshots",
+      "target_profile_activation_events",
+      "competency_definition_activation_events",
+      "migration_backfill_runs",
+      "contribution_retractions",
+      "session_corrections",
+      "evidence_retractions",
+      "evidence_invalidations",
+      "evidence_link_retractions",
+      "evidence_redactions",
+      "capability_evaluation_runs",
+      "criterion_evaluation_results",
+      "capability_state_events",
+      "review_events",
+      "curriculum_versions",
+      "curriculum_activation_events",
+      "activity_curriculum_link_corrections",
+      "project_versions",
+      "project_version_activation_events",
+      "project_events",
+      "activity_project_task_link_corrections",
+      "session_project_contribution_retractions",
+      "project_criterion_evaluations",
+      "learning_graph_versions",
+      "learning_graph_activation_events",
+      "discipline_configuration_events",
+      "analysis_v3_runs_snapshots_facts_gaps_signals_unknowns",
+      "recommendation_v2_runs_candidates_eligibility_scores_decisions_reasons",
+      "today_v2_generations_suggestions_interactions_relations_corrections",
+      "learning_control_authority_events"
+    ],
+    "omittedRebuildableState": [
+      "competency_capability_states",
+      "competency_review_states",
+      "projection_invalidations",
+      "curriculum_availability",
+      "project_current_lifecycle",
+      "project_task_availability",
+      "learning_graph_edge_satisfaction",
+      "roadmap_projection_cache",
+      "roadmap_projection_checkpoint",
+      "analysis_v3_current_state",
+      "today_suggestion_current_states"
+    ],
+    "restoreActions": [
+      "clear_projection_invalidations",
+      "rebuild_capability_states",
+      "rebuild_review_states",
+      "verify_projection_hash_parity",
+      "rebuild_curriculum_availability",
+      "verify_curriculum_catalog_hash_parity",
+      "rebuild_project_current_state",
+      "rebuild_project_task_availability",
+      "verify_project_catalog_hash_parity",
+      "rebuild_learning_graph_satisfaction",
+      "rebuild_roadmap_projection",
+      "verify_roadmap_projection_hash_parity",
+      "verify_legacy_roadmap_active_state_parity",
+      "rebuild_analysis_v3_current_pointer",
+      "verify_analysis_v3_history_hash_parity",
+      "verify_recommendation_v2_history_hash_parity",
+      "rebuild_today_suggestion_current_states",
+      "verify_today_v2_history_and_current_state_parity",
+      "verify_monotonic_learning_control_authority_history"
+    ]
+  },
+  "portableScope": {
+    "closureAddedProjectIds": [],
+    "includedProjectIds": [],
+    "requestedProjectIds": []
+  },
+  "projectCatalogCheckpoint": {
+    "activeVersionReferences": [],
+    "candidateHashes": [],
+    "catalogHash": "7ac082747568853ce91361ce275b9af316622eadbcd7ee7224222bf20bcb6971",
+    "cutoffAt": 1789830912288,
+    "cutoffSemantics": "exclusive",
+    "inputHash": "e2740a204dc50a83f674e7ce3857a32924686868a7a63b9dc9e1a3e037b62fc6",
+    "policyVersion": "project-availability-policy/v1",
+    "sourceHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+  },
+  "recommendationV2HistoryCheckpoint": {
+    "checkpointHash": "628cbe4e408d1197c2799a0840b4275dd21c2a75a6ce8fb7d781f58f57df141c",
+    "historyHash": "7ffb1b5f19bd1b58c242532ec29af62e2b12bb77bd8a309ffa4816d1877904fc",
+    "runHashes": []
+  },
+  "roadmapProjectionCheckpoint": {
+    "configured": true,
+    "cutoffAt": 1789830912288,
+    "cutoffSemantics": "exclusive",
+    "inputHash": "84e801e863a14da90840860194b4f19bd0b2080c87faaabeece8b3702f7d60f3",
+    "layoutPolicyVersion": "roadmap-layout/v2.0",
+    "outputHash": "440b7904e52e0c906b351f92d89bd939dc1adaf3361ca2cf2a99b4b751e7dfd8",
+    "projectionPolicyVersion": "roadmap-projection/v2.0",
+    "scopeKey": "profile:0c15391d-1fa9-46c8-b180-00853b4f8a3a:graph:6a2ac48e-e72b-4cd1-87ee-992e222fc501",
+    "sourceHash": "26bd9210ff1b9c42f6ed4dfd67f76de27eb70aad589e3775e15dc413e0f9930a"
+  },
+  "tables": {
+    "active_competency_definition_states": [
+      {
+        "activated_at": 1789830912057,
+        "competency_identity_id": "d7ab75fe-f268-48c5-bf96-82302067c9f9",
+        "semantic_definition_id": "87125869-9fac-4207-9de4-c9aa183275f1"
+      },
+      {
+        "activated_at": 1789830912108,
+        "competency_identity_id": "b4f45a12-8bc5-487d-ad26-31c9cb5ca85f",
+        "semantic_definition_id": "740a9aa9-5d11-450b-8158-4ca61354886d"
+      }
+    ],
+    "active_curriculum_version_states": [],
+    "active_learning_graph_states": [
+      {
+        "activated_at": 1789830912212,
+        "id": 1,
+        "learning_graph_id": "0af4e777-a44b-483b-81a5-4f927e5247d2",
+        "learning_graph_version_id": "6a2ac48e-e72b-4cd1-87ee-992e222fc501"
+      }
+    ],
+    "active_project_version_states": [],
+    "active_target_profile_state": [
+      {
+        "activated_at": 1789830912155,
+        "id": 1,
+        "target_profile_id": "0265c928-b213-4cc3-87e9-47c6ad28eda0",
+        "target_profile_version_id": "0c15391d-1fa9-46c8-b180-00853b4f8a3a"
+      }
+    ],
+    "activities": [],
+    "activity_category_versions": [
+      {
+        "created_at": 1788912000000,
+        "display_label": "Learning",
+        "id": "002bb5dc-1bc8-5545-83cc-9e41df8abd83",
+        "stable_key": "learning",
+        "vocabulary_version": "v1"
+      },
+      {
+        "created_at": 1788912000000,
+        "display_label": "Reading",
+        "id": "a006c740-0dd7-51a0-84c4-af9522272a97",
+        "stable_key": "reading",
+        "vocabulary_version": "v1"
+      },
+      {
+        "created_at": 1788912000000,
+        "display_label": "Practice",
+        "id": "4fe94d35-2a7a-51dc-a60d-df1864777f00",
+        "stable_key": "practice",
+        "vocabulary_version": "v1"
+      },
+      {
+        "created_at": 1788912000000,
+        "display_label": "Coding",
+        "id": "928503ef-c646-5d85-9b5c-6317995d6352",
+        "stable_key": "coding",
+        "vocabulary_version": "v1"
+      },
+      {
+        "created_at": 1788912000000,
+        "display_label": "Debugging",
+        "id": "4dee4329-3688-5762-a5b9-a331e7abffbb",
+        "stable_key": "debugging",
+        "vocabulary_version": "v1"
+      },
+      {
+        "created_at": 1788912000000,
+        "display_label": "Project",
+        "id": "c732cda7-f573-5ba6-88f2-23a0525b7fff",
+        "stable_key": "project",
+        "vocabulary_version": "v1"
+      },
+      {
+        "created_at": 1788912000000,
+        "display_label": "Review",
+        "id": "1d658e5a-b675-5fb7-b01c-acdb25aebd2e",
+        "stable_key": "review",
+        "vocabulary_version": "v1"
+      },
+      {
+        "created_at": 1788912000000,
+        "display_label": "Verification",
+        "id": "79b47dbe-8ad9-5ba5-aa02-a4d2f7c26a1b",
+        "stable_key": "verification",
+        "vocabulary_version": "v1"
+      },
+      {
+        "created_at": 1788912000000,
+        "display_label": "Research",
+        "id": "a8db0ac2-54aa-5c73-bdef-be751d4e25f3",
+        "stable_key": "research",
+        "vocabulary_version": "v1"
+      }
+    ],
+    "activity_curriculum_link_corrections": [],
+    "activity_curriculum_unit_links": [],
+    "activity_project_task_link_corrections": [],
+    "activity_project_task_links": [],
+    "analysis_runs": [],
+    "analysis_snapshots": [],
+    "analysis_v3_competency_gaps": [],
+    "analysis_v3_normalized_facts": [],
+    "analysis_v3_run_lineages": [],
+    "analysis_v3_signals": [],
+    "analysis_v3_snapshot_details": [],
+    "analysis_v3_unknown_markers": [],
+    "application_settings": [],
+    "assessment_rubric_definitions": [],
+    "assessment_rubric_identities": [],
+    "capability_evaluation_runs": [
+      {
+        "aggregate_confidence": "unknown",
+        "assessment_status": "unknown",
+        "capability_policy_version": "capability-policy/v1",
+        "competency_identity_id": "d7ab75fe-f268-48c5-bf96-82302067c9f9",
+        "confidence_facts_json": "{\"contradictionEvidenceIds\":[],\"decisiveEvidenceDiversity\":0,\"policyVersion\":\"capability-policy/v1\",\"retainedUnderHysteresis\":false,\"unmetHighConditions\":[]}",
+        "criterion_policy_version": "criterion-evaluation-policy/v1",
+        "cutoff_at": 1789830912066,
+        "decisive_evidence_ids_json": "[]",
+        "dimension_id": null,
+        "downgrade_cause": null,
+        "downgrade_policy_version": "capability-downgrade-policy/v1",
+        "evidence_policy_version": "evidence-policy/v1",
+        "evidence_set_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "generated_at": 1789830912073,
+        "id": "4a54823a-947f-434b-8b4d-29cba0b3f3fa",
+        "idempotency_key": "capability:d7ab75fe-f268-48c5-bf96-82302067c9f9:overall:783e9d48a44ca9023bde6067722395ee21580cfbf98a2dc588ac2db4be00bf1d",
+        "input_hash": "783e9d48a44ca9023bde6067722395ee21580cfbf98a2dc588ac2db4be00bf1d",
+        "input_payload_json": "{\"competencyIdentityId\":\"d7ab75fe-f268-48c5-bf96-82302067c9f9\",\"criteria\":[{\"decisiveEvidenceIds\":[],\"facts\":{\"decisiveLinkIds\":[],\"independenceCompatibleSupportOccurrenceCount\":0,\"meaningfulSupportOccurrenceCount\":0,\"qualifyingAttemptCount\":0,\"rule\":\"independent_performance\",\"supportOccurrenceCount\":0,\"unresolvedContradictionIds\":[]},\"id\":\"4e7ede30-1199-47df-8ebd-fdfc4c16f8b5\",\"state\":\"unknown\"}],\"cutoffAt\":1789830912066,\"evidence\":[],\"policies\":[\"criterion-evaluation-policy/v1\",\"capability-policy/v1\",\"evidence-policy/v1\",\"capability-downgrade-policy/v1\"],\"scaleVersionId\":\"9824edcf-8777-5db1-849a-53602ff566d6\",\"scopeKey\":\"overall\",\"semanticDefinitionId\":\"87125869-9fac-4207-9de4-c9aa183275f1\"}",
+        "output_hash": "7efef0a8f2c6fade24a1723e6b887ff1bfae9018256a4707a3c04dd42337fe8e",
+        "passed_level_ids_json": "[]",
+        "reasons_json": "[\"NO_LEVEL_PASSED\"]",
+        "scale_version_id": "9824edcf-8777-5db1-849a-53602ff566d6",
+        "scope_key": "overall",
+        "selected_level_id": null,
+        "semantic_definition_id": "87125869-9fac-4207-9de4-c9aa183275f1"
+      },
+      {
+        "aggregate_confidence": "unknown",
+        "assessment_status": "unknown",
+        "capability_policy_version": "capability-policy/v1",
+        "competency_identity_id": "d7ab75fe-f268-48c5-bf96-82302067c9f9",
+        "confidence_facts_json": "{\"contradictionEvidenceIds\":[],\"decisiveEvidenceDiversity\":0,\"policyVersion\":\"capability-policy/v1\",\"retainedUnderHysteresis\":false,\"unmetHighConditions\":[]}",
+        "criterion_policy_version": "criterion-evaluation-policy/v1",
+        "cutoff_at": 1789830912084,
+        "decisive_evidence_ids_json": "[]",
+        "dimension_id": null,
+        "downgrade_cause": null,
+        "downgrade_policy_version": "capability-downgrade-policy/v1",
+        "evidence_policy_version": "evidence-policy/v1",
+        "evidence_set_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "generated_at": 1789830912086,
+        "id": "5d882a82-4794-4d1b-9f01-aa558581f24a",
+        "idempotency_key": "capability:d7ab75fe-f268-48c5-bf96-82302067c9f9:overall:f74cf2497d3ef9a9606bf8e982d43f65bc760295b50c5313139e65174a432a05",
+        "input_hash": "f74cf2497d3ef9a9606bf8e982d43f65bc760295b50c5313139e65174a432a05",
+        "input_payload_json": "{\"competencyIdentityId\":\"d7ab75fe-f268-48c5-bf96-82302067c9f9\",\"criteria\":[{\"decisiveEvidenceIds\":[],\"facts\":{\"decisiveLinkIds\":[],\"independenceCompatibleSupportOccurrenceCount\":0,\"meaningfulSupportOccurrenceCount\":0,\"qualifyingAttemptCount\":0,\"rule\":\"independent_performance\",\"supportOccurrenceCount\":0,\"unresolvedContradictionIds\":[]},\"id\":\"4e7ede30-1199-47df-8ebd-fdfc4c16f8b5\",\"state\":\"unknown\"}],\"cutoffAt\":1789830912084,\"evidence\":[],\"policies\":[\"criterion-evaluation-policy/v1\",\"capability-policy/v1\",\"evidence-policy/v1\",\"capability-downgrade-policy/v1\"],\"scaleVersionId\":\"9824edcf-8777-5db1-849a-53602ff566d6\",\"scopeKey\":\"overall\",\"semanticDefinitionId\":\"87125869-9fac-4207-9de4-c9aa183275f1\"}",
+        "output_hash": "7efef0a8f2c6fade24a1723e6b887ff1bfae9018256a4707a3c04dd42337fe8e",
+        "passed_level_ids_json": "[]",
+        "reasons_json": "[\"NO_LEVEL_PASSED\"]",
+        "scale_version_id": "9824edcf-8777-5db1-849a-53602ff566d6",
+        "scope_key": "overall",
+        "selected_level_id": null,
+        "semantic_definition_id": "87125869-9fac-4207-9de4-c9aa183275f1"
+      },
+      {
+        "aggregate_confidence": "unknown",
+        "assessment_status": "unknown",
+        "capability_policy_version": "capability-policy/v1",
+        "competency_identity_id": "d7ab75fe-f268-48c5-bf96-82302067c9f9",
+        "confidence_facts_json": "{\"contradictionEvidenceIds\":[],\"decisiveEvidenceDiversity\":0,\"policyVersion\":\"capability-policy/v1\",\"retainedUnderHysteresis\":false,\"unmetHighConditions\":[]}",
+        "criterion_policy_version": "criterion-evaluation-policy/v1",
+        "cutoff_at": 1789830912091,
+        "decisive_evidence_ids_json": "[]",
+        "dimension_id": null,
+        "downgrade_cause": null,
+        "downgrade_policy_version": "capability-downgrade-policy/v1",
+        "evidence_policy_version": "evidence-policy/v1",
+        "evidence_set_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "generated_at": 1789830912092,
+        "id": "04194215-4e66-44c4-bfc0-413ca53efa39",
+        "idempotency_key": "capability:d7ab75fe-f268-48c5-bf96-82302067c9f9:overall:4b139a8965c2b07a7562f3140b49f100f8567bc4ee6bc7a2da1faafc3445661c",
+        "input_hash": "4b139a8965c2b07a7562f3140b49f100f8567bc4ee6bc7a2da1faafc3445661c",
+        "input_payload_json": "{\"competencyIdentityId\":\"d7ab75fe-f268-48c5-bf96-82302067c9f9\",\"criteria\":[{\"decisiveEvidenceIds\":[],\"facts\":{\"decisiveLinkIds\":[],\"independenceCompatibleSupportOccurrenceCount\":0,\"meaningfulSupportOccurrenceCount\":0,\"qualifyingAttemptCount\":0,\"rule\":\"independent_performance\",\"supportOccurrenceCount\":0,\"unresolvedContradictionIds\":[]},\"id\":\"4e7ede30-1199-47df-8ebd-fdfc4c16f8b5\",\"state\":\"unknown\"}],\"cutoffAt\":1789830912091,\"evidence\":[],\"policies\":[\"criterion-evaluation-policy/v1\",\"capability-policy/v1\",\"evidence-policy/v1\",\"capability-downgrade-policy/v1\"],\"scaleVersionId\":\"9824edcf-8777-5db1-849a-53602ff566d6\",\"scopeKey\":\"overall\",\"semanticDefinitionId\":\"87125869-9fac-4207-9de4-c9aa183275f1\"}",
+        "output_hash": "7efef0a8f2c6fade24a1723e6b887ff1bfae9018256a4707a3c04dd42337fe8e",
+        "passed_level_ids_json": "[]",
+        "reasons_json": "[\"NO_LEVEL_PASSED\"]",
+        "scale_version_id": "9824edcf-8777-5db1-849a-53602ff566d6",
+        "scope_key": "overall",
+        "selected_level_id": null,
+        "semantic_definition_id": "87125869-9fac-4207-9de4-c9aa183275f1"
+      },
+      {
+        "aggregate_confidence": "unknown",
+        "assessment_status": "unknown",
+        "capability_policy_version": "capability-policy/v1",
+        "competency_identity_id": "b4f45a12-8bc5-487d-ad26-31c9cb5ca85f",
+        "confidence_facts_json": "{\"contradictionEvidenceIds\":[],\"decisiveEvidenceDiversity\":0,\"policyVersion\":\"capability-policy/v1\",\"retainedUnderHysteresis\":false,\"unmetHighConditions\":[]}",
+        "criterion_policy_version": "criterion-evaluation-policy/v1",
+        "cutoff_at": 1789830912111,
+        "decisive_evidence_ids_json": "[]",
+        "dimension_id": null,
+        "downgrade_cause": null,
+        "downgrade_policy_version": "capability-downgrade-policy/v1",
+        "evidence_policy_version": "evidence-policy/v1",
+        "evidence_set_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "generated_at": 1789830912113,
+        "id": "f2fe0f5f-0b35-4633-8f2b-cc7721884639",
+        "idempotency_key": "capability:b4f45a12-8bc5-487d-ad26-31c9cb5ca85f:overall:c5437e16119e4d8df38793aeb984f6498db9d3bb97483b47fefa07530a307bb1",
+        "input_hash": "c5437e16119e4d8df38793aeb984f6498db9d3bb97483b47fefa07530a307bb1",
+        "input_payload_json": "{\"competencyIdentityId\":\"b4f45a12-8bc5-487d-ad26-31c9cb5ca85f\",\"criteria\":[{\"decisiveEvidenceIds\":[],\"facts\":{\"decisiveLinkIds\":[],\"independenceCompatibleSupportOccurrenceCount\":0,\"meaningfulSupportOccurrenceCount\":0,\"qualifyingAttemptCount\":0,\"rule\":\"independent_performance\",\"supportOccurrenceCount\":0,\"unresolvedContradictionIds\":[]},\"id\":\"a1fedfb5-0528-4294-ab57-6fa73b162545\",\"state\":\"unknown\"}],\"cutoffAt\":1789830912111,\"evidence\":[],\"policies\":[\"criterion-evaluation-policy/v1\",\"capability-policy/v1\",\"evidence-policy/v1\",\"capability-downgrade-policy/v1\"],\"scaleVersionId\":\"9824edcf-8777-5db1-849a-53602ff566d6\",\"scopeKey\":\"overall\",\"semanticDefinitionId\":\"740a9aa9-5d11-450b-8158-4ca61354886d\"}",
+        "output_hash": "7efef0a8f2c6fade24a1723e6b887ff1bfae9018256a4707a3c04dd42337fe8e",
+        "passed_level_ids_json": "[]",
+        "reasons_json": "[\"NO_LEVEL_PASSED\"]",
+        "scale_version_id": "9824edcf-8777-5db1-849a-53602ff566d6",
+        "scope_key": "overall",
+        "selected_level_id": null,
+        "semantic_definition_id": "740a9aa9-5d11-450b-8158-4ca61354886d"
+      },
+      {
+        "aggregate_confidence": "unknown",
+        "assessment_status": "unknown",
+        "capability_policy_version": "capability-policy/v1",
+        "competency_identity_id": "b4f45a12-8bc5-487d-ad26-31c9cb5ca85f",
+        "confidence_facts_json": "{\"contradictionEvidenceIds\":[],\"decisiveEvidenceDiversity\":0,\"policyVersion\":\"capability-policy/v1\",\"retainedUnderHysteresis\":false,\"unmetHighConditions\":[]}",
+        "criterion_policy_version": "criterion-evaluation-policy/v1",
+        "cutoff_at": 1789830912117,
+        "decisive_evidence_ids_json": "[]",
+        "dimension_id": null,
+        "downgrade_cause": null,
+        "downgrade_policy_version": "capability-downgrade-policy/v1",
+        "evidence_policy_version": "evidence-policy/v1",
+        "evidence_set_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "generated_at": 1789830912119,
+        "id": "036e131f-8a3c-40f7-a06e-b33576c09c4a",
+        "idempotency_key": "capability:b4f45a12-8bc5-487d-ad26-31c9cb5ca85f:overall:a6fa4f3c3d313b4513fe5eba46ef102c63cd427e0aaffd8571c20a702ea06bc6",
+        "input_hash": "a6fa4f3c3d313b4513fe5eba46ef102c63cd427e0aaffd8571c20a702ea06bc6",
+        "input_payload_json": "{\"competencyIdentityId\":\"b4f45a12-8bc5-487d-ad26-31c9cb5ca85f\",\"criteria\":[{\"decisiveEvidenceIds\":[],\"facts\":{\"decisiveLinkIds\":[],\"independenceCompatibleSupportOccurrenceCount\":0,\"meaningfulSupportOccurrenceCount\":0,\"qualifyingAttemptCount\":0,\"rule\":\"independent_performance\",\"supportOccurrenceCount\":0,\"unresolvedContradictionIds\":[]},\"id\":\"a1fedfb5-0528-4294-ab57-6fa73b162545\",\"state\":\"unknown\"}],\"cutoffAt\":1789830912117,\"evidence\":[],\"policies\":[\"criterion-evaluation-policy/v1\",\"capability-policy/v1\",\"evidence-policy/v1\",\"capability-downgrade-policy/v1\"],\"scaleVersionId\":\"9824edcf-8777-5db1-849a-53602ff566d6\",\"scopeKey\":\"overall\",\"semanticDefinitionId\":\"740a9aa9-5d11-450b-8158-4ca61354886d\"}",
+        "output_hash": "7efef0a8f2c6fade24a1723e6b887ff1bfae9018256a4707a3c04dd42337fe8e",
+        "passed_level_ids_json": "[]",
+        "reasons_json": "[\"NO_LEVEL_PASSED\"]",
+        "scale_version_id": "9824edcf-8777-5db1-849a-53602ff566d6",
+        "scope_key": "overall",
+        "selected_level_id": null,
+        "semantic_definition_id": "740a9aa9-5d11-450b-8158-4ca61354886d"
+      },
+      {
+        "aggregate_confidence": "unknown",
+        "assessment_status": "unknown",
+        "capability_policy_version": "capability-policy/v1",
+        "competency_identity_id": "b4f45a12-8bc5-487d-ad26-31c9cb5ca85f",
+        "confidence_facts_json": "{\"contradictionEvidenceIds\":[],\"decisiveEvidenceDiversity\":0,\"policyVersion\":\"capability-policy/v1\",\"retainedUnderHysteresis\":false,\"unmetHighConditions\":[]}",
+        "criterion_policy_version": "criterion-evaluation-policy/v1",
+        "cutoff_at": 1789830912123,
+        "decisive_evidence_ids_json": "[]",
+        "dimension_id": null,
+        "downgrade_cause": null,
+        "downgrade_policy_version": "capability-downgrade-policy/v1",
+        "evidence_policy_version": "evidence-policy/v1",
+        "evidence_set_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "generated_at": 1789830912125,
+        "id": "e0342800-cef2-4088-bbc7-13a69cdf6458",
+        "idempotency_key": "capability:b4f45a12-8bc5-487d-ad26-31c9cb5ca85f:overall:d09668ad3ef303e845c099c7a7e3bd4335adb1c43f1d23ce0a44bc5cf2a9d316",
+        "input_hash": "d09668ad3ef303e845c099c7a7e3bd4335adb1c43f1d23ce0a44bc5cf2a9d316",
+        "input_payload_json": "{\"competencyIdentityId\":\"b4f45a12-8bc5-487d-ad26-31c9cb5ca85f\",\"criteria\":[{\"decisiveEvidenceIds\":[],\"facts\":{\"decisiveLinkIds\":[],\"independenceCompatibleSupportOccurrenceCount\":0,\"meaningfulSupportOccurrenceCount\":0,\"qualifyingAttemptCount\":0,\"rule\":\"independent_performance\",\"supportOccurrenceCount\":0,\"unresolvedContradictionIds\":[]},\"id\":\"a1fedfb5-0528-4294-ab57-6fa73b162545\",\"state\":\"unknown\"}],\"cutoffAt\":1789830912123,\"evidence\":[],\"policies\":[\"criterion-evaluation-policy/v1\",\"capability-policy/v1\",\"evidence-policy/v1\",\"capability-downgrade-policy/v1\"],\"scaleVersionId\":\"9824edcf-8777-5db1-849a-53602ff566d6\",\"scopeKey\":\"overall\",\"semanticDefinitionId\":\"740a9aa9-5d11-450b-8158-4ca61354886d\"}",
+        "output_hash": "7efef0a8f2c6fade24a1723e6b887ff1bfae9018256a4707a3c04dd42337fe8e",
+        "passed_level_ids_json": "[]",
+        "reasons_json": "[\"NO_LEVEL_PASSED\"]",
+        "scale_version_id": "9824edcf-8777-5db1-849a-53602ff566d6",
+        "scope_key": "overall",
+        "selected_level_id": null,
+        "semantic_definition_id": "740a9aa9-5d11-450b-8158-4ca61354886d"
+      },
+      {
+        "aggregate_confidence": "unknown",
+        "assessment_status": "unknown",
+        "capability_policy_version": "capability-policy/v1",
+        "competency_identity_id": "b4f45a12-8bc5-487d-ad26-31c9cb5ca85f",
+        "confidence_facts_json": "{\"contradictionEvidenceIds\":[],\"decisiveEvidenceDiversity\":0,\"policyVersion\":\"capability-policy/v1\",\"retainedUnderHysteresis\":false,\"unmetHighConditions\":[]}",
+        "criterion_policy_version": "criterion-evaluation-policy/v1",
+        "cutoff_at": 1789830912161,
+        "decisive_evidence_ids_json": "[]",
+        "dimension_id": null,
+        "downgrade_cause": null,
+        "downgrade_policy_version": "capability-downgrade-policy/v1",
+        "evidence_policy_version": "evidence-policy/v1",
+        "evidence_set_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "generated_at": 1789830912163,
+        "id": "61ac94bc-6be4-4a52-8a69-94dfe4455036",
+        "idempotency_key": "capability:b4f45a12-8bc5-487d-ad26-31c9cb5ca85f:overall:5f9ece92ac3181b468084462f4f17c56b4b044cb4736c0685bf5a6979f9fed78",
+        "input_hash": "5f9ece92ac3181b468084462f4f17c56b4b044cb4736c0685bf5a6979f9fed78",
+        "input_payload_json": "{\"competencyIdentityId\":\"b4f45a12-8bc5-487d-ad26-31c9cb5ca85f\",\"criteria\":[{\"decisiveEvidenceIds\":[],\"facts\":{\"decisiveLinkIds\":[],\"independenceCompatibleSupportOccurrenceCount\":0,\"meaningfulSupportOccurrenceCount\":0,\"qualifyingAttemptCount\":0,\"rule\":\"independent_performance\",\"supportOccurrenceCount\":0,\"unresolvedContradictionIds\":[]},\"id\":\"a1fedfb5-0528-4294-ab57-6fa73b162545\",\"state\":\"unknown\"}],\"cutoffAt\":1789830912161,\"evidence\":[],\"policies\":[\"criterion-evaluation-policy/v1\",\"capability-policy/v1\",\"evidence-policy/v1\",\"capability-downgrade-policy/v1\"],\"scaleVersionId\":\"9824edcf-8777-5db1-849a-53602ff566d6\",\"scopeKey\":\"overall\",\"semanticDefinitionId\":\"740a9aa9-5d11-450b-8158-4ca61354886d\"}",
+        "output_hash": "7efef0a8f2c6fade24a1723e6b887ff1bfae9018256a4707a3c04dd42337fe8e",
+        "passed_level_ids_json": "[]",
+        "reasons_json": "[\"NO_LEVEL_PASSED\"]",
+        "scale_version_id": "9824edcf-8777-5db1-849a-53602ff566d6",
+        "scope_key": "overall",
+        "selected_level_id": null,
+        "semantic_definition_id": "740a9aa9-5d11-450b-8158-4ca61354886d"
+      },
+      {
+        "aggregate_confidence": "unknown",
+        "assessment_status": "unknown",
+        "capability_policy_version": "capability-policy/v1",
+        "competency_identity_id": "d7ab75fe-f268-48c5-bf96-82302067c9f9",
+        "confidence_facts_json": "{\"contradictionEvidenceIds\":[],\"decisiveEvidenceDiversity\":0,\"policyVersion\":\"capability-policy/v1\",\"retainedUnderHysteresis\":false,\"unmetHighConditions\":[]}",
+        "criterion_policy_version": "criterion-evaluation-policy/v1",
+        "cutoff_at": 1789830912168,
+        "decisive_evidence_ids_json": "[]",
+        "dimension_id": null,
+        "downgrade_cause": null,
+        "downgrade_policy_version": "capability-downgrade-policy/v1",
+        "evidence_policy_version": "evidence-policy/v1",
+        "evidence_set_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "generated_at": 1789830912170,
+        "id": "8928ff20-1b54-4157-b8da-a00bbee75fd8",
+        "idempotency_key": "capability:d7ab75fe-f268-48c5-bf96-82302067c9f9:overall:07f81927d49f260981dc47facd0c192639afae60ff3e2922175f5d60f4623e51",
+        "input_hash": "07f81927d49f260981dc47facd0c192639afae60ff3e2922175f5d60f4623e51",
+        "input_payload_json": "{\"competencyIdentityId\":\"d7ab75fe-f268-48c5-bf96-82302067c9f9\",\"criteria\":[{\"decisiveEvidenceIds\":[],\"facts\":{\"decisiveLinkIds\":[],\"independenceCompatibleSupportOccurrenceCount\":0,\"meaningfulSupportOccurrenceCount\":0,\"qualifyingAttemptCount\":0,\"rule\":\"independent_performance\",\"supportOccurrenceCount\":0,\"unresolvedContradictionIds\":[]},\"id\":\"4e7ede30-1199-47df-8ebd-fdfc4c16f8b5\",\"state\":\"unknown\"}],\"cutoffAt\":1789830912168,\"evidence\":[],\"policies\":[\"criterion-evaluation-policy/v1\",\"capability-policy/v1\",\"evidence-policy/v1\",\"capability-downgrade-policy/v1\"],\"scaleVersionId\":\"9824edcf-8777-5db1-849a-53602ff566d6\",\"scopeKey\":\"overall\",\"semanticDefinitionId\":\"87125869-9fac-4207-9de4-c9aa183275f1\"}",
+        "output_hash": "7efef0a8f2c6fade24a1723e6b887ff1bfae9018256a4707a3c04dd42337fe8e",
+        "passed_level_ids_json": "[]",
+        "reasons_json": "[\"NO_LEVEL_PASSED\"]",
+        "scale_version_id": "9824edcf-8777-5db1-849a-53602ff566d6",
+        "scope_key": "overall",
+        "selected_level_id": null,
+        "semantic_definition_id": "87125869-9fac-4207-9de4-c9aa183275f1"
+      }
+    ],
+    "capability_scale_dimensions": [
+      {
+        "description": "CEFR speaking capability evaluated independently.",
+        "display_label": "Speaking",
+        "id": "8bc38ccb-2fa6-5ef2-8f10-1aa21e2571b0",
+        "order_index": 0,
+        "scale_version_id": "5edac3a6-1a8a-5b1c-bc3f-88b4efb0cea1",
+        "stable_key": "speaking"
+      },
+      {
+        "description": "CEFR listening capability evaluated independently.",
+        "display_label": "Listening",
+        "id": "a6f1922d-8343-5009-83a2-447f0fae3b7d",
+        "order_index": 1,
+        "scale_version_id": "5edac3a6-1a8a-5b1c-bc3f-88b4efb0cea1",
+        "stable_key": "listening"
+      },
+      {
+        "description": "CEFR reading capability evaluated independently.",
+        "display_label": "Reading",
+        "id": "6b81ec2b-8cb5-512d-84f0-05f13c05633a",
+        "order_index": 2,
+        "scale_version_id": "5edac3a6-1a8a-5b1c-bc3f-88b4efb0cea1",
+        "stable_key": "reading"
+      },
+      {
+        "description": "CEFR writing capability evaluated independently.",
+        "display_label": "Writing",
+        "id": "40d6782f-8234-5474-ba2f-052853dcf062",
+        "order_index": 3,
+        "scale_version_id": "5edac3a6-1a8a-5b1c-bc3f-88b4efb0cea1",
+        "stable_key": "writing"
+      },
+      {
+        "description": "CEFR grammar capability evaluated independently.",
+        "display_label": "Grammar",
+        "id": "8d11dfd0-dd2a-51ab-a589-ba1456ec8566",
+        "order_index": 4,
+        "scale_version_id": "5edac3a6-1a8a-5b1c-bc3f-88b4efb0cea1",
+        "stable_key": "grammar"
+      },
+      {
+        "description": "CEFR vocabulary capability evaluated independently.",
+        "display_label": "Vocabulary",
+        "id": "76e1782b-4d2f-5711-a1dc-acd05ba0f91b",
+        "order_index": 5,
+        "scale_version_id": "5edac3a6-1a8a-5b1c-bc3f-88b4efb0cea1",
+        "stable_key": "vocabulary"
+      }
+    ],
+    "capability_scale_levels": [
+      {
+        "criterion_policy_reference": "criterion-evaluation-policy/v1",
+        "description": "Explicit current information shows no meaningful encounter or performance; absence of evidence is insufficient.",
+        "display_label": "Unexposed",
+        "evidence_policy_reference": "evidence-qualification-policy/v1",
+        "id": "d6ca66a1-5748-5866-bfc0-758d4d150931",
+        "ordinal_rank": 0,
+        "scale_version_id": "9824edcf-8777-5db1-849a-53602ff566d6",
+        "stable_key": "unexposed"
+      },
+      {
+        "criterion_policy_reference": "criterion-evaluation-policy/v1",
+        "description": "Can recognize the competency, explain its purpose and vocabulary, and follow representative examples without claiming task performance.",
+        "display_label": "Familiar",
+        "evidence_policy_reference": "evidence-qualification-policy/v1",
+        "id": "6232b598-daed-5db0-afd6-e5e0147f9c67",
+        "ordinal_rank": 1,
+        "scale_version_id": "9824edcf-8777-5db1-849a-53602ff566d6",
+        "stable_key": "familiar"
+      },
+      {
+        "criterion_policy_reference": "criterion-evaluation-policy/v1",
+        "description": "Can complete representative bounded tasks when a guide supplies material steps or decisions.",
+        "display_label": "Guided",
+        "evidence_policy_reference": "evidence-qualification-policy/v1",
+        "id": "01b6cbb7-f0a8-5f64-8ecc-83d2b0e53b9a",
+        "ordinal_rank": 2,
+        "scale_version_id": "9824edcf-8777-5db1-849a-53602ff566d6",
+        "stable_key": "guided"
+      },
+      {
+        "criterion_policy_reference": "criterion-evaluation-policy/v1",
+        "description": "Can select an approach, complete representative tasks with ordinary reference documentation, and handle defined common failures.",
+        "display_label": "Independent",
+        "evidence_policy_reference": "evidence-qualification-policy/v1",
+        "id": "0e7d329f-9ce0-56d9-8ae1-bb3d51ed1cb2",
+        "ordinal_rank": 3,
+        "scale_version_id": "9824edcf-8777-5db1-849a-53602ff566d6",
+        "stable_key": "independent"
+      },
+      {
+        "criterion_policy_reference": "criterion-evaluation-policy/v1",
+        "description": "Repeatedly performs independently across varied non-trivial contexts, explains trade-offs, handles important failures, and produces maintainable outcomes.",
+        "display_label": "Strong",
+        "evidence_policy_reference": "evidence-qualification-policy/v1",
+        "id": "26721537-180b-5b96-a5c4-c31aaa321d74",
+        "ordinal_rank": 4,
+        "scale_version_id": "9824edcf-8777-5db1-849a-53602ff566d6",
+        "stable_key": "strong"
+      },
+      {
+        "criterion_policy_reference": "criterion-evaluation-policy/v1",
+        "description": "Independently handles complex or novel contexts, adapts alternatives, diagnoses systemic failures, and can design, review, or teach within scope.",
+        "display_label": "Advanced",
+        "evidence_policy_reference": "evidence-qualification-policy/v1",
+        "id": "4866ac9f-db1f-51b1-a0cd-10e4d6854cd1",
+        "ordinal_rank": 5,
+        "scale_version_id": "9824edcf-8777-5db1-849a-53602ff566d6",
+        "stable_key": "advanced"
+      },
+      {
+        "criterion_policy_reference": "criterion-evaluation-policy/v1",
+        "description": "Can understand and use very basic familiar language and interact simply with substantial contextual support.",
+        "display_label": "A1",
+        "evidence_policy_reference": "evidence-qualification-policy/v1",
+        "id": "22f1fb19-80e5-59b9-ba89-dd8574c13a80",
+        "ordinal_rank": 1,
+        "scale_version_id": "5edac3a6-1a8a-5b1c-bc3f-88b4efb0cea1",
+        "stable_key": "a1"
+      },
+      {
+        "criterion_policy_reference": "criterion-evaluation-policy/v1",
+        "description": "Can handle simple routine communication and describe immediate needs or familiar matters with limited complexity.",
+        "display_label": "A2",
+        "evidence_policy_reference": "evidence-qualification-policy/v1",
+        "id": "cd466946-41b8-5220-bde7-18d9be4e7f65",
+        "ordinal_rank": 2,
+        "scale_version_id": "5edac3a6-1a8a-5b1c-bc3f-88b4efb0cea1",
+        "stable_key": "a2"
+      },
+      {
+        "criterion_policy_reference": "criterion-evaluation-policy/v1",
+        "description": "Can understand clear standard input, manage common independent situations, and produce connected communication on familiar topics.",
+        "display_label": "B1",
+        "evidence_policy_reference": "evidence-qualification-policy/v1",
+        "id": "41efa7df-8581-5375-9b10-3ed49a8551ab",
+        "ordinal_rank": 3,
+        "scale_version_id": "5edac3a6-1a8a-5b1c-bc3f-88b4efb0cea1",
+        "stable_key": "b1"
+      },
+      {
+        "criterion_policy_reference": "criterion-evaluation-policy/v1",
+        "description": "Can understand complex material, interact with practical fluency, and communicate detailed positions across a broad range of topics.",
+        "display_label": "B2",
+        "evidence_policy_reference": "evidence-qualification-policy/v1",
+        "id": "f92efda3-02b4-5d98-a67b-e9a09e73c7d8",
+        "ordinal_rank": 4,
+        "scale_version_id": "5edac3a6-1a8a-5b1c-bc3f-88b4efb0cea1",
+        "stable_key": "b2"
+      },
+      {
+        "criterion_policy_reference": "criterion-evaluation-policy/v1",
+        "description": "Can understand demanding material, communicate fluently and flexibly, and produce well-structured language for complex purposes.",
+        "display_label": "C1",
+        "evidence_policy_reference": "evidence-qualification-policy/v1",
+        "id": "e7acb552-19dd-5fac-9725-325b4423fc22",
+        "ordinal_rank": 5,
+        "scale_version_id": "5edac3a6-1a8a-5b1c-bc3f-88b4efb0cea1",
+        "stable_key": "c1"
+      },
+      {
+        "criterion_policy_reference": "criterion-evaluation-policy/v1",
+        "description": "Can integrate difficult information from varied sources and communicate precisely with fine distinctions in highly complex contexts.",
+        "display_label": "C2",
+        "evidence_policy_reference": "evidence-qualification-policy/v1",
+        "id": "61e44204-c18d-508b-962c-c60dce8610a4",
+        "ordinal_rank": 6,
+        "scale_version_id": "5edac3a6-1a8a-5b1c-bc3f-88b4efb0cea1",
+        "stable_key": "c2"
+      }
+    ],
+    "capability_scale_versions": [
+      {
+        "created_at": 1788912000000,
+        "description": "Ordinal technical capability.",
+        "display_name": "Technical",
+        "id": "9824edcf-8777-5db1-849a-53602ff566d6",
+        "scale_stable_key": "technical",
+        "scale_version": "v1"
+      },
+      {
+        "created_at": 1788912000000,
+        "description": "CEFR-aligned language capability.",
+        "display_name": "CEFR",
+        "id": "5edac3a6-1a8a-5b1c-bc3f-88b4efb0cea1",
+        "scale_stable_key": "cefr",
+        "scale_version": "v1"
+      }
+    ],
+    "capability_state_events": [
+      {
+        "cause_code": "evaluation",
+        "competency_identity_id": "d7ab75fe-f268-48c5-bf96-82302067c9f9",
+        "created_at": 1789830912073,
+        "decisive_evidence_ids_json": "[]",
+        "dimension_id": null,
+        "evaluation_run_id": "4a54823a-947f-434b-8b4d-29cba0b3f3fa",
+        "event_sequence": 1,
+        "id": "4ee5a050-7b79-4df0-8a32-b0cc089857c4",
+        "new_assessment_status": "unknown",
+        "new_confidence": "unknown",
+        "new_level_id": null,
+        "previous_assessment_status": null,
+        "previous_confidence": null,
+        "previous_level_id": null,
+        "scope_key": "overall",
+        "semantic_definition_id": "87125869-9fac-4207-9de4-c9aa183275f1"
+      },
+      {
+        "cause_code": "evaluation",
+        "competency_identity_id": "b4f45a12-8bc5-487d-ad26-31c9cb5ca85f",
+        "created_at": 1789830912113,
+        "decisive_evidence_ids_json": "[]",
+        "dimension_id": null,
+        "evaluation_run_id": "f2fe0f5f-0b35-4633-8f2b-cc7721884639",
+        "event_sequence": 1,
+        "id": "96d4e14f-cf56-4fb0-958c-dce90671d68e",
+        "new_assessment_status": "unknown",
+        "new_confidence": "unknown",
+        "new_level_id": null,
+        "previous_assessment_status": null,
+        "previous_confidence": null,
+        "previous_level_id": null,
+        "scope_key": "overall",
+        "semantic_definition_id": "740a9aa9-5d11-450b-8158-4ca61354886d"
+      }
+    ],
+    "competency_ability_items": [],
+    "competency_definition_activation_events": [
+      {
+        "activated_at": 1789830912057,
+        "competency_identity_id": "d7ab75fe-f268-48c5-bf96-82302067c9f9",
+        "event_sequence": 1,
+        "from_definition_id": null,
+        "id": "1f8acb86-f50e-46f2-bb2c-cf608f17862c",
+        "idempotency_key": "activate-graph.foundation",
+        "reason": "Graph test definition",
+        "source": "test",
+        "to_definition_id": "87125869-9fac-4207-9de4-c9aa183275f1"
+      },
+      {
+        "activated_at": 1789830912108,
+        "competency_identity_id": "b4f45a12-8bc5-487d-ad26-31c9cb5ca85f",
+        "event_sequence": 2,
+        "from_definition_id": null,
+        "id": "0065cf05-e339-4940-a9c7-06bcf4e31927",
+        "idempotency_key": "activate-graph.delivery",
+        "reason": "Graph test definition",
+        "source": "test",
+        "to_definition_id": "740a9aa9-5d11-450b-8158-4ca61354886d"
+      }
+    ],
+    "competency_definitions": [],
+    "competency_edge_definitions": [
+      {
+        "edge_identity_id": "3f72fd17-5e7c-4b94-8e97-c610a968781b",
+        "edge_type": "prerequisite",
+        "id": "ea66ceca-9d21-49b3-8eec-dd373f47e4a6",
+        "learning_graph_version_id": "6a2ac48e-e72b-4cd1-87ee-992e222fc501",
+        "order_index": 0,
+        "provenance": "owner_curated",
+        "requirement_json": "{\"dimension_id\":null,\"kind\":\"capability_at_least\",\"minimum_level_id\":\"6232b598-daed-5db0-afd6-e5e0147f9c67\",\"review_requirement\":\"none\",\"scale_version_id\":\"9824edcf-8777-5db1-849a-53602ff566d6\"}",
+        "requirement_kind": "capability_at_least",
+        "satisfaction_scope_key": "overall",
+        "source_competency_identity_id": "d7ab75fe-f268-48c5-bf96-82302067c9f9",
+        "source_semantic_definition_id": "87125869-9fac-4207-9de4-c9aa183275f1",
+        "target_competency_identity_id": "b4f45a12-8bc5-487d-ad26-31c9cb5ca85f",
+        "target_semantic_definition_id": "740a9aa9-5d11-450b-8158-4ca61354886d"
+      },
+      {
+        "edge_identity_id": "9c402665-1c89-4b08-a8ba-546bac3a4bc8",
+        "edge_type": "specialization",
+        "id": "ef1db0f7-acad-4261-9e45-31436096c3c4",
+        "learning_graph_version_id": "6a2ac48e-e72b-4cd1-87ee-992e222fc501",
+        "order_index": 1,
+        "provenance": "owner_curated",
+        "requirement_json": "{}",
+        "requirement_kind": null,
+        "satisfaction_scope_key": "overall",
+        "source_competency_identity_id": "d7ab75fe-f268-48c5-bf96-82302067c9f9",
+        "source_semantic_definition_id": "87125869-9fac-4207-9de4-c9aa183275f1",
+        "target_competency_identity_id": "b4f45a12-8bc5-487d-ad26-31c9cb5ca85f",
+        "target_semantic_definition_id": "740a9aa9-5d11-450b-8158-4ca61354886d"
+      },
+      {
+        "edge_identity_id": "434248b6-cfe5-4efa-8a54-90fdce350432",
+        "edge_type": "recommended_before",
+        "id": "44a3f8de-8432-4ea9-a048-eeac639972ef",
+        "learning_graph_version_id": "6a2ac48e-e72b-4cd1-87ee-992e222fc501",
+        "order_index": 2,
+        "provenance": "owner_curated",
+        "requirement_json": "{}",
+        "requirement_kind": null,
+        "satisfaction_scope_key": "overall",
+        "source_competency_identity_id": "b4f45a12-8bc5-487d-ad26-31c9cb5ca85f",
+        "source_semantic_definition_id": "740a9aa9-5d11-450b-8158-4ca61354886d",
+        "target_competency_identity_id": "d7ab75fe-f268-48c5-bf96-82302067c9f9",
+        "target_semantic_definition_id": "87125869-9fac-4207-9de4-c9aa183275f1"
+      },
+      {
+        "edge_identity_id": "c5308601-767e-4e7d-86f5-12989a03202c",
+        "edge_type": "supports",
+        "id": "31f5602f-32ba-4e3d-a53b-10a00973a99e",
+        "learning_graph_version_id": "6a2ac48e-e72b-4cd1-87ee-992e222fc501",
+        "order_index": 3,
+        "provenance": "owner_curated",
+        "requirement_json": "{}",
+        "requirement_kind": null,
+        "satisfaction_scope_key": "overall",
+        "source_competency_identity_id": "b4f45a12-8bc5-487d-ad26-31c9cb5ca85f",
+        "source_semantic_definition_id": "740a9aa9-5d11-450b-8158-4ca61354886d",
+        "target_competency_identity_id": "d7ab75fe-f268-48c5-bf96-82302067c9f9",
+        "target_semantic_definition_id": "87125869-9fac-4207-9de4-c9aa183275f1"
+      },
+      {
+        "edge_identity_id": "c3c6861f-ca45-4feb-abdf-0b3c0da4de2a",
+        "edge_type": "related",
+        "id": "c20a51fe-4ec2-474a-beb8-47391a5af37c",
+        "learning_graph_version_id": "6a2ac48e-e72b-4cd1-87ee-992e222fc501",
+        "order_index": 4,
+        "provenance": "owner_curated",
+        "requirement_json": "{}",
+        "requirement_kind": null,
+        "satisfaction_scope_key": "overall",
+        "source_competency_identity_id": "b4f45a12-8bc5-487d-ad26-31c9cb5ca85f",
+        "source_semantic_definition_id": "740a9aa9-5d11-450b-8158-4ca61354886d",
+        "target_competency_identity_id": "d7ab75fe-f268-48c5-bf96-82302067c9f9",
+        "target_semantic_definition_id": "87125869-9fac-4207-9de4-c9aa183275f1"
+      }
+    ],
+    "competency_edge_identities": [
+      {
+        "created_at": 1789830912197,
+        "edge_type": "prerequisite",
+        "id": "3f72fd17-5e7c-4b94-8e97-c610a968781b",
+        "learning_graph_id": "0af4e777-a44b-483b-81a5-4f927e5247d2",
+        "meaning_key": "foundation-before-delivery",
+        "source_competency_identity_id": "d7ab75fe-f268-48c5-bf96-82302067c9f9",
+        "stable_key": "foundation-before-delivery",
+        "target_competency_identity_id": "b4f45a12-8bc5-487d-ad26-31c9cb5ca85f"
+      },
+      {
+        "created_at": 1789830912199,
+        "edge_type": "specialization",
+        "id": "9c402665-1c89-4b08-a8ba-546bac3a4bc8",
+        "learning_graph_id": "0af4e777-a44b-483b-81a5-4f927e5247d2",
+        "meaning_key": "foundation-specializes-delivery",
+        "source_competency_identity_id": "d7ab75fe-f268-48c5-bf96-82302067c9f9",
+        "stable_key": "foundation-specializes-delivery",
+        "target_competency_identity_id": "b4f45a12-8bc5-487d-ad26-31c9cb5ca85f"
+      },
+      {
+        "created_at": 1789830912200,
+        "edge_type": "recommended_before",
+        "id": "434248b6-cfe5-4efa-8a54-90fdce350432",
+        "learning_graph_id": "0af4e777-a44b-483b-81a5-4f927e5247d2",
+        "meaning_key": "delivery-recommended-after-foundation",
+        "source_competency_identity_id": "b4f45a12-8bc5-487d-ad26-31c9cb5ca85f",
+        "stable_key": "delivery-recommended-after-foundation",
+        "target_competency_identity_id": "d7ab75fe-f268-48c5-bf96-82302067c9f9"
+      },
+      {
+        "created_at": 1789830912202,
+        "edge_type": "supports",
+        "id": "c5308601-767e-4e7d-86f5-12989a03202c",
+        "learning_graph_id": "0af4e777-a44b-483b-81a5-4f927e5247d2",
+        "meaning_key": "delivery-supports-foundation",
+        "source_competency_identity_id": "b4f45a12-8bc5-487d-ad26-31c9cb5ca85f",
+        "stable_key": "delivery-supports-foundation",
+        "target_competency_identity_id": "d7ab75fe-f268-48c5-bf96-82302067c9f9"
+      },
+      {
+        "created_at": 1789830912203,
+        "edge_type": "related",
+        "id": "c3c6861f-ca45-4feb-abdf-0b3c0da4de2a",
+        "learning_graph_id": "0af4e777-a44b-483b-81a5-4f927e5247d2",
+        "meaning_key": "related-pair",
+        "source_competency_identity_id": "b4f45a12-8bc5-487d-ad26-31c9cb5ca85f",
+        "stable_key": "related-pair",
+        "target_competency_identity_id": "d7ab75fe-f268-48c5-bf96-82302067c9f9"
+      }
+    ],
+    "competency_identities": [
+      {
+        "creation_source": "test",
+        "id": "d7ab75fe-f268-48c5-bf96-82302067c9f9",
+        "identity_created_at": 1789830912033,
+        "legacy_unspecified_reason": null,
+        "retired_at": null,
+        "retirement_reason": null,
+        "stable_key": "graph.foundation"
+      },
+      {
+        "creation_source": "test",
+        "id": "b4f45a12-8bc5-487d-ad26-31c9cb5ca85f",
+        "identity_created_at": 1789830912098,
+        "legacy_unspecified_reason": null,
+        "retired_at": null,
+        "retirement_reason": null,
+        "stable_key": "graph.delivery"
+      }
+    ],
+    "competency_prerequisites": [],
+    "competency_states": [
+      {
+        "competency_identity_id": "d7ab75fe-f268-48c5-bf96-82302067c9f9",
+        "current_status": "not_started",
+        "updated_at": 1789830912033
+      },
+      {
+        "competency_identity_id": "b4f45a12-8bc5-487d-ad26-31c9cb5ca85f",
+        "current_status": "not_started",
+        "updated_at": 1789830912098
+      }
+    ],
+    "competency_status_events": [
+      {
+        "competency_identity_id": "d7ab75fe-f268-48c5-bf96-82302067c9f9",
+        "created_at": 1789830912033,
+        "from_status": null,
+        "id": "472fbbbb-0610-4340-930d-d3a0fb5cd509",
+        "reason": "Competency introduced through the V2 semantic API",
+        "source": "v2_semantic_definition",
+        "to_status": "not_started",
+        "verification_record_id": null
+      },
+      {
+        "competency_identity_id": "b4f45a12-8bc5-487d-ad26-31c9cb5ca85f",
+        "created_at": 1789830912098,
+        "from_status": null,
+        "id": "c706bd6a-d5ba-47fe-9f16-791242d4f3e3",
+        "reason": "Competency introduced through the V2 semantic API",
+        "source": "v2_semantic_definition",
+        "to_status": "not_started",
+        "verification_record_id": null
+      }
+    ],
+    "competency_understanding_items": [],
+    "contribution_retractions": [],
+    "criterion_definitions": [
+      {
+        "created_at": 1789830912045,
+        "criterion_identity_id": "03613da0-8609-413a-8bb7-03bbab19429f",
+        "definition_version": 1,
+        "demonstration_rule_json": "{\"rule\":\"independent_performance\"}",
+        "description": "Demonstrate Foundation",
+        "dimension_id": null,
+        "id": "4e7ede30-1199-47df-8ebd-fdfc4c16f8b5",
+        "importance_weight": null,
+        "level_id": "0e7d329f-9ce0-56d9-8ae1-bb3d51ed1cb2",
+        "requirement_type": "required",
+        "semantic_definition_id": "87125869-9fac-4207-9de4-c9aa183275f1",
+        "supersedes_definition_id": null,
+        "verification_rubric": null
+      },
+      {
+        "created_at": 1789830912102,
+        "criterion_identity_id": "f897bd7e-e983-4375-8e1b-1007c691429b",
+        "definition_version": 1,
+        "demonstration_rule_json": "{\"rule\":\"independent_performance\"}",
+        "description": "Demonstrate Delivery",
+        "dimension_id": null,
+        "id": "a1fedfb5-0528-4294-ab57-6fa73b162545",
+        "importance_weight": null,
+        "level_id": "0e7d329f-9ce0-56d9-8ae1-bb3d51ed1cb2",
+        "requirement_type": "required",
+        "semantic_definition_id": "740a9aa9-5d11-450b-8158-4ca61354886d",
+        "supersedes_definition_id": null,
+        "verification_rubric": null
+      }
+    ],
+    "criterion_evaluation_results": [
+      {
+        "criterion_definition_id": "4e7ede30-1199-47df-8ebd-fdfc4c16f8b5",
+        "decisive_evidence_ids_json": "[]",
+        "evidence_set_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "facts_json": "{\"decisiveLinkIds\":[],\"independenceCompatibleSupportOccurrenceCount\":0,\"meaningfulSupportOccurrenceCount\":0,\"qualifyingAttemptCount\":0,\"rule\":\"independent_performance\",\"supportOccurrenceCount\":0,\"unresolvedContradictionIds\":[]}",
+        "id": "13594286-423c-4499-8afc-439ffdf03f60",
+        "run_id": "4a54823a-947f-434b-8b4d-29cba0b3f3fa",
+        "state": "unknown"
+      },
+      {
+        "criterion_definition_id": "4e7ede30-1199-47df-8ebd-fdfc4c16f8b5",
+        "decisive_evidence_ids_json": "[]",
+        "evidence_set_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "facts_json": "{\"decisiveLinkIds\":[],\"independenceCompatibleSupportOccurrenceCount\":0,\"meaningfulSupportOccurrenceCount\":0,\"qualifyingAttemptCount\":0,\"rule\":\"independent_performance\",\"supportOccurrenceCount\":0,\"unresolvedContradictionIds\":[]}",
+        "id": "6141b2b2-3f39-4aee-9504-04e2a5d12c71",
+        "run_id": "5d882a82-4794-4d1b-9f01-aa558581f24a",
+        "state": "unknown"
+      },
+      {
+        "criterion_definition_id": "4e7ede30-1199-47df-8ebd-fdfc4c16f8b5",
+        "decisive_evidence_ids_json": "[]",
+        "evidence_set_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "facts_json": "{\"decisiveLinkIds\":[],\"independenceCompatibleSupportOccurrenceCount\":0,\"meaningfulSupportOccurrenceCount\":0,\"qualifyingAttemptCount\":0,\"rule\":\"independent_performance\",\"supportOccurrenceCount\":0,\"unresolvedContradictionIds\":[]}",
+        "id": "2eb5a905-897b-44ab-a075-ab679d43927f",
+        "run_id": "04194215-4e66-44c4-bfc0-413ca53efa39",
+        "state": "unknown"
+      },
+      {
+        "criterion_definition_id": "a1fedfb5-0528-4294-ab57-6fa73b162545",
+        "decisive_evidence_ids_json": "[]",
+        "evidence_set_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "facts_json": "{\"decisiveLinkIds\":[],\"independenceCompatibleSupportOccurrenceCount\":0,\"meaningfulSupportOccurrenceCount\":0,\"qualifyingAttemptCount\":0,\"rule\":\"independent_performance\",\"supportOccurrenceCount\":0,\"unresolvedContradictionIds\":[]}",
+        "id": "d77f52b5-26ec-47fa-95f3-eeab48a36fd7",
+        "run_id": "f2fe0f5f-0b35-4633-8f2b-cc7721884639",
+        "state": "unknown"
+      },
+      {
+        "criterion_definition_id": "a1fedfb5-0528-4294-ab57-6fa73b162545",
+        "decisive_evidence_ids_json": "[]",
+        "evidence_set_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "facts_json": "{\"decisiveLinkIds\":[],\"independenceCompatibleSupportOccurrenceCount\":0,\"meaningfulSupportOccurrenceCount\":0,\"qualifyingAttemptCount\":0,\"rule\":\"independent_performance\",\"supportOccurrenceCount\":0,\"unresolvedContradictionIds\":[]}",
+        "id": "d05aa867-ba96-4181-8ee9-458851a3fbb2",
+        "run_id": "036e131f-8a3c-40f7-a06e-b33576c09c4a",
+        "state": "unknown"
+      },
+      {
+        "criterion_definition_id": "a1fedfb5-0528-4294-ab57-6fa73b162545",
+        "decisive_evidence_ids_json": "[]",
+        "evidence_set_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "facts_json": "{\"decisiveLinkIds\":[],\"independenceCompatibleSupportOccurrenceCount\":0,\"meaningfulSupportOccurrenceCount\":0,\"qualifyingAttemptCount\":0,\"rule\":\"independent_performance\",\"supportOccurrenceCount\":0,\"unresolvedContradictionIds\":[]}",
+        "id": "487e6f13-6bda-4673-b7f5-b8e676440fd7",
+        "run_id": "e0342800-cef2-4088-bbc7-13a69cdf6458",
+        "state": "unknown"
+      },
+      {
+        "criterion_definition_id": "a1fedfb5-0528-4294-ab57-6fa73b162545",
+        "decisive_evidence_ids_json": "[]",
+        "evidence_set_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "facts_json": "{\"decisiveLinkIds\":[],\"independenceCompatibleSupportOccurrenceCount\":0,\"meaningfulSupportOccurrenceCount\":0,\"qualifyingAttemptCount\":0,\"rule\":\"independent_performance\",\"supportOccurrenceCount\":0,\"unresolvedContradictionIds\":[]}",
+        "id": "31897ba5-aa12-493b-802a-01cd1332ae5b",
+        "run_id": "61ac94bc-6be4-4a52-8a69-94dfe4455036",
+        "state": "unknown"
+      },
+      {
+        "criterion_definition_id": "4e7ede30-1199-47df-8ebd-fdfc4c16f8b5",
+        "decisive_evidence_ids_json": "[]",
+        "evidence_set_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "facts_json": "{\"decisiveLinkIds\":[],\"independenceCompatibleSupportOccurrenceCount\":0,\"meaningfulSupportOccurrenceCount\":0,\"qualifyingAttemptCount\":0,\"rule\":\"independent_performance\",\"supportOccurrenceCount\":0,\"unresolvedContradictionIds\":[]}",
+        "id": "841cd5bf-37ca-46f3-9829-5a2fab6691c7",
+        "run_id": "8928ff20-1b54-4157-b8da-a00bbee75fd8",
+        "state": "unknown"
+      }
+    ],
+    "criterion_identities": [
+      {
+        "competency_identity_id": "d7ab75fe-f268-48c5-bf96-82302067c9f9",
+        "created_at": 1789830912045,
+        "creation_source": "test",
+        "id": "03613da0-8609-413a-8bb7-03bbab19429f",
+        "legacy_unspecified_reason": null,
+        "retired_at": null,
+        "retirement_reason": null,
+        "stable_key": "graph.foundation.criterion"
+      },
+      {
+        "competency_identity_id": "b4f45a12-8bc5-487d-ad26-31c9cb5ca85f",
+        "created_at": 1789830912102,
+        "creation_source": "test",
+        "id": "f897bd7e-e983-4375-8e1b-1007c691429b",
+        "legacy_unspecified_reason": null,
+        "retired_at": null,
+        "retirement_reason": null,
+        "stable_key": "graph.delivery.criterion"
+      }
+    ],
+    "curricula": [],
+    "curriculum_activation_events": [],
+    "curriculum_evidence_opportunities": [],
+    "curriculum_objective_definitions": [],
+    "curriculum_objective_identities": [],
+    "curriculum_versions": [],
+    "daily_reflections": [],
+    "discipline_configuration_events": [],
+    "discipline_profiles": [
+      {
+        "adaptation_phase_config_json": "{}",
+        "id": 1,
+        "target_duration_ms_per_active_day": 3600000,
+        "timezone": "UTC",
+        "updated_at": 1789830911948,
+        "weekly_target_active_days": 5
+      }
+    ],
+    "evidence": [],
+    "evidence_invalidations": [],
+    "evidence_link_retractions": [],
+    "evidence_links": [],
+    "evidence_redactions": [],
+    "evidence_retractions": [],
+    "exit_criterion_definitions": [],
+    "exit_criterion_identities": [],
+    "export_records": [],
+    "generated_reports": [],
+    "import_records": [],
+    "learning_control_authority_events": [
+      {
+        "actor": "system",
+        "command_type": "bootstrap",
+        "event_sequence": 1,
+        "id": "authority-bootstrap-legacy-v1",
+        "idempotency_key": "authority-bootstrap-legacy-v1",
+        "occurred_at": 0,
+        "payload_hash": "7a42047848503f33b99f5b03e3489ed106170ed2e6b90d6e8b801983126befe0",
+        "prior_state_json": null,
+        "reason": "Initial legacy authority baseline",
+        "resulting_state_json": "{\"canonicalLearningAuthority\":\"legacy_v1\",\"recommendationPresentation\":\"legacy_v1\",\"roadmapPresentation\":\"legacy_v1\",\"todayPresentation\":\"legacy_v1\"}",
+        "source": "migration"
+      }
+    ],
+    "learning_control_authority_state": [
+      {
+        "canonical_learning_authority": "legacy_v1",
+        "event_sequence": 1,
+        "id": 1,
+        "last_event_id": "authority-bootstrap-legacy-v1",
+        "recommendation_presentation": "legacy_v1",
+        "roadmap_presentation": "legacy_v1",
+        "state_hash": "3398d80de37ae4536877efa09ecb5296710cdc1a7410e204b521ecb01da48c3f",
+        "today_presentation": "legacy_v1",
+        "updated_at": 0
+      }
+    ],
+    "learning_graph_activation_events": [
+      {
+        "activated_at": 1789830912212,
+        "event_sequence": 1,
+        "from_learning_graph_version_id": null,
+        "id": "fb5cb5ad-d4bf-4865-85b1-d74990199b5f",
+        "idempotency_key": "activate-native-learning",
+        "learning_graph_id": "0af4e777-a44b-483b-81a5-4f927e5247d2",
+        "reason": "Native authority test",
+        "source": "test",
+        "to_learning_graph_version_id": "6a2ac48e-e72b-4cd1-87ee-992e222fc501"
+      }
+    ],
+    "learning_graph_versions": [
+      {
+        "content_hash": "fa310ce2f3fff6dda4860aa2822d276669b7f9545060ae26c06887b9f4ba6f54",
+        "created_at": 1789830912195,
+        "creation_source": "test",
+        "definition_payload_json": "{\"creation_source\":\"test\",\"description\":\"No legacy Roadmap authority\",\"edges\":[{\"edge_type\":\"prerequisite\",\"meaning_key\":\"foundation-before-delivery\",\"order_index\":0,\"provenance\":\"owner_curated\",\"requirement\":{\"dimension_id\":null,\"kind\":\"capability_at_least\",\"minimum_level_id\":\"6232b598-daed-5db0-afd6-e5e0147f9c67\",\"review_requirement\":\"none\",\"scale_version_id\":\"9824edcf-8777-5db1-849a-53602ff566d6\"},\"satisfaction_scope_key\":\"overall\",\"source_competency_identity_id\":\"d7ab75fe-f268-48c5-bf96-82302067c9f9\",\"source_semantic_definition_id\":\"87125869-9fac-4207-9de4-c9aa183275f1\",\"stable_key\":\"foundation-before-delivery\",\"target_competency_identity_id\":\"b4f45a12-8bc5-487d-ad26-31c9cb5ca85f\",\"target_semantic_definition_id\":\"740a9aa9-5d11-450b-8158-4ca61354886d\"},{\"edge_type\":\"specialization\",\"meaning_key\":\"foundation-specializes-delivery\",\"order_index\":1,\"provenance\":\"owner_curated\",\"requirement\":null,\"satisfaction_scope_key\":\"overall\",\"source_competency_identity_id\":\"d7ab75fe-f268-48c5-bf96-82302067c9f9\",\"source_semantic_definition_id\":\"87125869-9fac-4207-9de4-c9aa183275f1\",\"stable_key\":\"foundation-specializes-delivery\",\"target_competency_identity_id\":\"b4f45a12-8bc5-487d-ad26-31c9cb5ca85f\",\"target_semantic_definition_id\":\"740a9aa9-5d11-450b-8158-4ca61354886d\"},{\"edge_type\":\"recommended_before\",\"meaning_key\":\"delivery-recommended-after-foundation\",\"order_index\":2,\"provenance\":\"owner_curated\",\"requirement\":null,\"satisfaction_scope_key\":\"overall\",\"source_competency_identity_id\":\"b4f45a12-8bc5-487d-ad26-31c9cb5ca85f\",\"source_semantic_definition_id\":\"740a9aa9-5d11-450b-8158-4ca61354886d\",\"stable_key\":\"delivery-recommended-after-foundation\",\"target_competency_identity_id\":\"d7ab75fe-f268-48c5-bf96-82302067c9f9\",\"target_semantic_definition_id\":\"87125869-9fac-4207-9de4-c9aa183275f1\"},{\"edge_type\":\"supports\",\"meaning_key\":\"delivery-supports-foundation\",\"order_index\":3,\"provenance\":\"owner_curated\",\"requirement\":null,\"satisfaction_scope_key\":\"overall\",\"source_competency_identity_id\":\"b4f45a12-8bc5-487d-ad26-31c9cb5ca85f\",\"source_semantic_definition_id\":\"740a9aa9-5d11-450b-8158-4ca61354886d\",\"stable_key\":\"delivery-supports-foundation\",\"target_competency_identity_id\":\"d7ab75fe-f268-48c5-bf96-82302067c9f9\",\"target_semantic_definition_id\":\"87125869-9fac-4207-9de4-c9aa183275f1\"},{\"edge_type\":\"related\",\"meaning_key\":\"related-pair\",\"order_index\":4,\"provenance\":\"owner_curated\",\"requirement\":null,\"satisfaction_scope_key\":\"overall\",\"source_competency_identity_id\":\"b4f45a12-8bc5-487d-ad26-31c9cb5ca85f\",\"source_semantic_definition_id\":\"740a9aa9-5d11-450b-8158-4ca61354886d\",\"stable_key\":\"related-pair\",\"target_competency_identity_id\":\"d7ab75fe-f268-48c5-bf96-82302067c9f9\",\"target_semantic_definition_id\":\"87125869-9fac-4207-9de4-c9aa183275f1\"}],\"effective_at\":1767225600000,\"satisfaction_policy_version\":\"learning-graph-satisfaction/v1\",\"schema_version\":\"learning-graph-schema/v1\",\"title\":\"Native learning relations\"}",
+        "description": "No legacy Roadmap authority",
+        "effective_at": 1767225600000,
+        "id": "6a2ac48e-e72b-4cd1-87ee-992e222fc501",
+        "learning_graph_id": "0af4e777-a44b-483b-81a5-4f927e5247d2",
+        "satisfaction_policy_version": "learning-graph-satisfaction/v1",
+        "schema_version": "learning-graph-schema/v1",
+        "supersedes_version_id": null,
+        "title": "Native learning relations",
+        "version": 1
+      }
+    ],
+    "learning_graphs": [
+      {
+        "created_at": 1789830912181,
+        "creation_source": "test",
+        "id": "0af4e777-a44b-483b-81a5-4f927e5247d2",
+        "stable_key": "native-learning"
+      }
+    ],
+    "learning_sessions": [],
+    "learning_unit_definitions": [],
+    "learning_unit_identities": [],
+    "learning_unit_requirements": [],
+    "learning_unit_targets": [],
+    "legacy_criterion_assertions": [],
+    "legacy_roadmap_active_states": [],
+    "migration_backfill_runs": [
+      {
+        "id": "dd3eef0d-c7ee-5f65-9911-f27d07743d2d",
+        "policy_key": "legacy-backfill-policy/v1",
+        "recorded_at": 1788912000000,
+        "result_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "result_row_count": 0,
+        "source_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "source_kind": "v1_exit_criteria",
+        "source_row_count": 0
+      },
+      {
+        "id": "62bbb6ce-c7bf-517d-83c5-27b02b370af4",
+        "policy_key": "activity-legacy-backfill-policy/v1",
+        "recorded_at": 1788912000000,
+        "result_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "result_row_count": 0,
+        "source_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "source_kind": "v1_learning_sessions",
+        "source_row_count": 0
+      },
+      {
+        "id": "9e14f409-7920-5a86-b5c8-dc180085b933",
+        "policy_key": "unified-evidence-legacy-backfill/v1",
+        "recorded_at": 1788912000000,
+        "result_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "result_row_count": 0,
+        "source_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "source_kind": "v1_evidence_sources",
+        "source_row_count": 0
+      }
+    ],
+    "milestone_identities": [
+      {
+        "created_at": 1789830912134,
+        "id": "b5efbef0-7cf3-4f54-acea-ce33043bfeca",
+        "stable_key": "ready",
+        "target_profile_id": "0265c928-b213-4cc3-87e9-47c6ad28eda0"
+      }
+    ],
+    "phases": [],
+    "profile_domains": [
+      {
+        "description": "",
+        "id": "a6458830-e3a7-4dce-a32a-b60f8d105c6d",
+        "maximum_percent": 100,
+        "minimum_percent": 100,
+        "order_index": 0,
+        "profile_version_id": "0c15391d-1fa9-46c8-b180-00853b4f8a3a",
+        "stable_key": "engineering",
+        "title": "Engineering"
+      }
+    ],
+    "profile_milestone_targets": [
+      {
+        "milestone_id": "2cb72a8b-3e9b-4648-b81d-5a227f817e40",
+        "profile_target_id": "ee3d227e-3749-4e17-8724-6ff897eabb55"
+      }
+    ],
+    "profile_milestones": [
+      {
+        "description": "",
+        "id": "2cb72a8b-3e9b-4648-b81d-5a227f817e40",
+        "milestone_identity_id": "b5efbef0-7cf3-4f54-acea-ce33043bfeca",
+        "order_index": 0,
+        "profile_version_id": "0c15391d-1fa9-46c8-b180-00853b4f8a3a",
+        "target_date": null,
+        "title": "Ready"
+      }
+    ],
+    "profile_target_identities": [
+      {
+        "competency_identity_id": "d7ab75fe-f268-48c5-bf96-82302067c9f9",
+        "created_at": 1789830912134,
+        "dimension_key": null,
+        "id": "2478002c-f82a-4218-8e53-05038a28bb52",
+        "stable_key": "foundation",
+        "target_profile_id": "0265c928-b213-4cc3-87e9-47c6ad28eda0"
+      },
+      {
+        "competency_identity_id": "b4f45a12-8bc5-487d-ad26-31c9cb5ca85f",
+        "created_at": 1789830912134,
+        "dimension_key": null,
+        "id": "fd00010e-93d6-4ed2-8f42-0bc934eff414",
+        "stable_key": "delivery",
+        "target_profile_id": "0265c928-b213-4cc3-87e9-47c6ad28eda0"
+      }
+    ],
+    "profile_targets": [
+      {
+        "created_at": 1789830912134,
+        "creation_source": "test",
+        "date_interpretation": null,
+        "freshness_override_days": null,
+        "id": "a9eeedfc-af3d-4681-916b-93037e6ad3e7",
+        "priority": "core",
+        "profile_domain_id": "a6458830-e3a7-4dce-a32a-b60f8d105c6d",
+        "profile_version_id": "0c15391d-1fa9-46c8-b180-00853b4f8a3a",
+        "scale_version_id": "9824edcf-8777-5db1-849a-53602ff566d6",
+        "target_date": null,
+        "target_identity_id": "2478002c-f82a-4218-8e53-05038a28bb52",
+        "target_level_id": "0e7d329f-9ce0-56d9-8ae1-bb3d51ed1cb2",
+        "target_month": null
+      },
+      {
+        "created_at": 1789830912134,
+        "creation_source": "test",
+        "date_interpretation": null,
+        "freshness_override_days": null,
+        "id": "ee3d227e-3749-4e17-8724-6ff897eabb55",
+        "priority": "important",
+        "profile_domain_id": "a6458830-e3a7-4dce-a32a-b60f8d105c6d",
+        "profile_version_id": "0c15391d-1fa9-46c8-b180-00853b4f8a3a",
+        "scale_version_id": "9824edcf-8777-5db1-849a-53602ff566d6",
+        "target_date": null,
+        "target_identity_id": "fd00010e-93d6-4ed2-8f42-0bc934eff414",
+        "target_level_id": "26721537-180b-5b96-a5c4-c31aaa321d74",
+        "target_month": null
+      }
+    ],
+    "project_criterion_definitions": [],
+    "project_criterion_evaluation_evidence": [],
+    "project_criterion_evaluations": [],
+    "project_criterion_identities": [],
+    "project_events": [],
+    "project_evidence_opportunities": [],
+    "project_goal_definitions": [],
+    "project_goal_identities": [],
+    "project_milestone_definitions": [],
+    "project_milestone_identities": [],
+    "project_requirements": [],
+    "project_targets": [],
+    "project_task_definitions": [],
+    "project_task_dependencies": [],
+    "project_task_identities": [],
+    "project_version_activation_events": [],
+    "project_versions": [],
+    "projects": [],
+    "readiness_gate_identities": [],
+    "readiness_gate_predicates": [],
+    "readiness_gate_targets": [],
+    "readiness_gates": [],
+    "recommendation_snapshots": [],
+    "recommendation_v2_candidates": [],
+    "recommendation_v2_eligibility_decisions": [],
+    "recommendation_v2_eligibility_rule_results": [],
+    "recommendation_v2_expected_values": [],
+    "recommendation_v2_reasons": [],
+    "recommendation_v2_recommendations": [],
+    "recommendation_v2_runs": [],
+    "recommendation_v2_score_components": [],
+    "recommendation_v2_selection_decisions": [],
+    "review_events": [
+      {
+        "competency_identity_id": "d7ab75fe-f268-48c5-bf96-82302067c9f9",
+        "created_at": 1789830912073,
+        "current_through_days": null,
+        "dimension_id": null,
+        "evaluation_run_id": "4a54823a-947f-434b-8b4d-29cba0b3f3fa",
+        "event_sequence": 1,
+        "freshness_policy_version": "freshness-policy/v1",
+        "id": "27fd6675-8a06-4997-ad15-e4149c7f3486",
+        "last_meaningful_evidence_at": null,
+        "new_freshness": "unknown",
+        "new_review_due": false,
+        "previous_freshness": null,
+        "previous_review_due": null,
+        "reason_codes_json": "[\"no_meaningful_evidence_timestamp\"]",
+        "scope_key": "overall",
+        "semantic_definition_id": "87125869-9fac-4207-9de4-c9aa183275f1",
+        "stale_after_days": null,
+        "threshold_source": "freshness-policy-default"
+      },
+      {
+        "competency_identity_id": "b4f45a12-8bc5-487d-ad26-31c9cb5ca85f",
+        "created_at": 1789830912113,
+        "current_through_days": null,
+        "dimension_id": null,
+        "evaluation_run_id": "f2fe0f5f-0b35-4633-8f2b-cc7721884639",
+        "event_sequence": 1,
+        "freshness_policy_version": "freshness-policy/v1",
+        "id": "3afb2810-0865-451a-be5e-6ca92bbc7f11",
+        "last_meaningful_evidence_at": null,
+        "new_freshness": "unknown",
+        "new_review_due": false,
+        "previous_freshness": null,
+        "previous_review_due": null,
+        "reason_codes_json": "[\"no_meaningful_evidence_timestamp\"]",
+        "scope_key": "overall",
+        "semantic_definition_id": "740a9aa9-5d11-450b-8158-4ca61354886d",
+        "stale_after_days": null,
+        "threshold_source": "freshness-policy-default"
+      }
+    ],
+    "roadmap_node_position_overrides": [],
+    "roadmap_projection_preferences": [],
+    "roadmap_scope_events": [],
+    "roadmap_versions": [],
+    "roadmaps": [],
+    "semantic_competency_definitions": [
+      {
+        "competency_identity_id": "d7ab75fe-f268-48c5-bf96-82302067c9f9",
+        "created_at": 1789830912045,
+        "creation_source": "test",
+        "definition_version": 1,
+        "description": "Semantic definition for Foundation",
+        "effective_at": 1767225600000,
+        "freshness_current_through_days": null,
+        "freshness_stale_after_days": null,
+        "id": "87125869-9fac-4207-9de4-c9aa183275f1",
+        "scale_version_id": "9824edcf-8777-5db1-849a-53602ff566d6",
+        "scope": "Exact scope for Foundation",
+        "supersedes_definition_id": null,
+        "title": "Foundation"
+      },
+      {
+        "competency_identity_id": "b4f45a12-8bc5-487d-ad26-31c9cb5ca85f",
+        "created_at": 1789830912102,
+        "creation_source": "test",
+        "definition_version": 1,
+        "description": "Semantic definition for Delivery",
+        "effective_at": 1767225600000,
+        "freshness_current_through_days": null,
+        "freshness_stale_after_days": null,
+        "id": "740a9aa9-5d11-450b-8158-4ca61354886d",
+        "scale_version_id": "9824edcf-8777-5db1-849a-53602ff566d6",
+        "scope": "Exact scope for Delivery",
+        "supersedes_definition_id": null,
+        "title": "Delivery"
+      }
+    ],
+    "semantic_definition_dimensions": [],
+    "session_contributions": [],
+    "session_corrections": [],
+    "session_project_contribution_retractions": [],
+    "session_project_contributions": [],
+    "suggestion_activity_relation_corrections": [],
+    "suggestion_activity_relations": [],
+    "target_profile_activation_events": [
+      {
+        "activated_at": 1789830912155,
+        "event_sequence": 1,
+        "from_profile_version_id": null,
+        "id": "3902bd23-96af-4940-8223-8be57e9b0229",
+        "idempotency_key": "activate-graph-profile",
+        "reason": "Projection test",
+        "source": "test",
+        "to_profile_version_id": "0c15391d-1fa9-46c8-b180-00853b4f8a3a"
+      }
+    ],
+    "target_profile_versions": [
+      {
+        "created_at": 1789830912134,
+        "creation_source": "test",
+        "description": "Projection source",
+        "effective_at": 1767225600000,
+        "id": "0c15391d-1fa9-46c8-b180-00853b4f8a3a",
+        "supersedes_version_id": null,
+        "target_profile_id": "0265c928-b213-4cc3-87e9-47c6ad28eda0",
+        "title": "Graph profile",
+        "version": 1
+      }
+    ],
+    "target_profiles": [
+      {
+        "created_at": 1789830912132,
+        "creation_source": "test",
+        "id": "0265c928-b213-4cc3-87e9-47c6ad28eda0",
+        "retired_at": null,
+        "retirement_reason": null,
+        "stable_key": "graph-profile"
+      }
+    ],
+    "today_generations": [],
+    "today_interaction_corrections": [],
+    "today_interactions": [],
+    "today_suggestions": [],
+    "tracks": [],
+    "verification_evidence": [],
+    "verification_records": []
+  },
+  "todayV2CurrentCheckpoint": {
+    "checkpointHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "states": []
+  }
+}

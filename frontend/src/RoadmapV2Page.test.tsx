@@ -20,13 +20,23 @@ const projection = {
       semanticDefinitionId: 'definition-1',
       stableKey: 'python.delivery',
       title: 'Python delivery',
-      profileDomain: { id: 'domain-1', title: 'Engineering', orderIndex: 0 },
+      profileDomain: null,
       profileTarget: { priority: 'core', targetLevelOrdinal: 3 },
+      profileTargets: [
+        { priority: 'core', targetLevelOrdinal: 3 },
+        { priority: 'important', targetLevelOrdinal: 2 },
+      ],
+      layoutLane: {
+        id: 'cross-domain-targets',
+        title: 'Cross-domain targets',
+        orderIndex: 0,
+      },
       capability: { scopes: [] },
       position: { x: 0, y: 0 },
       positionSource: 'roadmap-layout/v2.0',
       presentationParentId: 'semantic-0',
       isCurrent: true,
+      isTargeted: true,
       isToday: true,
     },
     {
@@ -138,17 +148,17 @@ describe('Roadmap Projection V2 thin workflow', () => {
     expect(await screen.findByRole('heading', { name: 'Roadmap Projection' })).toBeInTheDocument()
     expect(
       await screen.findByLabelText(
-        'Python delivery, Engineering, specialization child, recommended for Today',
+        'Python delivery, Cross-domain targets, specialization child, recommended for Today',
       ),
     ).toBeInTheDocument()
     expect(await screen.findByText(/Python delivery · Today/)).toBeInTheDocument()
-    expect(await screen.findByLabelText('Graph prerequisite, graph foundation')).toBeInTheDocument()
+    expect(await screen.findByLabelText('Graph prerequisite, Graph foundations')).toBeInTheDocument()
     expect(screen.queryByText('prerequisite')).not.toBeInTheDocument()
 
     await user.click(screen.getByRole('checkbox', { name: 'Show prerequisite relationships' }))
     expect((await screen.findAllByText('prerequisite')).length).toBeGreaterThan(0)
     await user.click(screen.getByRole('button', { name: 'Graph foundations' }))
-    expect(screen.queryByLabelText('Graph prerequisite, graph foundation')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Graph prerequisite, Graph foundations')).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: /Rebuild/ }))
     await user.click(screen.getByRole('button', { name: /Reset layout/ }))
 

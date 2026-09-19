@@ -44,6 +44,9 @@ function formatGuidePlugin(): Plugin {
 
 export default defineConfig({
   plugins: [react(), formatGuidePlugin()],
+  build: {
+    manifest: true,
+  },
   server: {
     proxy: {
       '/api': process.env.LCC_VITE_BACKEND_URL ?? 'http://127.0.0.1:8000',

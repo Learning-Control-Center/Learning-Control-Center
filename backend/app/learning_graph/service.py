@@ -34,6 +34,7 @@ from app.models import (
     SemanticCompetencyDefinition,
     SemanticDefinitionDimension,
 )
+from app.roadmap_projection.policies import ACTIVE_PROJECTION_POLICY
 from app.time_utils import datetime_to_epoch_ms, utc_now_ms
 
 GRAPH_SCHEMA_VERSION = "learning-graph-schema/v1"
@@ -458,7 +459,7 @@ def activate_version(
             subject_type="learning_graph",
             subject_id=graph.id,
             source_fact_id=item.id,
-            target_policy_version="roadmap-projection/v2.0",
+            target_policy_version=ACTIVE_PROJECTION_POLICY,
             status="pending",
             attempt_count=0,
             requested_at=now,

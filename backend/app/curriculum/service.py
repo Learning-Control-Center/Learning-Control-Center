@@ -58,6 +58,7 @@ from app.requirements.contracts import (
     RequirementState,
     evaluate_requirements,
 )
+from app.roadmap_projection.policies import ACTIVE_PROJECTION_POLICY
 from app.time_utils import datetime_to_epoch_ms, utc_now_ms
 
 CURRICULUM_SCHEMA_VERSION = "curriculum-schema/v1"
@@ -112,7 +113,7 @@ def link_actual_activity_to_unit(
     db.flush()
     for projection_kind, policy in (
         ("curriculum_availability", CURRICULUM_AVAILABILITY_POLICY),
-        ("roadmap_projection_v2", "roadmap-projection/v2.0"),
+        ("roadmap_projection_v2", ACTIVE_PROJECTION_POLICY),
         ("analysis", "analysis-policy/v3.0"),
     ):
         db.add(

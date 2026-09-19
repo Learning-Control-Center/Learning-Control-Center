@@ -5,30 +5,10 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import { ApiError, apiV2 } from '../api'
 import { EmptyState, ErrorState, LoadingState } from '../components/PageState'
-
-type ProjectionNode = {
-  id: string
-  nodeKey: string
-  semanticDefinitionId: string
-  stableKey: string
-  title: string
-  profileDomain: { id: string; title: string; orderIndex: number } | null
-  profileTarget: { priority: string; targetLevelOrdinal: number | null } | null
-  capability: {
-    scopes: {
-      scopeKey: string
-      assessmentStatus: string
-      confidence: string
-      freshness: string
-      reviewDue: boolean | null
-    }[]
-  }
-  position: { x: number; y: number }
-  positionSource: string
-  presentationParentId: string | null
-  isCurrent: boolean
-  isToday: boolean
-}
+import {
+  adaptRoadmapProjectionNode,
+  type RoadmapProjectionNode,
+} from '../features/roadmap/projection'
 
 type ProjectionEdge = {
   id: string
@@ -50,7 +30,7 @@ type Projection = {
   outputHash?: string
   relationshipVisibility?: Record<string, boolean>
   groups?: { id: string; title: string; orderIndex: number }[]
-  nodes?: ProjectionNode[]
+  nodes?: RoadmapProjectionNode[]
   edges?: ProjectionEdge[]
   legacyPhaseAuthority?: boolean
 }
@@ -99,15 +79,13 @@ export function RoadmapV2Page() {
   }
 
   const groups = useMemo(() => {
-    const nodes = projection?.nodes ?? []
-    const grouped = (projection?.groups ?? []).map((group) => ({
-      ...group,
-      nodes: nodes.filter((node) => node.profileDomain?.id === group.id),
-    }))
-    const ungrouped = nodes.filter((node) => node.profileDomain === null)
-    return ungrouped.length
-      ? [...grouped, { id: 'graph-foundations', title: 'Graph foundations', orderIndex: 999, nodes: ungrouped }]
-      : grouped
+    const nodes = (projection?.nodes ?? []).map(adaptRoadmapProjectionNode)
+    return [...new Map(nodes.map((node) => [node.layoutLane.id, node.layoutLane])).values()]
+      .sort((left, right) => left.orderIndex - right.orderIndex || left.id.localeCompare(right.id))
+      .map((lane) => ({
+        ...lane,
+        nodes: nodes.filter((node) => node.layoutLane.id === lane.id),
+      }))
   }, [projection])
 
   const savePosition = async (node: Node) => {
@@ -148,6 +126,7 @@ export function RoadmapV2Page() {
       .flatMap((group) => group.nodes.map((node) => node.id)),
   )
   const flowNodes: Node[] = (projection.nodes ?? [])
+    .map(adaptRoadmapProjectionNode)
     .filter((node) => !hiddenNodeIds.has(node.id))
     .map((node) => ({
       id: node.id,
@@ -155,11 +134,11 @@ export function RoadmapV2Page() {
       data: {
         label: `${node.presentationParentId ? '↳ ' : ''}${node.title}${node.isToday ? ' · Today' : ''}\n${node.capability.scopes[0]?.assessmentStatus ?? 'Capability unknown'}`,
       },
-      ariaLabel: `${node.title}, ${node.profileDomain?.title ?? 'graph foundation'}${node.presentationParentId ? ', specialization child' : ''}${node.isToday ? ', recommended for Today' : ''}`,
+      ariaLabel: `${node.title}, ${node.layoutLane.title}${node.presentationParentId ? ', specialization child' : ''}${node.isToday ? ', recommended for Today' : ''}`,
       style: {
         width: 220,
         borderRadius: 16,
-        border: node.isToday ? '3px solid #9a5c28' : node.profileTarget ? '2px solid #3f7258' : '1px solid #b8b4a7',
+        border: node.isToday ? '3px solid #9a5c28' : node.isTargeted ? '2px solid #3f7258' : '1px solid #b8b4a7',
         background: node.isToday ? '#fff4df' : '#fffdf7',
         whiteSpace: 'pre-line',
       },

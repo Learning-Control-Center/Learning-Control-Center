@@ -41,6 +41,7 @@ from app.models import (
     SemanticDefinitionDimension,
     new_id,
 )
+from app.roadmap_projection.policies import ACTIVE_PROJECTION_POLICY
 from app.settings_api import get_or_create_profile
 from app.time_utils import epoch_ms_to_rfc3339, utc_now_ms
 
@@ -952,7 +953,7 @@ def evaluate_capability(
                 subject_type="competency_capability",
                 subject_id=competency_id,
                 source_fact_id=run.id,
-                target_policy_version="roadmap-projection/v2.0",
+                target_policy_version=ACTIVE_PROJECTION_POLICY,
                 status="pending",
                 attempt_count=0,
                 requested_at=run.generated_at,

@@ -12,8 +12,9 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from app import database
+from app.determinism import content_hash
 from app.errors import AppError
-from app.import_export import _portable_payload, _validate_portable_payload
+from app.import_export import _apply_portable_restore, _portable_payload, _validate_portable_payload
 from app.learning_graph.models import (
     ActiveLearningGraphState,
     CompetencyEdgeDefinition,
@@ -31,7 +32,13 @@ from app.models import (
 )
 from app.portability.registry import PORTABLE_V9_MANIFEST
 from app.roadmap_projection import service as projection_service
-from app.roadmap_projection.models import LegacyRoadmapActiveState, RoadmapNodePositionOverride
+from app.roadmap_projection.models import (
+    LegacyRoadmapActiveState,
+    RoadmapNodePositionOverride,
+    RoadmapProjectionCache,
+    RoadmapProjectionCheckpoint,
+    RoadmapProjectionPreference,
+)
 from app.today.public import TodayRoadmapOverlayDTO, TodayRoadmapOverlayItemDTO
 from httpx import AsyncClient
 from sqlalchemy import func, select, update
@@ -397,6 +404,28 @@ async def test_native_graph_semantics_satisfaction_and_projection_are_determinis
         historical_after_move.json()["sourceLineage"]["presentationInputs"]["mode"]
         == "excluded_historical"
     )
+    unrelated_override = RoadmapNodePositionOverride(
+        scope_key="profile:other:graph:other",
+        node_key="other-node",
+        position_x=-875,
+        position_y=425,
+        provenance="user_override",
+        created_at=1,
+        updated_at=1,
+    )
+    db.add(unrelated_override)
+    db.commit()
+    preferences = await client.put(
+        f"/api/v2/roadmap-projection/{projection['scopeKey']}/preferences",
+        json={
+            "show_prerequisites": True,
+            "show_recommended_before": False,
+            "show_supports": True,
+            "show_related": False,
+        },
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert preferences.status_code == 200, preferences.text
     reset = await client.delete(
         f"/api/v2/roadmap-projection/{projection['scopeKey']}/positions",
         headers={"X-CSRF-Token": csrf},
@@ -409,7 +438,23 @@ async def test_native_graph_semantics_satisfaction_and_projection_are_determinis
         if item["semanticDefinitionId"] == second["id"]
     )
     assert reset_node["position"] == reset_node["canonicalPosition"]
-    assert db.scalar(select(func.count()).select_from(RoadmapNodePositionOverride)) == 0
+    assert reset.json()["projection"]["relationshipVisibility"] == {
+        "prerequisite": True,
+        "recommended_before": False,
+        "supports": True,
+        "specialization": True,
+        "related": False,
+    }
+    stored_preference = db.get(RoadmapProjectionPreference, str(projection["scopeKey"]))
+    assert stored_preference is not None
+    assert (
+        stored_preference.show_prerequisites,
+        stored_preference.show_recommended_before,
+        stored_preference.show_supports,
+        stored_preference.show_related,
+    ) == (True, False, True, False)
+    assert db.scalar(select(func.count()).select_from(RoadmapNodePositionOverride)) == 1
+    assert db.get(RoadmapNodePositionOverride, unrelated_override.id) is not None
     assert (
         db.scalar(
             select(func.count())
@@ -418,6 +463,211 @@ async def test_native_graph_semantics_satisfaction_and_projection_are_determinis
         )
         >= 2
     )
+
+
+async def test_projection_marks_multiple_current_today_competencies(
+    authenticated_client: tuple[AsyncClient, str],
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, csrf = authenticated_client
+    await _setup_native_graph(client, csrf)
+    baseline = projection_service.build_projection(db)
+    node_ids = [str(item["competencyIdentityId"]) for item in baseline["nodes"]]
+    overlay = TodayRoadmapOverlayDTO(
+        items=tuple(
+            TodayRoadmapOverlayItemDTO(
+                suggestion_id=f"suggestion-{index}",
+                generation_id="generation-current",
+                status="pending",
+                competency_identity_id=node_id,
+                target_identity_ids=(),
+                continuing_started=False,
+                expires_at=2_000_000_000_000,
+            )
+            for index, node_id in enumerate(node_ids)
+        ),
+        input_hash="today-overlay-multiple",
+    )
+    monkeypatch.setattr(projection_service, "current_roadmap_overlay", lambda *_a, **_kw: overlay)
+
+    projection = projection_service.build_projection(db)
+
+    assert len(node_ids) == 2
+    marked_today = {
+        str(item["competencyIdentityId"]) for item in projection["nodes"] if item["isToday"]
+    }
+    assert marked_today == set(node_ids)
+
+
+async def test_projection_preserves_public_multi_dimension_and_domain_targets(
+    authenticated_client: tuple[AsyncClient, str],
+) -> None:
+    client, csrf = authenticated_client
+    identity = await client.post(
+        "/api/v2/competencies",
+        json={"stable_key": "language.fixture", "creation_source": "test"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert identity.status_code == 201, identity.text
+    competency_id = str(identity.json()["id"])
+    definition = await client.post(
+        f"/api/v2/competencies/{competency_id}/definitions",
+        json={
+            "title": "Language fixture",
+            "description": "A multi-dimension Roadmap target.",
+            "scope": "Speaking and reading",
+            "scale_stable_key": "cefr",
+            "scale_version": "v1",
+            "dimension_keys": ["speaking", "reading"],
+            "effective_at": "2026-01-01T00:00:00Z",
+            "creation_source": "test",
+            "criteria": [
+                {
+                    "stable_key": "language.fixture.speaking",
+                    "level_stable_key": "b1",
+                    "dimension_key": "speaking",
+                    "requirement_type": "required",
+                    "demonstration_rule": "independent_performance",
+                    "description": "Demonstrate speaking.",
+                },
+                {
+                    "stable_key": "language.fixture.reading",
+                    "level_stable_key": "b2",
+                    "dimension_key": "reading",
+                    "requirement_type": "required",
+                    "demonstration_rule": "authoritative_assessment",
+                    "description": "Demonstrate reading.",
+                },
+            ],
+        },
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert definition.status_code == 201, definition.text
+    activated_definition = await client.post(
+        f"/api/v2/competencies/{competency_id}/definitions/{definition.json()['id']}/activate",
+        json={
+            "reason": "Projection target test",
+            "source": "test",
+            "idempotency_key": "activate-language-fixture",
+        },
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert activated_definition.status_code == 200, activated_definition.text
+    profile = await client.post(
+        "/api/v2/target-profiles",
+        json={
+            "stable_key": "language-fixture-profile",
+            "creation_source": "test",
+            "version": {
+                "title": "Language fixture profile",
+                "description": "Multi-target projection proof.",
+                "creation_source": "test",
+                "effective_at": "2026-01-01T00:00:00Z",
+                "domains": [
+                    {
+                        "stable_key": "communication",
+                        "title": "Communication",
+                        "minimum_percent": 0,
+                        "maximum_percent": 100,
+                        "order_index": 0,
+                    },
+                    {
+                        "stable_key": "comprehension",
+                        "title": "Comprehension",
+                        "minimum_percent": 0,
+                        "maximum_percent": 100,
+                        "order_index": 1,
+                    },
+                ],
+                "targets": [
+                    {
+                        "stable_key": "language-speaking",
+                        "competency_identity_id": competency_id,
+                        "dimension_key": "speaking",
+                        "domain_stable_key": "communication",
+                        "scale_stable_key": "cefr",
+                        "scale_version": "v1",
+                        "target_level_stable_key": "b1",
+                        "priority": "core",
+                    },
+                    {
+                        "stable_key": "language-reading",
+                        "competency_identity_id": competency_id,
+                        "dimension_key": "reading",
+                        "domain_stable_key": "comprehension",
+                        "scale_stable_key": "cefr",
+                        "scale_version": "v1",
+                        "target_level_stable_key": "b2",
+                        "priority": "important",
+                    },
+                ],
+                "milestones": [],
+                "readiness_gates": [],
+            },
+        },
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert profile.status_code == 201, profile.text
+    activated_profile = await client.post(
+        f"/api/v2/target-profiles/{profile.json()['profileId']}/versions/"
+        f"{profile.json()['versionId']}/activate",
+        json={
+            "reason": "Projection target test",
+            "source": "test",
+            "idempotency_key": "activate-language-profile",
+        },
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert activated_profile.status_code == 200, activated_profile.text
+    graph = await client.post(
+        "/api/v2/learning-graphs",
+        json={"stable_key": "language-fixture-graph", "creation_source": "test"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert graph.status_code == 201, graph.text
+    graph_version = await client.post(
+        f"/api/v2/learning-graphs/{graph.json()['id']}/versions",
+        json={
+            "title": "Language fixture graph",
+            "effective_at": "2026-01-01T00:00:00Z",
+            "creation_source": "test",
+            "edges": [],
+        },
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert graph_version.status_code == 201, graph_version.text
+    activated_graph = await client.post(
+        f"/api/v2/learning-graphs/{graph.json()['id']}/versions/"
+        f"{graph_version.json()['id']}/activate",
+        json={
+            "reason": "Projection target test",
+            "source": "test",
+            "idempotency_key": "activate-language-graph",
+        },
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert activated_graph.status_code == 201, activated_graph.text
+
+    response = await client.post(
+        "/api/v2/roadmap-projection/rebuild", headers={"X-CSRF-Token": csrf}
+    )
+    assert response.status_code == 200, response.text
+    node = response.json()["nodes"][0]
+    assert node["isTargeted"] is True
+    assert node["isCurrent"] is True
+    assert node["profileDomain"] is None
+    assert node["layoutLane"]["id"] == "cross-domain-targets"
+    assert [item["dimensionKey"] for item in node["profileTargets"]] == [
+        "speaking",
+        "reading",
+    ]
+    assert [item["profileDomain"]["title"] for item in node["profileTargets"]] == [
+        "Communication",
+        "Comprehension",
+    ]
+    assert [item["targetLevelKey"] for item in node["profileTargets"]] == ["b1", "b2"]
+    assert [item["targetLevelTitle"] for item in node["profileTargets"]] == ["B1", "B2"]
 
 
 async def test_graph_validation_rejects_hard_cycles_duplicates_scale_mismatch_and_identity_drift(
@@ -920,6 +1170,224 @@ async def test_graph_projection_portable_v6_and_legacy_compatibility_are_separat
     legacy_state = db.get(LegacyRoadmapActiveState, roadmap["id"])
     assert legacy_state is not None and legacy_state.is_current is True
     assert graph["id"] != roadmap["id"]
+
+
+async def test_portable_v9_verifies_frozen_v2_and_rebuilds_current_v3(
+    db: Session,
+) -> None:
+    fixture_path = Path(__file__).parent / "fixtures/v2/roadmap-projection-v2-portable-v9.json"
+    fixture_bytes = fixture_path.read_bytes()
+    assert hashlib.sha256(fixture_bytes).hexdigest() == (
+        "2f6e6b3615b0e2d12e936e4d0aa9a13ade76f473565801c6ba965cb421ad4bda"
+    )
+    package = json.loads(fixture_bytes)
+    assert package["roadmapProjectionCheckpoint"] == {
+        "configured": True,
+        "cutoffAt": 1789830912288,
+        "cutoffSemantics": "exclusive",
+        "inputHash": "84e801e863a14da90840860194b4f19bd0b2080c87faaabeece8b3702f7d60f3",
+        "layoutPolicyVersion": "roadmap-layout/v2.0",
+        "outputHash": "440b7904e52e0c906b351f92d89bd939dc1adaf3361ca2cf2a99b4b751e7dfd8",
+        "projectionPolicyVersion": "roadmap-projection/v2.0",
+        "scopeKey": (
+            "profile:0c15391d-1fa9-46c8-b180-00853b4f8a3a:"
+            "graph:6a2ac48e-e72b-4cd1-87ee-992e222fc501"
+        ),
+        "sourceHash": "26bd9210ff1b9c42f6ed4dfd67f76de27eb70aad589e3775e15dc413e0f9930a",
+    }
+
+    _validate_portable_payload(package, "frozen-v2-checkpoint", schema_version=9)
+    _apply_portable_restore(
+        db,
+        package,
+        True,
+        package_id="frozen-v2-restore",
+        schema_version=9,
+    )
+    rebuilt = projection_service.cached_projection(db)
+    assert rebuilt["projectionPolicyVersion"] == "roadmap-projection/v3.0"
+    assert rebuilt["layoutPolicyVersion"] == "roadmap-layout/v3.0"
+
+    tampered = copy.deepcopy(package)
+    checkpoint = tampered["roadmapProjectionCheckpoint"]
+    checkpoint["projectionPolicyVersion"] = "roadmap-projection/v3.0"
+    checkpoint["inputHash"] = content_hash(
+        {key: value for key, value in checkpoint.items() if key != "inputHash"}
+    )
+    with pytest.raises(AppError, match="policy bundle is inconsistent"):
+        _validate_portable_payload(tampered, "tampered-policy-pair", schema_version=9)
+
+    unregistered = copy.deepcopy(package)
+    unregistered_checkpoint = unregistered["roadmapProjectionCheckpoint"]
+    unregistered_checkpoint["layoutPolicyVersion"] = "roadmap-layout/unregistered"
+    unregistered_checkpoint["inputHash"] = content_hash(
+        {key: value for key, value in unregistered_checkpoint.items() if key != "inputHash"}
+    )
+    with pytest.raises(AppError, match="unregistered layout policy"):
+        _validate_portable_payload(unregistered, "unregistered-layout", schema_version=9)
+
+
+async def test_current_portable_v9_round_trip_preserves_manual_presentation(
+    authenticated_client: tuple[AsyncClient, str], db: Session
+) -> None:
+    client, csrf = authenticated_client
+    await _setup_native_graph(client, csrf)
+    projection = projection_service.rebuild_projection(db)
+    node_key = str(projection["nodes"][1]["nodeKey"])
+    override = RoadmapNodePositionOverride(
+        scope_key=str(projection["scopeKey"]),
+        node_key=node_key,
+        position_x=-12345,
+        position_y=54321,
+        provenance="user_override",
+        created_at=1_789_000_000_001,
+        updated_at=1_789_000_000_002,
+    )
+    preference = RoadmapProjectionPreference(
+        scope_key=str(projection["scopeKey"]),
+        show_prerequisites=True,
+        show_recommended_before=False,
+        show_supports=False,
+        show_related=False,
+        updated_at=1_789_000_000_003,
+    )
+    db.add_all([override, preference])
+    db.commit()
+    projection_service.rebuild_projection(db)
+    db.commit()
+    package = _portable_payload(db)
+    assert package["roadmapProjectionCheckpoint"]["projectionPolicyVersion"] == (
+        "roadmap-projection/v3.0"
+    )
+    assert package["roadmapProjectionCheckpoint"]["layoutPolicyVersion"] == ("roadmap-layout/v3.0")
+    _validate_portable_payload(package, "current-v3-round-trip", schema_version=9)
+
+    _apply_portable_restore(
+        db,
+        package,
+        True,
+        package_id="current-v3-round-trip",
+        schema_version=9,
+    )
+
+    restored_override = db.get(RoadmapNodePositionOverride, override.id)
+    assert restored_override is not None
+    assert (
+        restored_override.scope_key,
+        restored_override.node_key,
+        restored_override.position_x,
+        restored_override.position_y,
+        restored_override.provenance,
+        restored_override.created_at,
+        restored_override.updated_at,
+    ) == (
+        override.scope_key,
+        node_key,
+        -12345,
+        54321,
+        "user_override",
+        1_789_000_000_001,
+        1_789_000_000_002,
+    )
+    restored_preference = db.get(RoadmapProjectionPreference, preference.scope_key)
+    assert restored_preference is not None
+    assert (
+        restored_preference.show_prerequisites,
+        restored_preference.show_recommended_before,
+        restored_preference.show_supports,
+        restored_preference.show_related,
+        restored_preference.updated_at,
+    ) == (True, False, False, False, 1_789_000_000_003)
+    restored = projection_service.cached_projection(db)
+    restored_node = next(item for item in restored["nodes"] if item["nodeKey"] == node_key)
+    assert restored_node["position"] == {"x": -12345, "y": 54321}
+    assert restored["relationshipVisibility"] == {
+        "prerequisite": True,
+        "recommended_before": False,
+        "supports": False,
+        "specialization": True,
+        "related": False,
+    }
+    cache = db.get(RoadmapProjectionCache, str(projection["scopeKey"]))
+    checkpoint = db.get(RoadmapProjectionCheckpoint, str(projection["scopeKey"]))
+    assert cache is not None
+    assert cache.projection_policy_version == "roadmap-projection/v3.0"
+    assert cache.layout_policy_version == "roadmap-layout/v3.0"
+    assert checkpoint is not None
+    assert checkpoint.policy_bundle_hash == content_hash(
+        {"projection": "roadmap-projection/v3.0", "layout": "roadmap-layout/v3.0"}
+    )
+
+
+async def test_startup_drain_persists_v2_cache_policy_transition_without_pending_rows(
+    authenticated_client: tuple[AsyncClient, str], db: Session
+) -> None:
+    client, csrf = authenticated_client
+    await _setup_native_graph(client, csrf)
+    projection = projection_service.rebuild_projection(db)
+    scope_key = str(projection["scopeKey"])
+    node_key = str(projection["nodes"][0]["nodeKey"])
+    override = RoadmapNodePositionOverride(
+        scope_key=scope_key,
+        node_key=node_key,
+        position_x=321,
+        position_y=-654,
+        provenance="user_override",
+        created_at=1,
+        updated_at=2,
+    )
+    preference = RoadmapProjectionPreference(
+        scope_key=scope_key,
+        show_prerequisites=True,
+        show_recommended_before=False,
+        show_supports=True,
+        show_related=False,
+        updated_at=3,
+    )
+    db.add_all([override, preference])
+    db.flush()
+    projection_service.rebuild_projection(db)
+    cache = db.get(RoadmapProjectionCache, scope_key)
+    checkpoint = db.get(RoadmapProjectionCheckpoint, scope_key)
+    assert cache is not None and checkpoint is not None
+    cache.projection_policy_version = "roadmap-projection/v2.0"
+    cache.layout_policy_version = "roadmap-layout/v2.0"
+    checkpoint.policy_bundle_hash = content_hash(
+        {"projection": "roadmap-projection/v2.0", "layout": "roadmap-layout/v2.0"}
+    )
+    for row in db.scalars(
+        select(ProjectionInvalidation).where(
+            ProjectionInvalidation.projection_kind == "roadmap_projection_v2"
+        )
+    ).all():
+        row.status = "completed"
+    db.commit()
+
+    assert projection_service.drain_projection_invalidations(db, recover_running=True) == 1
+
+    db.refresh(cache)
+    db.refresh(checkpoint)
+    db.refresh(override)
+    db.refresh(preference)
+    assert cache.projection_policy_version == "roadmap-projection/v3.0"
+    assert cache.layout_policy_version == "roadmap-layout/v3.0"
+    assert checkpoint.policy_bundle_hash == content_hash(
+        {"projection": "roadmap-projection/v3.0", "layout": "roadmap-layout/v3.0"}
+    )
+    assert (override.position_x, override.position_y, override.provenance) == (
+        321,
+        -654,
+        "user_override",
+    )
+    assert (
+        preference.show_prerequisites,
+        preference.show_recommended_before,
+        preference.show_supports,
+        preference.show_related,
+    ) == (True, False, True, False)
+    rebuilt = projection_service.cached_projection(db)
+    rebuilt_node = next(item for item in rebuilt["nodes"] if item["nodeKey"] == node_key)
+    assert rebuilt_node["position"] == {"x": 321, "y": -654}
 
 
 async def test_projection_invalidation_failure_is_durable_and_retryable(

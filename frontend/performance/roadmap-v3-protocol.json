@@ -1,0 +1,169 @@
+{
+  "schemaVersion": 1,
+  "name": "Roadmap v3 journey performance gate",
+  "baseline": {
+    "phase2Ref": "aee26be",
+    "phase2Fixture": "portable schema v9 canonical V2 authority baseline",
+    "phase2ProductionBuild": {
+      "roadmapRouteChunkRawBytes": 192853,
+      "roadmapRouteChunkGzipBytes": 63468,
+      "sharedApplicationChunkRawBytes": 393043,
+      "sharedApplicationChunkGzipBytes": 125837
+    },
+    "journeyPreimplementationRef": "the Checkpoint 2 commit containing this protocol",
+    "notes": [
+      "Phase 2 did not expose stable Roadmap-ready, selection-settled, long-task, or React commit markers, so no interaction timing is fabricated for that ref.",
+      "Checkpoint 3 must capture the first compliant interaction baseline before changing journey rendering and compare every subsequent run with that frozen result.",
+      "Absolute ceilings remain binding even when a Phase 2 relative comparison is unavailable."
+    ]
+  },
+  "referenceEnvironment": {
+    "os": "Linux x86_64",
+    "browser": "Google Chrome 153.0.8010.52",
+    "cpu": "11th Gen Intel Core i5-11400H @ 2.70GHz",
+    "logicalCpuCount": 12,
+    "productionMode": true,
+    "viewport": { "width": 1440, "height": 900, "deviceScaleFactor": 1 },
+    "network": "localhost",
+    "fixtureClock": "2026-09-19T10:00:00Z"
+  },
+  "fixtures": {
+    "sizes": [25, 100, 250],
+    "semanticFixtureHashes": {
+      "25": "7f8f4ac9df3b8f846ceb1e0c754b0b8e676fc305549557938de826ed6b36f5a6",
+      "100": "b85bd5d2d953f69d1d4ff80a206e241e245ea739a4b1272d4f6ba553fa5ac9fa",
+      "250": "bac7e5c6be4496bea9958b47bb1b2b388b776eb15c9804a37a1c777f96a717e5"
+    },
+    "seedCommand": ".venv/bin/python scripts/product_fixture_harness.py roadmap --size <size> --clock 2026-09-19T10:00:00Z",
+    "pureLayoutCommand": ".venv/bin/python scripts/roadmap_layout_benchmark.py",
+    "bundleInventoryCommand": ".venv/bin/python scripts/roadmap_bundle_inventory.py --dist frontend/dist",
+    "seedingAndBuildExcludedFromTiming": true,
+    "requiredMetadata": [
+      "fixtureHash",
+      "productionBuildHash",
+      "repositoryRevision",
+      "roadmapProjection.layoutPolicyVersion",
+      "roadmapProjection.outputHash",
+      "roadmapProjection.nodeCount",
+      "roadmapProjection.edgeCount"
+    ]
+  },
+  "sampling": {
+    "warmups": 5,
+    "repeats": 30,
+    "statistics": ["median", "p95"],
+    "cacheModes": ["cold", "warm"],
+    "longTaskThresholdMs": 50
+  },
+  "measurementRunnerContract": {
+    "checkpoint3Command": "npm --prefix frontend run measure:roadmap -- --fixture <100|250> --output <result.json>",
+    "topology": "four shared foundation nodes feeding four domain-local branches, per-domain diamonds and multiple specialization parents, one cross-domain multi-dimension target, and cross-domain opposite-direction soft relationships",
+    "serverLifecycle": "seed and build are completed before timing; the Checkpoint 3 runner keeps the disposable production stack alive only for the bounded measurements and destroys it afterward",
+    "coldMode": "new browser context, HTTP cache disabled, first timed canonical /roadmap navigation after authentication",
+    "warmMode": "same browser context after one unmeasured ready navigation; HTTP cache enabled; timed page reload without reseeding or rebuilding projection",
+    "navigationWindow": "performance.timeOrigin/navigationStart through data-roadmap-ready=true; includes route fetch, parse, projection GET, view-model construction, and first interactive Map or Outline",
+    "selectionTargetStableKey": "fixture.roadmap.005",
+    "selectionWindow": "trusted activation timestamp for the declared target through data-roadmap-detail-settled=<node-id>; run alternating keyboard and pointer samples",
+    "longTaskWindow": "PerformanceObserver longtask entries whose startTime falls within the timed navigation or selection window; report count and total duration separately for each window",
+    "reactCommitWindow": "a production-safe test probe counts Roadmap subtree commits after declared target activation and stops at detail-settled; the probe is enabled only by the measurement runner",
+    "resultSchema": {
+      "required": [
+        "schemaVersion",
+        "repositoryRevision",
+        "productionBuildHash",
+        "fixtureHash",
+        "fixtureSize",
+        "browser",
+        "viewport",
+        "cacheMode",
+        "samples",
+        "median",
+        "p95",
+        "budgetVerdicts"
+      ],
+      "sampleFields": [
+        "navigationStartToRoadmapReadyMs",
+        "selectionToSettledDetailMs",
+        "navigationLongTaskCount",
+        "navigationLongTaskTotalMs",
+        "selectionLongTaskCount",
+        "selectionLongTaskTotalMs",
+        "reactCommitsPerSelection"
+      ],
+      "percentileMethod": "nearest-rank: sorted[ceil(0.95 * sampleCount) - 1]"
+    },
+    "chunkDiscovery": "frontend/dist/.vite/manifest.json keys index.html and lazy dynamic entry src/features/roadmap/v2.ts",
+    "chunkCompression": "Python gzip.compress level=9 with mtime=0 over emitted JavaScript; recursively include every static import required by the Roadmap dynamic entry and the shared application entry exactly once, exclude CSS and unrelated dynamic siblings"
+  },
+  "readyMarkers": {
+    "roadmapReady": "data-roadmap-ready=true after the active view and controls are interactive",
+    "detailSettled": "data-roadmap-detail-settled=<selected-node-id> after synchronized detail renders",
+    "layoutComplete": "the pure build_layout call has returned all canonical positions"
+  },
+  "budgets": {
+    "navigationStartToRoadmapReadyMs": {
+      "fixtureSize": 100,
+      "cold": { "medianMax": 3000, "p95Max": 4500 },
+      "warm": { "medianMax": 1500, "p95Max": 2500 },
+      "stress250": {
+        "cold": { "medianMax": 4500, "p95Max": 6500 },
+        "warm": { "medianMax": 2500, "p95Max": 4000 }
+      },
+      "baselineRegressionMaxPercent": 20
+    },
+    "pureLayoutMs": {
+      "25": { "medianMax": 5, "p95Max": 10 },
+      "100": { "medianMax": 15, "p95Max": 30 },
+      "250": { "medianMax": 40, "p95Max": 75 },
+      "baselineRegressionMaxPercent": 25
+    },
+    "selectionToSettledDetailMs": {
+      "fixtureSize": 100,
+      "medianMax": 150,
+      "p95Max": 300,
+      "stress250": { "medianMax": 250, "p95Max": 500 },
+      "baselineRegressionMaxPercent": 20
+    },
+    "longTasks": {
+      "fixtureSize": 100,
+      "thresholdMs": 50,
+      "countMax": 3,
+      "totalDurationMsMax": 250,
+      "stress250": { "countMax": 6, "totalDurationMsMax": 500 },
+      "baselineRegressionMaxPercent": 20
+    },
+    "reactCommitsPerSelection": {
+      "fixtureSize": 100,
+      "medianMax": 6,
+      "p95Max": 10,
+      "stress250": { "medianMax": 8, "p95Max": 14 },
+      "baselineRegressionMaxPercent": 20
+    },
+    "compressedRoadmapRouteKiB": {
+      "absoluteMax": 220,
+      "phase2RegressionMaxPercent": 20,
+      "includes": ["Roadmap route chunk", "shared application chunk required by the route"]
+    }
+  },
+  "checkpoint2PureLayoutObservation": {
+    "25": { "medianMs": 0.201, "p95Ms": 0.331 },
+    "100": { "medianMs": 0.592, "p95Ms": 7.918 },
+    "250": { "medianMs": 1.586, "p95Ms": 4.693 },
+    "status": "informational reference; rerun on the declared reference environment"
+  },
+  "checkpoint2ProductionBuildObservation": {
+    "roadmapRouteChunkRawBytes": 192756,
+    "roadmapRouteChunkGzipBytes": 63291,
+    "sharedApplicationChunkRawBytes": 398495,
+    "sharedApplicationChunkGzipBytes": 126647,
+    "combinedGzipBytes": 189938,
+    "phase2CombinedGzipBytes": 189305,
+    "phase2RegressionPercent": 0.33
+  },
+  "reviewRules": {
+    "absoluteAndRelativeBudgetsBothApply": true,
+    "budgetChangesRequireExplicitReview": true,
+    "subjectivePanZoomFeel": "record separately; it is not a substitute for trace, long-task, or timing evidence",
+    "failedMetricBlocksCheckpoint3": true
+  }
+}

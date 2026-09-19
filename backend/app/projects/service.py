@@ -66,6 +66,7 @@ from app.requirements.contracts import (
     RequirementState,
     evaluate_requirements,
 )
+from app.roadmap_projection.policies import ACTIVE_PROJECTION_POLICY
 from app.session_views import session_actuality_as_of
 from app.time_utils import datetime_to_epoch_ms
 
@@ -134,7 +135,7 @@ def link_actual_activity_to_project_task(
     assert version is not None
     for projection_kind, policy in (
         ("project_availability", PROJECT_AVAILABILITY_POLICY),
-        ("roadmap_projection_v2", "roadmap-projection/v2.0"),
+        ("roadmap_projection_v2", ACTIVE_PROJECTION_POLICY),
         ("analysis", "analysis-policy/v3.0"),
     ):
         db.add(

@@ -25,7 +25,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 BACKEND_ROOT = REPOSITORY_ROOT / "backend"
@@ -38,7 +38,13 @@ USERNAME = "fixture-learner"
 PASSWORD = "fixture-password-with-enough-entropy"
 
 JsonObject = dict[str, Any]
-ScenarioName = Literal["legacy-shell", "v2-shell"]
+ScenarioName = Literal[
+    "legacy-shell",
+    "v2-shell",
+    "roadmap-25",
+    "roadmap-100",
+    "roadmap-250",
+]
 UUID_PATTERN = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
     re.IGNORECASE,
@@ -428,9 +434,7 @@ def _seed_legacy_shell(client: PublicApiClient) -> JsonObject:
     return authority
 
 
-def _seed_v2_shell(
-    client: PublicApiClient, run: FixtureRun
-) -> tuple[JsonObject, PublicApiClient]:
+def _seed_v2_shell(client: PublicApiClient, run: FixtureRun) -> tuple[JsonObject, PublicApiClient]:
     client.bootstrap()
     client.login()
     clock_cursor = (
@@ -619,9 +623,13 @@ def _seed_v2_shell(
     criterion = definition["criteria"][0]
     for index in range(2):
         occurred_at = (
-            datetime.fromisoformat(current_fixture_instant().replace("Z", "+00:00"))
-            - timedelta(seconds=5)
-        ).isoformat().replace("+00:00", "Z")
+            (
+                datetime.fromisoformat(current_fixture_instant().replace("Z", "+00:00"))
+                - timedelta(seconds=5)
+            )
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
         client.request(
             "POST",
             "/api/v2/evidence",
@@ -677,6 +685,363 @@ def _seed_v2_shell(
     return authority, client
 
 
+def _seed_roadmap_scale(client: PublicApiClient, run: FixtureRun, size: int) -> JsonObject:
+    """Build a representative journey scenario exclusively through public APIs."""
+    _authority, client = _seed_v2_shell(client, run)
+    effective_at = run.clock_at or datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    scales = client.request("GET", "/api/v2/capability-scales")
+    technical = next(
+        item for item in scales if item["stableKey"] == "technical" and item["version"] == "v1"
+    )
+    familiar = next(item for item in technical["levels"] if item["stableKey"] == "familiar")
+    cefr = next(item for item in scales if item["stableKey"] == "cefr" and item["version"] == "v1")
+    cefr_b1 = next(item for item in cefr["levels"] if item["stableKey"] == "b1")
+    speaking = next(item for item in cefr["dimensions"] if item["stableKey"] == "speaking")
+    foundation_count = 4
+    dimension_index = foundation_count + 1
+    competency_ids: list[str] = []
+    definition_ids: list[str] = []
+    prerequisite_requirements: list[JsonObject] = []
+    for index in range(size):
+        stable_key = f"fixture.roadmap.{index:03d}"
+        competency = client.request(
+            "POST",
+            "/api/v2/competencies",
+            {"stable_key": stable_key, "creation_source": "roadmap_fixture"},
+            expected=201,
+        )
+        competency_id = str(competency["id"])
+        is_dimension_node = index == dimension_index
+        criteria = (
+            [
+                {
+                    "stable_key": f"{stable_key}.speaking",
+                    "level_stable_key": "b1",
+                    "dimension_key": "speaking",
+                    "requirement_type": "required",
+                    "demonstration_rule": "independent_performance",
+                    "description": "Demonstrate representative speaking capability.",
+                },
+                {
+                    "stable_key": f"{stable_key}.reading",
+                    "level_stable_key": "b2",
+                    "dimension_key": "reading",
+                    "requirement_type": "required",
+                    "demonstration_rule": "authoritative_assessment",
+                    "description": "Demonstrate representative reading capability.",
+                },
+            ]
+            if is_dimension_node
+            else [
+                {
+                    "stable_key": f"{stable_key}.independent",
+                    "level_stable_key": "independent",
+                    "dimension_key": None,
+                    "requirement_type": "required",
+                    "demonstration_rule": "independent_performance",
+                    "description": f"Demonstrate Roadmap fixture capability {index + 1}.",
+                }
+            ]
+        )
+        definition = client.request(
+            "POST",
+            f"/api/v2/competencies/{competency_id}/definitions",
+            {
+                "title": f"Roadmap capability {index + 1} with a representative long title",
+                "description": f"Deterministic Roadmap fixture node {index + 1}.",
+                "scope": f"Roadmap stress fixture scope {index + 1}",
+                "scale_stable_key": "cefr" if is_dimension_node else "technical",
+                "scale_version": "v1",
+                "dimension_keys": ["speaking", "reading"] if is_dimension_node else [],
+                "effective_at": effective_at,
+                "creation_source": "roadmap_fixture",
+                "criteria": criteria,
+            },
+            expected=201,
+        )
+        client.request(
+            "POST",
+            f"/api/v2/competencies/{competency_id}/definitions/{definition['id']}/activate",
+            {
+                "reason": "Roadmap fixture activation",
+                "source": "roadmap_fixture",
+                "idempotency_key": f"roadmap-fixture-definition-{index:03d}",
+            },
+        )
+        competency_ids.append(competency_id)
+        definition_ids.append(str(definition["id"]))
+        prerequisite_requirements.append(
+            {
+                "kind": "capability_at_least",
+                "scale_version_id": cefr["id"] if is_dimension_node else technical["id"],
+                "dimension_id": speaking["id"] if is_dimension_node else None,
+                "minimum_level_id": cefr_b1["id"] if is_dimension_node else familiar["id"],
+                "review_requirement": "none",
+            }
+        )
+
+    domains = [
+        {
+            "stable_key": f"domain-{index}",
+            "title": f"Learning domain {index + 1}",
+            "minimum_percent": 0,
+            "maximum_percent": 100,
+            "order_index": index,
+        }
+        for index in range(4)
+    ]
+    branch_size = size - foundation_count
+
+    def domain_index_for(node_index: int) -> int:
+        return min(3, ((node_index - foundation_count) * 4) // branch_size)
+
+    targets: list[JsonObject] = []
+    for index in range(foundation_count, size):
+        if index == dimension_index:
+            targets.extend(
+                [
+                    {
+                        "stable_key": f"target-{index:03d}-speaking",
+                        "competency_identity_id": competency_ids[index],
+                        "dimension_key": "speaking",
+                        "domain_stable_key": "domain-0",
+                        "scale_stable_key": "cefr",
+                        "scale_version": "v1",
+                        "target_level_stable_key": "b1",
+                        "priority": "critical",
+                    },
+                    {
+                        "stable_key": f"target-{index:03d}-reading",
+                        "competency_identity_id": competency_ids[index],
+                        "dimension_key": "reading",
+                        "domain_stable_key": "domain-1",
+                        "scale_stable_key": "cefr",
+                        "scale_version": "v1",
+                        "target_level_stable_key": "b2",
+                        "priority": "important",
+                    },
+                ]
+            )
+            continue
+        targets.append(
+            {
+                "stable_key": f"target-{index:03d}",
+                "competency_identity_id": competency_ids[index],
+                "dimension_key": None,
+                "domain_stable_key": f"domain-{domain_index_for(index)}",
+                "scale_stable_key": "technical",
+                "scale_version": "v1",
+                "target_level_stable_key": "independent",
+                "priority": "critical" if index % 17 == 0 else "core",
+            }
+        )
+    profile = client.request(
+        "POST",
+        "/api/v2/target-profiles",
+        {
+            "stable_key": f"roadmap-fixture-{size}",
+            "creation_source": "roadmap_fixture",
+            "version": {
+                "title": f"Roadmap fixture {size}",
+                "description": "Public-API Roadmap scale fixture.",
+                "creation_source": "roadmap_fixture",
+                "effective_at": effective_at,
+                "domains": domains,
+                "targets": targets,
+                "milestones": [],
+                "readiness_gates": [],
+            },
+        },
+        expected=201,
+    )
+    client.request(
+        "POST",
+        f"/api/v2/target-profiles/{profile['profileId']}/versions/{profile['versionId']}/activate",
+        {
+            "reason": "Roadmap fixture activation",
+            "source": "roadmap_fixture",
+            "idempotency_key": f"roadmap-fixture-profile-{size}",
+        },
+    )
+
+    edges: list[JsonObject] = []
+
+    def add_prerequisite(source_index: int, target_index: int) -> None:
+        edges.append(
+            {
+                "stable_key": f"requires-{source_index:03d}-{target_index:03d}",
+                "edge_type": "prerequisite",
+                "source_semantic_definition_id": definition_ids[source_index],
+                "target_semantic_definition_id": definition_ids[target_index],
+                "satisfaction_scope_key": (
+                    f"dimension:{speaking['id']}" if source_index == dimension_index else "overall"
+                ),
+                "requirement": prerequisite_requirements[source_index],
+                "provenance": "roadmap_fixture",
+                "meaning_key": "fixture-prerequisite",
+                "order_index": len(edges),
+            }
+        )
+
+    for index in range(1, foundation_count):
+        add_prerequisite(index - 1, index)
+    branches = {
+        domain_index: [
+            index
+            for index in range(foundation_count, size)
+            if domain_index_for(index) == domain_index
+        ]
+        for domain_index in range(4)
+    }
+    for branch in branches.values():
+        if not branch:
+            continue
+        add_prerequisite(foundation_count - 1, branch[0])
+        if len(branch) >= 4:
+            add_prerequisite(branch[0], branch[1])
+            add_prerequisite(branch[0], branch[2])
+            add_prerequisite(branch[1], branch[3])
+            add_prerequisite(branch[2], branch[3])
+            for index in range(4, len(branch)):
+                add_prerequisite(branch[index - 1], branch[index])
+        else:
+            for index in range(1, len(branch)):
+                add_prerequisite(branch[index - 1], branch[index])
+        if len(branch) >= 3:
+            for parent in branch[:2]:
+                edges.append(
+                    {
+                        "stable_key": f"specializes-{parent:03d}-{branch[2]:03d}",
+                        "edge_type": "specialization",
+                        "source_semantic_definition_id": definition_ids[parent],
+                        "target_semantic_definition_id": definition_ids[branch[2]],
+                        "satisfaction_scope_key": "overall",
+                        "requirement": None,
+                        "provenance": "roadmap_fixture",
+                        "meaning_key": "fixture-specialization",
+                        "order_index": len(edges),
+                    }
+                )
+
+    first_branch = branches[0]
+    second_branch = branches[1]
+    if first_branch and second_branch:
+        edges.extend(
+            [
+                {
+                    "stable_key": "cross-domain-support",
+                    "edge_type": "supports",
+                    "source_semantic_definition_id": definition_ids[first_branch[-1]],
+                    "target_semantic_definition_id": definition_ids[second_branch[-1]],
+                    "satisfaction_scope_key": "overall",
+                    "requirement": None,
+                    "provenance": "roadmap_fixture",
+                    "meaning_key": "fixture-cross-domain-support",
+                    "order_index": len(edges),
+                },
+                {
+                    "stable_key": "opposite-domain-related",
+                    "edge_type": "related",
+                    "source_semantic_definition_id": definition_ids[second_branch[-1]],
+                    "target_semantic_definition_id": definition_ids[first_branch[-1]],
+                    "satisfaction_scope_key": "overall",
+                    "requirement": None,
+                    "provenance": "roadmap_fixture",
+                    "meaning_key": "fixture-opposite-domain-related",
+                    "order_index": len(edges) + 1,
+                },
+            ]
+        )
+    graph = client.request(
+        "POST",
+        "/api/v2/learning-graphs",
+        {"stable_key": f"roadmap-fixture-{size}", "creation_source": "roadmap_fixture"},
+        expected=201,
+    )
+    graph_version = client.request(
+        "POST",
+        f"/api/v2/learning-graphs/{graph['id']}/versions",
+        {
+            "title": f"Roadmap fixture {size}",
+            "description": "Public-API Roadmap scale fixture.",
+            "effective_at": effective_at,
+            "creation_source": "roadmap_fixture",
+            "edges": edges,
+        },
+        expected=201,
+    )
+    client.request(
+        "POST",
+        f"/api/v2/learning-graphs/{graph['id']}/versions/{graph_version['id']}/activate",
+        {
+            "reason": "Roadmap fixture activation",
+            "source": "roadmap_fixture",
+            "idempotency_key": f"roadmap-fixture-graph-{size}",
+        },
+        expected=201,
+    )
+    projection = client.request("POST", "/api/v2/roadmap-projection/rebuild")
+    if not isinstance(projection, dict):
+        raise RuntimeError("Roadmap fixture projection was not an object.")
+    if projection.get("layoutPolicyVersion") != "roadmap-layout/v3.0":
+        raise RuntimeError("Roadmap fixture did not use the active v3 layout policy.")
+    if len(projection.get("nodes", [])) != size:
+        raise RuntimeError("Roadmap fixture projection lost nodes.")
+    cross_domain = next(
+        item
+        for item in projection["nodes"]
+        if item["competencyIdentityId"] == competency_ids[dimension_index]
+    )
+    target_dimensions = {
+        item.get("dimensionKey") for item in cross_domain.get("profileTargets", [])
+    }
+    if target_dimensions != {"speaking", "reading"}:
+        raise RuntimeError("Roadmap fixture lost cross-domain dimension targets.")
+    if sum(not item.get("isTargeted", False) for item in projection["nodes"]) != foundation_count:
+        raise RuntimeError("Roadmap fixture lost its shared foundation entry structure.")
+    repeated = client.request("POST", "/api/v2/roadmap-projection/rebuild")
+    if not isinstance(repeated, dict):
+        raise RuntimeError("Repeated Roadmap projection was not an object.")
+
+    def canonical_positions(value: JsonObject) -> dict[str, tuple[int, int]]:
+        return {
+            str(item["stableKey"]): (
+                int(item["canonicalPosition"]["x"]),
+                int(item["canonicalPosition"]["y"]),
+            )
+            for item in value["nodes"]
+        }
+
+    positions = canonical_positions(projection)
+    if repeated.get("outputHash") != projection.get("outputHash"):
+        raise RuntimeError("Repeated Roadmap fixture rebuild changed its output hash.")
+    if canonical_positions(repeated) != positions:
+        raise RuntimeError("Repeated Roadmap fixture rebuild changed canonical positions.")
+    nodes = list(repeated["nodes"])
+    for item in nodes:
+        canonical = item["canonicalPosition"]
+        if int(canonical["x"]) != 64 + int(item["layoutColumn"]) * 320:
+            raise RuntimeError("Roadmap fixture violated the fixed canonical column slots.")
+        if item["position"] != canonical:
+            raise RuntimeError("Roadmap fixture unexpectedly contained a manual position.")
+    for index, left in enumerate(nodes):
+        left_position = left["canonicalPosition"]
+        for right in nodes[index + 1 :]:
+            right_position = right["canonicalPosition"]
+            separated = (
+                int(left_position["x"]) + 240 <= int(right_position["x"])
+                or int(right_position["x"]) + 240 <= int(left_position["x"])
+                or int(left_position["y"]) + 140 <= int(right_position["y"])
+                or int(right_position["y"]) + 140 <= int(left_position["y"])
+            )
+            if not separated:
+                raise RuntimeError(
+                    "Roadmap fixture canonical slots overlap: "
+                    f"{left['stableKey']} and {right['stableKey']}."
+                )
+    return repeated
+
+
 def _verify_authority_read_parity(
     client: PublicApiClient,
     seed_authority: JsonObject,
@@ -687,8 +1052,7 @@ def _verify_authority_read_parity(
         raise RuntimeError("Authority public read did not return an object.")
     if public_read.get("canonicalLearningAuthority") != expected_authority:
         raise RuntimeError(
-            "Authority public read did not match the scenario expectation: "
-            f"{public_read!r}."
+            f"Authority public read did not match the scenario expectation: {public_read!r}."
         )
     if public_read != seed_authority:
         raise RuntimeError(
@@ -709,9 +1073,7 @@ def run_smoke(scenario: ScenarioName, timezone: str, clock_at: str | None) -> Js
         else:
             authority, client = _seed_v2_shell(client, run)
             expected_authority = "v2"
-        authority = _verify_authority_read_parity(
-            client, authority, expected_authority
-        )
+        authority = _verify_authority_read_parity(client, authority, expected_authority)
         with urllib.request.urlopen(run.frontend_url, timeout=10) as response:
             if response.status != 200 or b'<div id="root"></div>' not in response.read():
                 raise RuntimeError("The product frontend did not serve its application shell.")
@@ -738,9 +1100,7 @@ def run_playwright(scenario: ScenarioName, timezone: str, clock_at: str | None) 
         else:
             authority, client = _seed_v2_shell(client, run)
             expected_authority = "v2"
-        authority = _verify_authority_read_parity(
-            client, authority, expected_authority
-        )
+        authority = _verify_authority_read_parity(client, authority, expected_authority)
         metadata_path = run.write_metadata(client, authority, expected_authority)
         assert run.root is not None
         run_root = run.root
@@ -777,6 +1137,43 @@ def run_playwright(scenario: ScenarioName, timezone: str, clock_at: str | None) 
             print(f"Fixture failure artifacts retained at {run.root}", file=sys.stderr)
 
 
+def run_roadmap_fixture(size: int, timezone: str, clock_at: str | None) -> JsonObject:
+    if size not in {25, 100, 250}:
+        raise ValueError("Roadmap fixture size must be 25, 100, or 250.")
+    scenario = cast(ScenarioName, f"roadmap-{size}")
+    run = FixtureRun(
+        scenario=scenario,
+        timezone=timezone,
+        clock_at=clock_at,
+    )
+    success = False
+    try:
+        client = run.start()
+        projection = _seed_roadmap_scale(client, run, size)
+        authority = client.request("GET", "/api/v2/authority")
+        if not isinstance(authority, dict):
+            raise RuntimeError("Roadmap fixture authority response was not an object.")
+        authority = _verify_authority_read_parity(client, authority, "v2")
+        metadata_path = run.write_metadata(client, authority, "v2")
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if not isinstance(metadata, dict):
+            raise RuntimeError("Roadmap fixture metadata was not an object.")
+        metadata["roadmapProjection"] = {
+            "size": size,
+            "scopeKey": projection["scopeKey"],
+            "layoutPolicyVersion": projection["layoutPolicyVersion"],
+            "outputHash": projection["outputHash"],
+            "nodeCount": len(projection["nodes"]),
+            "edgeCount": len(projection["edges"]),
+        }
+        success = True
+        return metadata
+    finally:
+        run.finish(success=success)
+        if not success:
+            print(f"Fixture failure artifacts retained at {run.root}", file=sys.stderr)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -794,6 +1191,12 @@ def main() -> int:
     browser.add_argument("--scenario", choices=("legacy-shell", "v2-shell"), required=True)
     browser.add_argument("--timezone", default=DEFAULT_TIMEZONE)
     browser.add_argument("--clock", default=DEFAULT_CLOCK)
+    roadmap = subparsers.add_parser(
+        "roadmap", help="Seed and verify a disposable public-API Roadmap scale fixture."
+    )
+    roadmap.add_argument("--size", type=int, choices=(25, 100, 250), required=True)
+    roadmap.add_argument("--timezone", default=DEFAULT_TIMEZONE)
+    roadmap.add_argument("--clock", default=DEFAULT_CLOCK)
     arguments = parser.parse_args()
     if arguments.command == "smoke":
         result = run_smoke(arguments.scenario, arguments.timezone, arguments.clock)
@@ -802,6 +1205,22 @@ def main() -> int:
     if arguments.command == "playwright":
         result = run_playwright(arguments.scenario, arguments.timezone, arguments.clock)
         print(json.dumps(result, sort_keys=True))
+        return 0
+    if arguments.command == "roadmap":
+        result = run_roadmap_fixture(arguments.size, arguments.timezone, arguments.clock)
+        print(
+            json.dumps(
+                {
+                    "scenarioId": result["scenarioId"],
+                    "fixtureHash": result["fixtureHash"],
+                    "productionBuildHash": result["productionBuildHash"],
+                    "repositoryRevision": result["repositoryRevision"],
+                    "expectedAuthority": result["expectedAuthority"],
+                    "roadmapProjection": result["roadmapProjection"],
+                },
+                sort_keys=True,
+            )
+        )
         return 0
     return 2
 

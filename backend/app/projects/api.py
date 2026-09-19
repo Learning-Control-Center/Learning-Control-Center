@@ -72,6 +72,7 @@ from app.projects.service import (
     task_lifecycle_as_of,
     validate_version,
 )
+from app.roadmap_projection.policies import ACTIVE_PROJECTION_POLICY
 from app.time_utils import datetime_to_epoch_ms, epoch_ms_to_rfc3339, utc_now_ms
 
 router = APIRouter(prefix="/projects", tags=["v2 projects"])
@@ -94,7 +95,7 @@ def _version(db: Session, project_id: str, version_id: str) -> ProjectVersion:
 def _queue(db: Session, *, project_id: str, source_fact_id: str, requested_at: int) -> None:
     for kind, policy in (
         ("project_availability", PROJECT_AVAILABILITY_POLICY),
-        ("roadmap_projection_v2", "roadmap-projection/v2.0"),
+        ("roadmap_projection_v2", ACTIVE_PROJECTION_POLICY),
         ("analysis", "analysis-policy/v3.0"),
     ):
         db.add(

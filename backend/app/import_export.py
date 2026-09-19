@@ -240,6 +240,7 @@ from app.recommendation.v2.models import (
     RecommendationV2ScoreComponent,
     RecommendationV2SelectionDecision,
 )
+from app.roadmap_projection.layout import ACTIVE_LAYOUT_POLICY, require_registered_layout_policy
 from app.roadmap_projection.models import (
     LegacyRoadmapActiveState,
     RoadmapNodePositionOverride,
@@ -249,6 +250,9 @@ from app.roadmap_projection.models import (
 )
 from app.roadmap_projection.service import (
     build_projection as build_roadmap_projection,
+)
+from app.roadmap_projection.service import (
+    projection_policy_for_layout,
 )
 from app.roadmap_projection.service import (
     rebuild_projection as rebuild_roadmap_projection,
@@ -921,6 +925,38 @@ def _validate_roadmap_projection_checkpoint(payload: dict[str, Any], schema_vers
             "PORTABLE_ROADMAP_PROJECTION_CHECKPOINT_INVALID",
             "The Roadmap Projection checkpoint is invalid.",
         )
+    if checkpoint["configured"]:
+        try:
+            layout_policy = require_registered_layout_policy(
+                str(checkpoint["layoutPolicyVersion"])
+            )
+        except ValueError as exc:
+            raise AppError(
+                422,
+                "PORTABLE_ROADMAP_PROJECTION_POLICY_UNREGISTERED",
+                "The Roadmap Projection checkpoint declares an unregistered layout policy.",
+            ) from exc
+        if schema_version < 9 and layout_policy == ACTIVE_LAYOUT_POLICY:
+            raise AppError(
+                422,
+                "PORTABLE_ROADMAP_PROJECTION_POLICY_UNREGISTERED",
+                "Portable schema versions before V9 cannot declare Roadmap v3 policies.",
+            )
+        if checkpoint["projectionPolicyVersion"] != projection_policy_for_layout(layout_policy):
+            raise AppError(
+                422,
+                "PORTABLE_ROADMAP_PROJECTION_POLICY_MISMATCH",
+                "The Roadmap Projection policy bundle is inconsistent.",
+            )
+    elif any(
+        checkpoint[key] is not None
+        for key in ("projectionPolicyVersion", "layoutPolicyVersion", "scopeKey")
+    ):
+        raise AppError(
+            422,
+            "PORTABLE_ROADMAP_PROJECTION_CHECKPOINT_INVALID",
+            "An unconfigured Roadmap Projection checkpoint cannot declare a policy or scope.",
+        )
 
 
 def _assert_roadmap_projection_checkpoint_parity(
@@ -928,11 +964,20 @@ def _assert_roadmap_projection_checkpoint_parity(
 ) -> None:
     if checkpoint is None:
         return
-    projection = build_roadmap_projection(
-        db,
-        cutoff_at=checkpoint["cutoffAt"],
-        include_current_presentation=True,
-    )
+    layout_policy = checkpoint.get("layoutPolicyVersion")
+    if isinstance(layout_policy, str):
+        projection = build_roadmap_projection(
+            db,
+            cutoff_at=checkpoint["cutoffAt"],
+            include_current_presentation=True,
+            layout_policy_version=layout_policy,
+        )
+    else:
+        projection = build_roadmap_projection(
+            db,
+            cutoff_at=checkpoint["cutoffAt"],
+            include_current_presentation=True,
+        )
     if (
         bool(projection.get("configured")) != checkpoint["configured"]
         or projection.get("scopeKey") != checkpoint["scopeKey"]

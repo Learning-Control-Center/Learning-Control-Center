@@ -43,6 +43,7 @@ from app.models import (
     new_id,
 )
 from app.projects.models import ProjectCriterionIdentity
+from app.roadmap_projection.policies import ACTIVE_PROJECTION_POLICY
 from app.schemas import (
     ActivationRequest,
     CompetencyIdentityCreate,
@@ -64,7 +65,7 @@ def _queue_definition_invalidations(
         ("capability", "capability-policy/v1"),
         ("review", "freshness-policy/v1"),
         ("analysis", "analysis-policy/v3.0"),
-        ("roadmap_projection_v2", "roadmap-projection/v2.0"),
+        ("roadmap_projection_v2", ACTIVE_PROJECTION_POLICY),
     ):
         db.add(
             ProjectionInvalidation(
@@ -101,7 +102,7 @@ def _queue_profile_analysis_invalidation(
             subject_type="target_profile_version",
             subject_id=profile_version_id,
             source_fact_id=source_fact_id,
-            target_policy_version="roadmap-projection/v2.0",
+            target_policy_version=ACTIVE_PROJECTION_POLICY,
             status="pending",
             attempt_count=0,
             requested_at=requested_at,

@@ -41,6 +41,7 @@ from app.curriculum.service import (
 from app.database import get_db
 from app.errors import AppError
 from app.models import Activity, ProjectionInvalidation
+from app.roadmap_projection.policies import ACTIVE_PROJECTION_POLICY
 from app.time_utils import epoch_ms_to_rfc3339, utc_now_ms
 
 router = APIRouter(prefix="/curricula", tags=["v2 curriculum"])
@@ -51,7 +52,7 @@ def _queue_curriculum_invalidations(
 ) -> None:
     for projection_kind, policy in (
         ("curriculum_availability", "curriculum-availability-policy/v1"),
-        ("roadmap_projection_v2", "roadmap-projection/v2.0"),
+        ("roadmap_projection_v2", ACTIVE_PROJECTION_POLICY),
         ("analysis", "analysis-policy/v3.0"),
     ):
         db.add(
