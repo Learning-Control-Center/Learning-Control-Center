@@ -9,9 +9,11 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
+from app.curriculum.service import link_actual_activity_to_unit
 from app.determinism import canonical_json, content_hash
 from app.errors import AppError
-from app.models import Activity, DisciplineProfile, LearningSession, new_id
+from app.models import Activity, DisciplineProfile, LearningSession, ProjectionInvalidation, new_id
+from app.projects.service import link_actual_activity_to_project_task
 from app.recommendation.v2.public import (
     PublicRecommendationItemDTO,
     generate_public_recommendation_run,
@@ -52,6 +54,32 @@ CATEGORY_BY_CANDIDATE_TYPE = {
     "project_task": "project",
     "unblock_task": "learning",
 }
+
+
+def _invalidate_roadmap_projection(db: Session, *, source_fact_id: str) -> None:
+    duplicate = db.scalar(
+        select(ProjectionInvalidation.id).where(
+            ProjectionInvalidation.projection_kind == "roadmap_projection_v2",
+            ProjectionInvalidation.subject_type == "today_overlay",
+            ProjectionInvalidation.subject_id == "current",
+            ProjectionInvalidation.source_fact_id == source_fact_id,
+            ProjectionInvalidation.target_policy_version == "roadmap-projection/v2.0",
+        )
+    )
+    if duplicate is None:
+        db.add(
+            ProjectionInvalidation(
+                projection_kind="roadmap_projection_v2",
+                subject_type="today_overlay",
+                subject_id="current",
+                source_fact_id=source_fact_id,
+                target_policy_version="roadmap-projection/v2.0",
+                status="pending",
+                attempt_count=0,
+                requested_at=utc_now_ms(),
+            )
+        )
+
 
 def _translate_concurrent_conflict[**P, T](
     command: Callable[Concatenate[Session, P], T],
@@ -117,6 +145,9 @@ def _suggestion_presentation(
             "versionId": item.source_version_id,
         },
         "candidateStableId": item.candidate_stable_id,
+        "competencyIdentityId": item.competency_identity_id,
+        "targetIdentityId": item.target_identity_id,
+        "servedTargetIdentityIds": list(item.served_target_identity_ids),
         "title": item.title,
         "description": item.description,
         "portfolioRole": item.portfolio_role,
@@ -265,9 +296,7 @@ def _append_interaction(
         session_id=session_id,
         replacement_suggestion_id=replacement_suggestion_id,
         reason_code=reason_code,
-        structured_reason_json=canonical_json(
-            {"feedback": feedback, "command": command_facts}
-        ),
+        structured_reason_json=canonical_json({"feedback": feedback, "command": command_facts}),
     )
     db.add(interaction)
     db.flush()
@@ -276,6 +305,7 @@ def _append_interaction(
     state.latest_interaction_id = interaction.id
     state.terminal = interaction_type in TERMINAL_STATUSES
     state.updated_at = occurred_at
+    _invalidate_roadmap_projection(db, source_fact_id=interaction.id)
     db.flush()
     return interaction
 
@@ -283,9 +313,7 @@ def _append_interaction(
 def _active_relations(
     db: Session, suggestion_id: str | None = None
 ) -> list[SuggestionActivityRelation]:
-    corrected = set(
-        db.scalars(select(SuggestionActivityRelationCorrection.relation_id)).all()
-    )
+    corrected = set(db.scalars(select(SuggestionActivityRelationCorrection.relation_id)).all())
     statement = select(SuggestionActivityRelation).order_by(
         SuggestionActivityRelation.created_at, SuggestionActivityRelation.id
     )
@@ -411,9 +439,7 @@ def generate_today(
     )
     if run.status != "completed":
         raise AppError(409, "TODAY_RECOMMENDATION_UNAVAILABLE", "Recommendation did not complete.")
-    generation_key = (
-        f"{local_date.isoformat()}|{run.policy_registry_version}|{sequence}"
-    )
+    generation_key = f"{local_date.isoformat()}|{run.policy_registry_version}|{sequence}"
     expires_at = local_day_bounds_ms(local_date, timezone_name)[1]
     prepared, output_rows = _prepare_suggestion_rows(run.items, expires_at=expires_at)
     generation = TodayGeneration(
@@ -486,6 +512,7 @@ def generate_today(
                     occurred_at=now,
                     reason_code="superseded_by_regeneration",
                 )
+    _invalidate_roadmap_projection(db, source_fact_id=generation.id)
     db.flush()
     return generation
 
@@ -651,6 +678,25 @@ def start_suggestion(
         contributions=actual_contributions,
         started_at=now,
     )
+    link_created_at = max(now, activity.created_at)
+    if candidate.source_type == "curriculum_unit":
+        link_actual_activity_to_unit(
+            db,
+            activity_id=activity.id,
+            learning_unit_definition_id=candidate.source_entity_id,
+            provenance="user_confirmed",
+            idempotency_key=f"today-curriculum-link:{idempotency_key}",
+            created_at=link_created_at,
+        )
+    elif candidate.source_type == "project_task":
+        link_actual_activity_to_project_task(
+            db,
+            activity_id=activity.id,
+            task_definition_id=candidate.source_entity_id,
+            provenance="user_confirmed",
+            idempotency_key=f"today-project-link:{idempotency_key}",
+            created_at=link_created_at,
+        )
     _create_relation(
         db,
         suggestion_id=suggestion.id,
@@ -984,6 +1030,7 @@ def correct_interaction(
     state.status = correction.resulting_status
     state.terminal = correction.resulting_status in TERMINAL_STATUSES
     state.updated_at = now
+    _invalidate_roadmap_projection(db, source_fact_id=correction.id)
     db.flush()
     return correction
 

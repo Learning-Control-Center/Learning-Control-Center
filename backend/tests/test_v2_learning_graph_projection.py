@@ -29,11 +29,12 @@ from app.models import (
     ReviewEvent,
     SemanticCompetencyDefinition,
 )
-from app.portability.registry import PORTABLE_V8_MANIFEST
+from app.portability.registry import PORTABLE_V9_MANIFEST
 from app.roadmap_projection import service as projection_service
 from app.roadmap_projection.models import LegacyRoadmapActiveState, RoadmapNodePositionOverride
+from app.today.public import TodayRoadmapOverlayDTO, TodayRoadmapOverlayItemDTO
 from httpx import AsyncClient
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 
@@ -893,17 +894,17 @@ async def test_graph_projection_portable_v6_and_legacy_compatibility_are_separat
     client, csrf, roadmap = configured_client
     graph, _version, _first, _second = await _setup_native_graph(client, csrf)
     package = _portable_payload(db)
-    assert package["manifest"] == PORTABLE_V8_MANIFEST
+    assert package["manifest"] == PORTABLE_V9_MANIFEST
     assert package["roadmapProjectionCheckpoint"]["configured"] is True
-    _validate_portable_payload(package, "graph-projection-v8", schema_version=8)
+    _validate_portable_payload(package, "graph-projection-v8", schema_version=9)
     tampered = copy.deepcopy(package)
     tampered["tables"]["learning_graph_versions"][0]["content_hash"] = "0" * 64
     with pytest.raises(AppError, match="Graph policy lineage or content hash"):
-        _validate_portable_payload(tampered, "graph-projection-tampered", schema_version=8)
+        _validate_portable_payload(tampered, "graph-projection-tampered", schema_version=9)
     activation_tamper = copy.deepcopy(package)
     activation_tamper["tables"]["learning_graph_activation_events"][0]["event_sequence"] = 2
     with pytest.raises(AppError, match="Graph activation history"):
-        _validate_portable_payload(activation_tamper, "graph-activation-tampered", schema_version=8)
+        _validate_portable_payload(activation_tamper, "graph-activation-tampered", schema_version=9)
 
     compatibility = await client.get(
         f"/api/v2/roadmap-projection/legacy-roadmap-graph/{roadmap['activeVersion']['id']}"
@@ -957,6 +958,53 @@ async def test_projection_invalidation_failure_is_durable_and_retryable(
     assert rebuilt["configured"] is True
     db.expire_all()
     assert all(item.status == "completed" and item.error_json is None for item in rows)
+
+
+async def test_projection_marks_today_competencies_from_public_overlay(
+    authenticated_client: tuple[AsyncClient, str],
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, csrf = authenticated_client
+    await _setup_native_graph(client, csrf)
+    baseline = projection_service.build_projection(db)
+    target_node = next(item for item in baseline["nodes"] if item["profileTarget"] is not None)
+    overlay_item = TodayRoadmapOverlayItemDTO(
+        suggestion_id="today-overlay-suggestion",
+        generation_id="today-overlay-generation",
+        status="suggested",
+        competency_identity_id=target_node["competencyIdentityId"],
+        target_identity_ids=(),
+        continuing_started=False,
+        expires_at=9_999_999_999_999,
+    )
+    monkeypatch.setattr(
+        projection_service,
+        "current_roadmap_overlay",
+        lambda _db, *, now_ms: TodayRoadmapOverlayDTO((overlay_item,), "today-overlay-hash"),
+    )
+    projected = projection_service.build_projection(db)
+    marked = next(item for item in projected["nodes"] if item["id"] == target_node["id"])
+    assert marked["isToday"] is True
+    assert projected["sourceLineage"]["todayOverlay"]["inputHash"] == "today-overlay-hash"
+    projection_service.rebuild_projection(db)
+    db.execute(
+        update(ProjectionInvalidation)
+        .where(ProjectionInvalidation.projection_kind == "roadmap_projection_v2")
+        .values(status="completed", completed_at=1)
+    )
+    changed_overlay = TodayRoadmapOverlayDTO((overlay_item,), "changed-overlay-hash")
+    monkeypatch.setattr(
+        projection_service,
+        "current_roadmap_overlay",
+        lambda _db, *, now_ms: changed_overlay,
+    )
+    assert projection_service.cached_projection(db)["cacheState"] == (
+        "today_overlay_stale_bypassed"
+    )
+    historical = projection_service.build_projection(db, cutoff_at=9_999_999_999_999)
+    assert all(item["isToday"] is False for item in historical["nodes"])
+    assert historical["sourceLineage"]["todayOverlay"] == {"mode": "excluded_historical"}
 
 
 def test_cp3_migrations_preserve_legacy_pointers_invent_no_graph_and_downgrade_safely(
@@ -1034,7 +1082,7 @@ def test_cp3_migrations_preserve_legacy_pointers_invent_no_graph_and_downgrade_s
         connection.commit()
     finally:
         connection.close()
-    with pytest.raises(RuntimeError, match="data-bearing Learning Graph"):
+    with pytest.raises(RuntimeError, match="Populated legacy Roadmap pointer contraction"):
         command.downgrade(config, "0012_project_core")
 
 

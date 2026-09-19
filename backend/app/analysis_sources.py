@@ -82,6 +82,7 @@ class ActualSessionSummaryPublicDTO:
     produced_active_evidence: bool
     active_evidence_competency_ids: tuple[str, ...]
     active_evidence_qualifications: tuple[EvidenceQualificationPublicDTO, ...]
+    active_contribution_attributions: tuple[ActualContributionAttributionPublicDTO, ...]
 
 
 @dataclass(frozen=True)
@@ -282,6 +283,11 @@ def actual_session_summaries_as_of(
     from app.time_utils import local_date_for_ms
 
     result: list[ActualSessionSummaryPublicDTO] = []
+    contribution_attributions: dict[str, list[ActualContributionAttributionPublicDTO]] = {}
+    for attribution in actual_contribution_attributions_as_of(
+        db, exclusive_cutoff_at=exclusive_cutoff_at
+    ):
+        contribution_attributions.setdefault(attribution.session_id, []).append(attribution)
     for session_id in db.scalars(
         select(LearningSession.id)
         .where(LearningSession.created_at < exclusive_cutoff_at)
@@ -402,6 +408,9 @@ def actual_session_summaries_as_of(
                 produced_active_evidence=bool(active_evidence_ids),
                 active_evidence_competency_ids=active_evidence_competency_ids,
                 active_evidence_qualifications=ordered_qualifications,
+                active_contribution_attributions=tuple(
+                    contribution_attributions.get(fact.session_id, ())
+                ),
             )
         )
     return tuple(result)
@@ -424,12 +433,15 @@ def actual_contribution_attributions_as_of(
         .order_by(SessionContribution.created_at, SessionContribution.id)
     ).all()
     for contribution in contributions:
-        if db.scalar(
-            select(ContributionRetraction.id).where(
-                ContributionRetraction.contribution_id == contribution.id,
-                ContributionRetraction.retracted_at < exclusive_cutoff_at,
+        if (
+            db.scalar(
+                select(ContributionRetraction.id).where(
+                    ContributionRetraction.contribution_id == contribution.id,
+                    ContributionRetraction.retracted_at < exclusive_cutoff_at,
+                )
             )
-        ) is not None:
+            is not None
+        ):
             continue
         semantic_definition_id = active_semantics.get(contribution.competency_identity_id)
         if semantic_definition_id is None or contribution.criterion_identity_id is None:
@@ -437,8 +449,7 @@ def actual_contribution_attributions_as_of(
         definition = db.scalar(
             select(CriterionDefinition)
             .where(
-                CriterionDefinition.criterion_identity_id
-                == contribution.criterion_identity_id,
+                CriterionDefinition.criterion_identity_id == contribution.criterion_identity_id,
                 CriterionDefinition.semantic_definition_id == semantic_definition_id,
                 CriterionDefinition.created_at < exclusive_cutoff_at,
             )

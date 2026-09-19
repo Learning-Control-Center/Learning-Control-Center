@@ -25,6 +25,7 @@ from app.analysis.v3.policy import (
     ANALYSIS_ALGORITHM_VERSION,
     ANALYSIS_POLICY_VERSION,
     APPLICATION_VERSION,
+    LEGACY_NORMALIZATION_SCHEMA_VERSION,
     NORMALIZATION_SCHEMA_VERSION,
     PURPOSE_MATRIX_VERSION,
     analysis_policy_bundle,
@@ -218,7 +219,11 @@ def _discipline_facts(
 
 
 def build_analysis_inputs(
-    db: Session, cutoff_at: int, purpose: str
+    db: Session,
+    cutoff_at: int,
+    purpose: str,
+    *,
+    normalization_schema_version: str = NORMALIZATION_SCHEMA_VERSION,
 ) -> tuple[
     tuple[NormalizedFactDTO, ...],
     tuple[UnknownMarkerDTO, ...],
@@ -670,6 +675,16 @@ def build_analysis_inputs(
         )
     discipline, workload = _discipline_facts(sessions, completed_through, config_payload)
     facts.extend((discipline, workload))
+    session_summaries = [asdict(item) for item in sessions]
+    if normalization_schema_version == LEGACY_NORMALIZATION_SCHEMA_VERSION:
+        for summary_payload in session_summaries:
+            summary_payload.pop("active_contribution_attributions", None)
+    elif normalization_schema_version != NORMALIZATION_SCHEMA_VERSION:
+        raise AppError(
+            409,
+            "ANALYSIS_POLICY_UNAVAILABLE",
+            "The requested Analysis normalization policy is unavailable.",
+        )
     lineage = {
         "cutoffAt": cutoff_at,
         "cutoffSemantics": "exclusive",
@@ -690,7 +705,7 @@ def build_analysis_inputs(
         "curriculumCatalog": asdict(curricula),
         "projectCatalog": asdict(projects),
         "disciplineConfiguration": asdict(configuration) if configuration else None,
-        "sessionSummaries": [asdict(item) for item in sessions],
+        "sessionSummaries": session_summaries,
         "evidenceCoverage": [asdict(item) for item in evidence],
     }
     return tuple(facts), tuple(unknowns), lineage
@@ -774,6 +789,7 @@ def run_analysis(
     cutoff_at: int | None = None,
     replay_of_run_id: str | None = None,
     update_current: bool = True,
+    normalization_schema_version: str = NORMALIZATION_SCHEMA_VERSION,
 ) -> AnalysisSnapshot:
     existing = db.scalar(select(AnalysisRun).where(AnalysisRun.idempotency_key == idempotency_key))
     if existing is not None:
@@ -790,10 +806,15 @@ def run_analysis(
         return snapshot
     generated_at = utc_now_ms()
     cutoff = cutoff_at if cutoff_at is not None else generated_at + 1
-    facts, unknowns, lineage_payload = build_analysis_inputs(db, cutoff, purpose)
+    facts, unknowns, lineage_payload = build_analysis_inputs(
+        db,
+        cutoff,
+        purpose,
+        normalization_schema_version=normalization_schema_version,
+    )
     computation = analyze_normalized_facts(facts, unknowns, generated_cutoff_at=cutoff)
     input_hash = content_hash(lineage_payload)
-    policy_bundle = analysis_policy_bundle()
+    policy_bundle = analysis_policy_bundle(normalization_schema_version)
     policy_bundle_hash = content_hash(policy_bundle)
     fact_payloads = [asdict(item) for item in computation.facts]
     gap_payloads = [asdict(item) for item in computation.gaps]
@@ -875,7 +896,7 @@ def run_analysis(
             run_id=run.id,
             analysis_algorithm_version=ANALYSIS_ALGORITHM_VERSION,
             analysis_policy_version=ANALYSIS_POLICY_VERSION,
-            normalization_schema_version=NORMALIZATION_SCHEMA_VERSION,
+            normalization_schema_version=normalization_schema_version,
             analyzer_bundle_json=canonical_json(policy_bundle),
             policy_bundle_hash=policy_bundle_hash,
             source_generation=source_generation,
@@ -1066,7 +1087,8 @@ def replay_analysis(db: Session, *, run_id: str, idempotency_key: str) -> Analys
     if (
         lineage.analysis_algorithm_version != ANALYSIS_ALGORITHM_VERSION
         or lineage.analysis_policy_version != ANALYSIS_POLICY_VERSION
-        or lineage.normalization_schema_version != NORMALIZATION_SCHEMA_VERSION
+        or lineage.normalization_schema_version
+        not in {LEGACY_NORMALIZATION_SCHEMA_VERSION, NORMALIZATION_SCHEMA_VERSION}
     ):
         raise AppError(
             409,
@@ -1089,6 +1111,7 @@ def replay_analysis(db: Session, *, run_id: str, idempotency_key: str) -> Analys
         cutoff_at=original.cutoff_at,
         replay_of_run_id=original.id,
         update_current=False,
+        normalization_schema_version=lineage.normalization_schema_version,
     )
     if (
         replayed.input_hash != original_snapshot.input_hash
@@ -1167,6 +1190,38 @@ def initialize_analysis_v3(db: Session) -> None:
                 subject_type="analysis_scope",
                 subject_id=SCOPE_KEY,
                 source_fact_id="analysis-v3-bootstrap",
+                target_policy_version=ANALYSIS_POLICY_VERSION,
+                status="pending",
+                attempt_count=0,
+                requested_at=now,
+            )
+        )
+        db.flush()
+    normalization_upgrade_source = f"analysis-normalization-upgrade:{NORMALIZATION_SCHEMA_VERSION}"
+    has_legacy_current = db.scalar(
+        select(AnalysisV3CurrentState.scope_key)
+        .join(
+            AnalysisV3RunLineage,
+            AnalysisV3RunLineage.run_id == AnalysisV3CurrentState.run_id,
+        )
+        .where(
+            AnalysisV3RunLineage.normalization_schema_version == LEGACY_NORMALIZATION_SCHEMA_VERSION
+        )
+        .limit(1)
+    )
+    upgrade_exists = db.scalar(
+        select(ProjectionInvalidation.id).where(
+            ProjectionInvalidation.projection_kind == "analysis",
+            ProjectionInvalidation.source_fact_id == normalization_upgrade_source,
+        )
+    )
+    if has_legacy_current is not None and upgrade_exists is None:
+        db.add(
+            ProjectionInvalidation(
+                projection_kind="analysis",
+                subject_type="analysis_scope",
+                subject_id=SCOPE_KEY,
+                source_fact_id=normalization_upgrade_source,
                 target_policy_version=ANALYSIS_POLICY_VERSION,
                 status="pending",
                 attempt_count=0,

@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.analysis.v3.contracts import PublicAnalysisSnapshotDTO
 from app.analysis.v3.public import (
     load_current_public_analysis_snapshot,
+    load_legacy_recommendation_analysis_snapshot,
     validate_public_analysis_envelope,
 )
 from app.curriculum.service import build_catalog as build_curriculum_catalog
@@ -70,7 +71,7 @@ def _analysis_reference(snapshot: PublicAnalysisSnapshotDTO) -> dict[str, Any]:
 
 
 def _require_frozen_analysis_binding(
-    frozen_input: dict[str, Any], snapshot: PublicAnalysisSnapshotDTO
+    db: Session, frozen_input: dict[str, Any], snapshot: PublicAnalysisSnapshotDTO
 ) -> None:
     if frozen_input.get("analysisSnapshot") != _analysis_reference(snapshot):
         raise AppError(
@@ -79,14 +80,20 @@ def _require_frozen_analysis_binding(
             "The frozen Recommendation input is not bound to the referenced Analysis snapshot.",
         )
     public_payload = frozen_input.get("analysisPublicSnapshot")
-    if public_payload is not None and public_payload != json.loads(
-        canonical_json(asdict(snapshot))
-    ):
-        raise AppError(
-            409,
-            "RECOMMENDATION_ANALYSIS_LINEAGE_INVALID",
-            "The frozen public Analysis contract does not match the referenced snapshot.",
-        )
+    if public_payload is not None:
+        current_payload = json.loads(canonical_json(asdict(snapshot)))
+        if public_payload != current_payload:
+            legacy_payload = json.loads(
+                canonical_json(
+                    asdict(load_legacy_recommendation_analysis_snapshot(db, snapshot.snapshot_id))
+                )
+            )
+            if public_payload != legacy_payload:
+                raise AppError(
+                    409,
+                    "RECOMMENDATION_ANALYSIS_LINEAGE_INVALID",
+                    "The frozen public Analysis contract does not match the referenced snapshot.",
+                )
 
 
 def _persist_output(
@@ -465,10 +472,8 @@ def _generate_recommendations(
             ) from exc
         frozen_input["candidates"] = [asdict(item) for item in candidates]
     else:
-        _require_frozen_analysis_binding(frozen_input, snapshot)
-        candidates = regenerate_candidates_from_frozen_input(
-            frozen_input, policy_registry_version
-        )
+        _require_frozen_analysis_binding(db, frozen_input, snapshot)
+        candidates = regenerate_candidates_from_frozen_input(frozen_input, policy_registry_version)
     return _persist_completed_run(
         db,
         idempotency_key=idempotency_key,

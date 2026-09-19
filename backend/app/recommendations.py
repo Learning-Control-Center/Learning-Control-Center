@@ -4,12 +4,17 @@ import json
 from typing import Any
 
 from fastapi import APIRouter, Depends
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.analysis.persistence import persist_envelope
 from app.analysis.v1_compat import build_v1_recommendation_envelope
 from app.api_serialization import serialize_api_instants
 from app.auth import AuthContext, get_auth_context, require_csrf
+from app.authority.service import (
+    require_legacy_recommendation_writable,
+    require_legacy_today_generation,
+)
 from app.database import get_db
 from app.errors import AppError
 from app.models import RecommendationSnapshot
@@ -33,6 +38,7 @@ def build_recommendation(db: Session, *, now_ms: int | None = None) -> dict[str,
 async def today_recommendation(
     _auth: AuthContext = Depends(get_auth_context), db: Session = Depends(get_db)
 ) -> dict[str, Any]:
+    require_legacy_today_generation(db)
     envelope = build_v1_recommendation_envelope(db)
     analysis_snapshot = persist_envelope(db, envelope)
     payload = evaluate(envelope)
@@ -56,6 +62,33 @@ async def today_recommendation(
     return serialize_api_instants(payload)
 
 
+@router.get("/history")
+async def recommendation_history(
+    _auth: AuthContext = Depends(get_auth_context), db: Session = Depends(get_db)
+) -> list[dict[str, Any]]:
+    snapshots = db.scalars(
+        select(RecommendationSnapshot).order_by(
+            RecommendationSnapshot.generated_at.desc(), RecommendationSnapshot.id.desc()
+        )
+    ).all()
+    return serialize_api_instants(
+        [
+            {
+                "id": snapshot.id,
+                "generatedAt": snapshot.generated_at,
+                "localDate": snapshot.local_date,
+                "engineVersion": snapshot.engine_version,
+                "recommendation": json.loads(snapshot.structured_payload_json),
+                "acceptedPrimary": snapshot.accepted_primary,
+                "chosenCompetencyIdentityId": snapshot.chosen_competency_identity_id,
+                "analysisSnapshotId": snapshot.analysis_snapshot_id,
+                "authority": "legacy_v1_history",
+            }
+            for snapshot in snapshots
+        ]
+    )
+
+
 @router.post("/{snapshot_id}/decision")
 async def record_decision(
     snapshot_id: str,
@@ -63,6 +96,7 @@ async def record_decision(
     _auth: AuthContext = Depends(require_csrf),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    require_legacy_recommendation_writable(db)
     snapshot = db.get(RecommendationSnapshot, snapshot_id)
     if snapshot is None:
         raise AppError(

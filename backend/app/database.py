@@ -304,6 +304,10 @@ def _assert_known_migration_source(
         "suggestion_activity_relation_corrections",
         "today_suggestion_current_states",
     }
+    authority_tables = {
+        "learning_control_authority_state",
+        "learning_control_authority_events",
+    }
     if revision in {"0013_learning_graph", "0014_roadmap_projection_state"} and not (
         learning_graph_tables <= tables
     ):
@@ -323,8 +327,16 @@ def _assert_known_migration_source(
             "verified pre-migration backup before retrying."
         )
     if "legacy_roadmap_active_states" in tables:
+        roadmap_columns = {row[1] for row in connection.execute("PRAGMA table_info(roadmaps)")}
+        pointers_present = {
+            "active_version_id",
+            "current_phase_id",
+            "is_current",
+        } <= roadmap_columns
         roadmaps = connection.execute(
             "SELECT id, active_version_id, current_phase_id, is_current FROM roadmaps ORDER BY id"
+            if pointers_present
+            else "SELECT id, NULL, NULL, 0 FROM roadmaps ORDER BY id"
         ).fetchall()
         states = {
             row[0]: row
@@ -337,6 +349,8 @@ def _assert_known_migration_source(
             raise RuntimeError("Legacy Roadmap active-state parity validation failed.")
         for roadmap_id, active_version_id, current_phase_id, is_current in roadmaps:
             state = states.get(roadmap_id)
+            if not pointers_present and state is not None:
+                active_version_id, current_phase_id, is_current = state[1], state[2], state[3]
             payload = {
                 "activeVersionId": active_version_id,
                 "currentPhaseId": current_phase_id,
@@ -499,15 +513,11 @@ def _assert_known_migration_source(
             "Database has an ambiguously partial Analysis V3 migration; restore its verified "
             "pre-migration backup before retrying."
         )
-    if (
-        revision == "0016_recommendation_v2"
-        and (
-            bool(today_v2_tables & tables)
-            or any(
-                name.startswith("_alembic_tmp_today_")
-                or name.startswith("_alembic_tmp_suggestion_")
-                for name in tables
-            )
+    if revision == "0016_recommendation_v2" and (
+        bool(today_v2_tables & tables)
+        or any(
+            name.startswith("_alembic_tmp_today_") or name.startswith("_alembic_tmp_suggestion_")
+            for name in tables
         )
     ):
         raise RuntimeError(
@@ -531,12 +541,37 @@ def _assert_known_migration_source(
             "verified pre-migration backup before retrying."
         )
     if revision == "0017_today_v2" and (
-        not today_v2_tables <= tables
-        or any(name.startswith("_alembic_tmp_") for name in tables)
+        not today_v2_tables <= tables or any(name.startswith("_alembic_tmp_") for name in tables)
     ):
         raise RuntimeError(
             "Database has an ambiguously partial Today V2 migration; restore its verified "
             "pre-migration backup before retrying."
+        )
+    authority_markers = authority_tables & tables
+    if (
+        revision == "0017_today_v2"
+        and authority_markers
+        or revision == "0018_v2_authority_state"
+        and authority_tables != authority_markers
+    ):
+        raise RuntimeError(
+            "Database has an ambiguously partial authority-state migration; restore its verified "
+            "pre-migration backup before retrying."
+        )
+    roadmap_columns = {row[1] for row in connection.execute("PRAGMA table_info(roadmaps)")}
+    legacy_pointer_columns = {"is_current", "active_version_id", "current_phase_id"}
+    if (
+        revision == "0018_v2_authority_state"
+        and (
+            not legacy_pointer_columns <= roadmap_columns
+            or any(name.startswith("_alembic_tmp_roadmaps") for name in tables)
+        )
+        or revision == "0019_remove_legacy_roadmap_pointer_cycle"
+        and bool(legacy_pointer_columns & roadmap_columns)
+    ):
+        raise RuntimeError(
+            "Database has an ambiguously partial legacy Roadmap pointer contraction; restore its "
+            "verified pre-migration backup before retrying."
         )
 
 

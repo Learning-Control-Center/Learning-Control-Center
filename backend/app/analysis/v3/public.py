@@ -33,10 +33,12 @@ from app.analysis.v3.contracts import (
 from app.analysis.v3.models import (
     AnalysisV3CompetencyGap,
     AnalysisV3NormalizedFact,
+    AnalysisV3RunLineage,
     AnalysisV3Signal,
     AnalysisV3SnapshotDetail,
     AnalysisV3UnknownMarker,
 )
+from app.analysis.v3.policy import LEGACY_NORMALIZATION_SCHEMA_VERSION
 from app.analysis_sources import actual_contribution_attributions_as_of
 from app.determinism import content_hash
 from app.errors import AppError
@@ -308,7 +310,12 @@ def _typed_fact(item: AnalysisV3NormalizedFact) -> PublicAnalysisFactDTO:
     raise AppError(500, "ANALYSIS_V3_FACT_INVALID", "The snapshot has an unknown fact type.")
 
 
-def load_public_analysis_snapshot(db: Session, snapshot_id: str) -> PublicAnalysisSnapshotDTO:
+def _load_public_analysis_snapshot(
+    db: Session,
+    snapshot_id: str,
+    *,
+    legacy_recommendation_compatibility: bool,
+) -> PublicAnalysisSnapshotDTO:
     """Load the stable deep-immutable Analysis contract consumed by downstream contexts."""
     snapshot = db.get(AnalysisSnapshot, snapshot_id)
     if snapshot is None or db.get(AnalysisV3SnapshotDetail, snapshot_id) is None:
@@ -334,6 +341,9 @@ def load_public_analysis_snapshot(db: Session, snapshot_id: str) -> PublicAnalys
         .order_by(AnalysisV3UnknownMarker.ordinal)
     ).all()
     lineage_payload = json.loads(snapshot.input_lineage_json)
+    run_lineage = db.get(AnalysisV3RunLineage, snapshot.run_id)
+    if run_lineage is None:
+        raise AppError(409, "ANALYSIS_V3_HISTORY_INVALID", "Analysis lineage is unavailable.")
     profile_payload = lineage_payload.get("profile")
     target_dimensions = {
         str(item["target_identity_id"]): item.get("dimension_id")
@@ -375,11 +385,17 @@ def load_public_analysis_snapshot(db: Session, snapshot_id: str) -> PublicAnalys
         else item
         for item in typed_facts
     )
-    contribution_attributions: dict[str, list[Any]] = {}
-    for attribution in actual_contribution_attributions_as_of(
-        db, exclusive_cutoff_at=snapshot.cutoff_at
+    legacy_contribution_attributions: dict[str, list[Any]] = {}
+    if (
+        legacy_recommendation_compatibility
+        and run_lineage.normalization_schema_version == LEGACY_NORMALIZATION_SCHEMA_VERSION
     ):
-        contribution_attributions.setdefault(attribution.session_id, []).append(attribution)
+        for attribution in actual_contribution_attributions_as_of(
+            db, exclusive_cutoff_at=snapshot.cutoff_at
+        ):
+            legacy_contribution_attributions.setdefault(attribution.session_id, []).append(
+                attribution
+            )
     activity_summaries = tuple(
         PublicActualActivitySummaryDTO(
             activity_id=str(item["activity_id"]),
@@ -406,14 +422,33 @@ def load_public_analysis_snapshot(db: Session, snapshot_id: str) -> PublicAnalys
                 )
                 for qualification in item.get("active_evidence_qualifications", ())
             ),
-            active_contribution_attributions=tuple(
-                PublicActivityContributionAttributionDTO(
-                    competency_identity_id=attribution.competency_identity_id,
-                    dimension_id=attribution.dimension_id,
-                    criterion_definition_id=attribution.criterion_definition_id,
-                    relevance=cast(Any, attribution.relevance),
+            active_contribution_attributions=(
+                tuple(
+                    PublicActivityContributionAttributionDTO(
+                        competency_identity_id=attribution.competency_identity_id,
+                        dimension_id=attribution.dimension_id,
+                        criterion_definition_id=attribution.criterion_definition_id,
+                        relevance=cast(Any, attribution.relevance),
+                    )
+                    for attribution in legacy_contribution_attributions.get(
+                        str(item["session_id"]), ()
+                    )
                 )
-                for attribution in contribution_attributions.get(str(item["session_id"]), ())
+                if legacy_recommendation_compatibility
+                and run_lineage.normalization_schema_version == LEGACY_NORMALIZATION_SCHEMA_VERSION
+                else tuple(
+                    PublicActivityContributionAttributionDTO(
+                        competency_identity_id=str(attribution["competency_identity_id"]),
+                        dimension_id=(
+                            str(attribution["dimension_id"])
+                            if attribution.get("dimension_id") is not None
+                            else None
+                        ),
+                        criterion_definition_id=str(attribution["criterion_definition_id"]),
+                        relevance=cast(Any, attribution["relevance"]),
+                    )
+                    for attribution in item.get("active_contribution_attributions", ())
+                )
             ),
         )
         for item in lineage_payload.get("sessionSummaries", ())
@@ -491,6 +526,24 @@ def load_public_analysis_snapshot(db: Session, snapshot_id: str) -> PublicAnalys
     )
 
 
+def load_public_analysis_snapshot(db: Session, snapshot_id: str) -> PublicAnalysisSnapshotDTO:
+    """Load only facts frozen inside the immutable, hash-covered Analysis contract."""
+    return _load_public_analysis_snapshot(
+        db, snapshot_id, legacy_recommendation_compatibility=False
+    )
+
+
+def load_legacy_recommendation_analysis_snapshot(
+    db: Session, snapshot_id: str
+) -> PublicAnalysisSnapshotDTO:
+    """Reconstruct the pre-v3.1 DTO only to validate/replay existing Recommendation history.
+
+    New Recommendation generation cannot use this adapter: legacy normalization cannot
+    satisfy the current Analysis pointer policy bundle.
+    """
+    return _load_public_analysis_snapshot(db, snapshot_id, legacy_recommendation_compatibility=True)
+
+
 def load_public_analysis_input_lineage_json(db: Session, snapshot_id: str) -> str:
     """Return the exact canonical Analysis input envelope without lossy thawing."""
     snapshot = db.get(AnalysisSnapshot, snapshot_id)
@@ -549,11 +602,8 @@ def validate_public_analysis_envelope(
         and snapshot.target_profile_version_id
         == (profile.get("profile_version_id") if isinstance(profile, dict) else None)
         and snapshot.learning_graph_reference
-        == (
-            graph.get("learning_graph_version_id") if isinstance(graph, dict) else None
-        )
-        and snapshot.curriculum_reference
-        == content_hash(lineage.get("curriculumCatalog"))
+        == (graph.get("learning_graph_version_id") if isinstance(graph, dict) else None)
+        and snapshot.curriculum_reference == content_hash(lineage.get("curriculumCatalog"))
         and list(snapshot.semantic_definition_references) == semantic_references
         and list(snapshot.capability_scale_version_references) == scale_references
         and snapshot.discipline_configuration_reference == configuration_reference

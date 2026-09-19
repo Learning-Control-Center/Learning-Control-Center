@@ -161,13 +161,13 @@ async def test_seeded_scales_and_strict_semantic_definition_activation(
     assert replay.status_code == 200
     assert db.get(ActiveCompetencyDefinitionState, competency_id) is not None
     assert db.scalar(select(func.count()).select_from(CompetencyDefinitionActivationEvent)) == 1
-    _validate_portable_payload(_portable_payload(db), "semantic-round-trip", schema_version=8)
+    _validate_portable_payload(_portable_payload(db), "semantic-round-trip", schema_version=9)
     disconnected = copy.deepcopy(_portable_payload(db))
     disconnected["tables"]["competency_definition_activation_events"][0]["from_definition_id"] = (
         body["id"]
     )
     with pytest.raises(AppError, match="activation history"):
-        _validate_portable_payload(disconnected, "semantic-disconnected", schema_version=8)
+        _validate_portable_payload(disconnected, "semantic-disconnected", schema_version=9)
 
 
 async def test_complete_profile_versions_validate_and_preserve_stable_target_identity(
@@ -226,13 +226,13 @@ async def test_complete_profile_versions_validate_and_preserve_stable_target_ide
     assert db.scalar(select(func.count()).select_from(TargetProfileVersion)) == 2
     assert db.get(ActiveTargetProfileState, 1).target_profile_version_id == version_one["versionId"]
     assert db.scalar(select(func.count()).select_from(TargetProfileActivationEvent)) == 1
-    _validate_portable_payload(_portable_payload(db), "profile-round-trip", schema_version=8)
+    _validate_portable_payload(_portable_payload(db), "profile-round-trip", schema_version=9)
     disconnected = copy.deepcopy(_portable_payload(db))
     disconnected["tables"]["target_profile_activation_events"][0]["from_profile_version_id"] = (
         version_one["versionId"]
     )
     with pytest.raises(AppError, match="activation history"):
-        _validate_portable_payload(disconnected, "profile-disconnected", schema_version=8)
+        _validate_portable_payload(disconnected, "profile-disconnected", schema_version=9)
 
 
 async def test_cefr_overall_and_dimensions_are_explicitly_separate(
@@ -368,7 +368,7 @@ async def test_v1_checkbox_appends_unknown_legacy_assertion_and_invalidation(
     assert portable["tables"]["target_profiles"] == []
     assert "projection_invalidations" not in portable["tables"]
     validated, _summary = _validate_portable_payload(
-        portable, "v2-profile-round-trip", schema_version=8
+        portable, "v2-profile-round-trip", schema_version=9
     )
     assert (
         validated["legacy_criterion_assertions"]
@@ -377,11 +377,11 @@ async def test_v1_checkbox_appends_unknown_legacy_assertion_and_invalidation(
     tampered = copy.deepcopy(portable)
     tampered["tables"]["legacy_criterion_assertions"][0]["provenance"] = "invented"
     with pytest.raises(AppError, match="legacy assertion"):
-        _validate_portable_payload(tampered, "tampered-legacy-provenance", schema_version=8)
+        _validate_portable_payload(tampered, "tampered-legacy-provenance", schema_version=9)
     tampered_hash = copy.deepcopy(portable)
     tampered_hash["tables"]["migration_backfill_runs"][0]["result_hash"] = "0" * 64
     with pytest.raises(AppError, match="Backfill counts or hashes"):
-        _validate_portable_payload(tampered_hash, "tampered-backfill-hash", schema_version=8)
+        _validate_portable_payload(tampered_hash, "tampered-backfill-hash", schema_version=9)
 
 
 def test_profile_version_rows_are_immutable(db: Session) -> None:

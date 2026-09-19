@@ -1,5 +1,6 @@
 import {
   Activity,
+  Archive,
   BarChart3,
   BrainCircuit,
   BookOpenCheck,
@@ -8,12 +9,12 @@ import {
   FolderKanban,
   CalendarClock,
   FileOutput,
-  GitBranch,
   LogOut,
   Map,
   Menu,
   Settings,
   Sparkles,
+  UserRoundCheck,
   X,
 } from 'lucide-react'
 import { AnimatePresence, motion } from 'motion/react'
@@ -21,18 +22,18 @@ import { useEffect, useState } from 'react'
 import { NavLink, Outlet } from 'react-router-dom'
 
 import { useAuth } from '../auth'
+import { useAuthority } from '../authority'
 
-const navigation = [
+const primaryNavigation = [
   { to: '/', label: 'Today', icon: Sparkles },
-  { to: '/today-v2', label: 'Today V2 preview', icon: Sparkles },
   { to: '/roadmap', label: 'Roadmap', icon: Map },
-  { to: '/roadmap-v2', label: 'Roadmap V2 preview', icon: GitBranch },
   { to: '/curriculum', label: 'Curriculum', icon: LibraryBig },
   { to: '/projects', label: 'Projects', icon: FolderKanban },
+  { to: '/profile', label: 'Profile & capability', icon: UserRoundCheck },
   { to: '/sessions', label: 'Log & sessions', icon: CalendarClock },
   { to: '/analytics', label: 'Analytics', icon: BarChart3 },
   { to: '/analysis', label: 'Analysis V3', icon: BrainCircuit },
-  { to: '/recommendations-v2', label: 'Recommendation V2', icon: ListChecks },
+  { to: '/recommendations', label: 'Recommendations', icon: ListChecks },
   { to: '/reports', label: 'Reports', icon: BookOpenCheck },
   { to: '/transfer', label: 'Import / Export', icon: FileOutput },
   { to: '/settings', label: 'Settings', icon: Settings },
@@ -40,6 +41,14 @@ const navigation = [
 
 function Navigation({ close }: { close?: () => void }) {
   const { session, logout } = useAuth()
+  const { state } = useAuthority()
+  const navigation = state?.canonicalLearningAuthority === 'v2'
+    ? [
+        ...primaryNavigation,
+        { to: '/legacy-today', label: 'Legacy Today history', icon: Archive },
+        { to: '/legacy-roadmap', label: 'Legacy Roadmap history', icon: Archive },
+      ]
+    : primaryNavigation
   return (
     <div className="flex h-full flex-col">
       <div className="border-b border-white/10 px-5 py-6">
@@ -49,7 +58,9 @@ function Navigation({ close }: { close?: () => void }) {
           </span>
           <div>
             <p className="font-display text-sm font-semibold tracking-tight text-white">Learning Control</p>
-            <p className="font-mono text-[0.68rem] uppercase tracking-[0.17em] text-white/60">Center / V1</p>
+            <p className="font-mono text-[0.68rem] uppercase tracking-[0.17em] text-white/60">
+              Center / {state?.canonicalLearningAuthority === 'v2' ? 'V2' : 'V1 compatibility'}
+            </p>
           </div>
         </div>
         <p className="text-sm leading-5 text-white/60">Competency, evidence, and deliberate practice.</p>

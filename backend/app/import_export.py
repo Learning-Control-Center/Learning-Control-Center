@@ -35,6 +35,8 @@ from app.analysis_sources import analysis_source_generation
 from app.analytics import build_analytics
 from app.api_serialization import serialize_api_instants
 from app.auth import AuthContext, get_auth_context, require_csrf
+from app.authority.models import LearningControlAuthorityEvent, LearningControlAuthorityState
+from app.authority.semantics import is_valid_transition
 from app.capability import (
     capability_evidence_set_hash,
     drain_projection_invalidations,
@@ -185,8 +187,11 @@ from app.portability.registry import (
     PORTABLE_V7_FORBIDDEN_TABLES,
     PORTABLE_V7_MANIFEST,
     PORTABLE_V7_RECOMMENDATION_TABLES,
+    PORTABLE_V8_FORBIDDEN_TABLES,
     PORTABLE_V8_MANIFEST,
     PORTABLE_V8_TODAY_TABLES,
+    PORTABLE_V9_AUTHORITY_TABLES,
+    PORTABLE_V9_MANIFEST,
     supports_portable_schema,
     upgrade_v2_to_v3_tables,
     upgrade_v3_to_v4_tables,
@@ -194,6 +199,7 @@ from app.portability.registry import (
     upgrade_v5_to_v6_tables,
     upgrade_v6_to_v7_tables,
     upgrade_v7_to_v8_tables,
+    upgrade_v8_to_v9_tables,
 )
 from app.projects.contracts import ProjectCatalogPublicDTO
 from app.projects.models import (
@@ -281,6 +287,8 @@ router = APIRouter(prefix="/import-export", tags=["import/export"])
 logger = logging.getLogger(__name__)
 
 PORTABLE_MODELS = [
+    LearningControlAuthorityEvent,
+    LearningControlAuthorityState,
     Roadmap,
     RoadmapVersion,
     Phase,
@@ -479,7 +487,7 @@ def _capability_projection_checkpoints(db: Session) -> list[dict[str, str]]:
 
 def _portable_payload(db: Session, project_ids: set[str] | None = None) -> dict[str, Any]:
     payload: dict[str, Any] = {
-        "manifest": PORTABLE_V8_MANIFEST,
+        "manifest": PORTABLE_V9_MANIFEST,
         "tables": {
             _table(model).name: [_row_dict(item) for item in db.scalars(select(model)).all()]
             for model in PORTABLE_MODELS
@@ -827,6 +835,17 @@ def _portable_payload(db: Session, project_ids: set[str] | None = None) -> dict[
     recommendation_checkpoint["checkpointHash"] = content_hash(recommendation_checkpoint)
     payload["recommendationV2HistoryCheckpoint"] = recommendation_checkpoint
     payload["todayV2CurrentCheckpoint"] = today_current_checkpoint(db)
+    authority_rows = sorted(
+        tables["learning_control_authority_events"], key=lambda item: item["event_sequence"]
+    )
+    authority_state_rows = tables["learning_control_authority_state"]
+    authority_checkpoint = {
+        "stateHash": authority_state_rows[0]["state_hash"],
+        "historyHash": content_hash(authority_rows),
+        "eventSequence": authority_state_rows[0]["event_sequence"],
+    }
+    authority_checkpoint["checkpointHash"] = content_hash(authority_checkpoint)
+    payload["authorityCheckpoint"] = authority_checkpoint
     return payload
 
 
@@ -1551,9 +1570,7 @@ def _validate_today_v2_checkpoint(
         )
     interactions_by_suggestion: dict[str, list[dict[str, Any]]] = {}
     for interaction in tables["today_interactions"]:
-        interactions_by_suggestion.setdefault(interaction["suggestion_id"], []).append(
-            interaction
-        )
+        interactions_by_suggestion.setdefault(interaction["suggestion_id"], []).append(interaction)
     corrections_by_interaction = {
         correction["interaction_id"]: correction
         for correction in tables["today_interaction_corrections"]
@@ -1574,9 +1591,7 @@ def _validate_today_v2_checkpoint(
                 else latest["resulting_status"]
             )
             updated_at = (
-                correction["corrected_at"]
-                if correction is not None
-                else latest["occurred_at"]
+                correction["corrected_at"] if correction is not None else latest["occurred_at"]
             )
             expected.append(
                 {
@@ -1604,6 +1619,148 @@ def _validate_today_v2_checkpoint(
             422,
             "PORTABLE_TODAY_CHECKPOINT_INVALID",
             "Today V2 current-state parity failed.",
+        )
+
+
+def _validate_authority_checkpoint(
+    payload: dict[str, Any], tables: dict[str, list[dict[str, Any]]], schema_version: int
+) -> None:
+    checkpoint = payload.get("authorityCheckpoint")
+    if schema_version < 9:
+        if checkpoint is not None:
+            raise AppError(
+                422,
+                "PORTABLE_SCHEMA_INVALID",
+                "Portable schema versions before V9 cannot contain authority state.",
+            )
+        return
+    if not isinstance(checkpoint, dict) or set(checkpoint) != {
+        "stateHash",
+        "historyHash",
+        "eventSequence",
+        "checkpointHash",
+    }:
+        raise AppError(
+            422, "PORTABLE_AUTHORITY_CHECKPOINT_INVALID", "Authority checkpoint is invalid."
+        )
+    unhashed = {key: value for key, value in checkpoint.items() if key != "checkpointHash"}
+    events = sorted(
+        tables["learning_control_authority_events"], key=lambda item: item["event_sequence"]
+    )
+    states = tables["learning_control_authority_state"]
+    if len(states) != 1 or checkpoint["checkpointHash"] != content_hash(unhashed):
+        raise AppError(
+            422, "PORTABLE_AUTHORITY_CHECKPOINT_INVALID", "Authority checkpoint is invalid."
+        )
+    state = states[0]
+    sequences = [event["event_sequence"] for event in events]
+    event_by_id = {event["id"]: event for event in events}
+    if sequences != list(range(1, len(events) + 1)) or not events:
+        raise AppError(
+            422, "PORTABLE_AUTHORITY_HISTORY_INVALID", "Authority history is not contiguous."
+        )
+    canonical_was_v2 = False
+    previous: dict[str, Any] | None = None
+    for event in events:
+        try:
+            resulting = json.loads(event["resulting_state_json"])
+            prior = json.loads(event["prior_state_json"]) if event["prior_state_json"] else None
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise AppError(
+                422,
+                "PORTABLE_AUTHORITY_HISTORY_INVALID",
+                "Authority event JSON is invalid.",
+            ) from exc
+        if prior != previous or not is_valid_transition(
+            sequence=event["event_sequence"],
+            command_type=event["command_type"],
+            prior=prior,
+            resulting=resulting,
+            actor=event["actor"],
+            source=event["source"],
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_AUTHORITY_HISTORY_INVALID",
+                "Authority event lineage or transition semantics are invalid.",
+            )
+        if canonical_was_v2 and resulting["canonicalLearningAuthority"] != "v2":
+            raise AppError(
+                422,
+                "PORTABLE_AUTHORITY_HISTORY_INVALID",
+                "Canonical V2 authority cannot be demoted.",
+            )
+        canonical_was_v2 = canonical_was_v2 or resulting["canonicalLearningAuthority"] == "v2"
+        event_payload = {
+            "commandType": event["command_type"],
+            "reason": event["reason"],
+            "resultingState": resulting,
+        }
+        if prior is not None:
+            event_payload["priorState"] = prior
+        if event["payload_hash"] != content_hash(event_payload):
+            raise AppError(
+                422,
+                "PORTABLE_AUTHORITY_HISTORY_INVALID",
+                "Authority event hash is invalid.",
+            )
+        previous = resulting
+    last = event_by_id.get(state["last_event_id"])
+    expected_state = {
+        "canonicalLearningAuthority": state["canonical_learning_authority"],
+        "recommendationPresentation": state["recommendation_presentation"],
+        "roadmapPresentation": state["roadmap_presentation"],
+        "todayPresentation": state["today_presentation"],
+    }
+    if (
+        last is None
+        or last["event_sequence"] != state["event_sequence"]
+        or json.loads(last["resulting_state_json"]) != expected_state
+        or state["state_hash"] != content_hash(expected_state)
+        or checkpoint["stateHash"] != state["state_hash"]
+        or checkpoint["eventSequence"] != state["event_sequence"]
+        or checkpoint["historyHash"] != content_hash(events)
+    ):
+        raise AppError(
+            422,
+            "PORTABLE_AUTHORITY_CHECKPOINT_INVALID",
+            "Authority state does not match immutable history.",
+        )
+
+
+def _validate_authority_restore_transition(
+    db: Session, tables: dict[str, list[dict[str, Any]]]
+) -> None:
+    current = db.get(LearningControlAuthorityState, 1)
+    if current is None or current.canonical_learning_authority != "v2":
+        return
+    incoming_states = tables["learning_control_authority_state"]
+    if len(incoming_states) != 1 or incoming_states[0]["canonical_learning_authority"] != "v2":
+        raise AppError(
+            409,
+            "PORTABLE_AUTHORITY_DEMOTION",
+            "A portable restore cannot demote canonical V2 learning authority.",
+        )
+    current_events = [
+        _row_dict(item)
+        for item in db.scalars(
+            select(LearningControlAuthorityEvent).order_by(
+                LearningControlAuthorityEvent.event_sequence
+            )
+        ).all()
+    ]
+    incoming_events = sorted(
+        tables["learning_control_authority_events"],
+        key=lambda item: item["event_sequence"],
+    )
+    if (
+        len(incoming_events) < len(current_events)
+        or incoming_events[: len(current_events)] != current_events
+    ):
+        raise AppError(
+            409,
+            "PORTABLE_AUTHORITY_HISTORY_DIVERGENCE",
+            "A portable restore cannot remove or rewrite existing V2 authority history.",
         )
 
 
@@ -2050,8 +2207,15 @@ def create_operational_backup(
         target = sqlite3.connect(destination)
         try:
             source_connection.backup(target)
+            integrity = target.execute("PRAGMA integrity_check").fetchall()
+            foreign_keys = target.execute("PRAGMA foreign_key_check").fetchall()
+            if integrity != [("ok",)] or foreign_keys:
+                raise RuntimeError("The operational backup failed SQLite integrity validation.")
         finally:
             target.close()
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
     finally:
         raw.close()
     digest = hashlib.sha256(destination.read_bytes()).hexdigest()
@@ -2068,7 +2232,6 @@ def create_operational_backup(
 
 
 def _insert_portable_tables(connection: Any, tables: dict[str, list[dict[str, Any]]]) -> None:
-    roadmap_pointers: list[tuple[str, str | None, str | None, bool]] = []
     parent_pointers: list[tuple[str, str | None]] = []
     curriculum_version_pointers: list[tuple[str, str | None]] = []
     project_version_pointers: list[tuple[str, str | None]] = []
@@ -2083,19 +2246,6 @@ def _insert_portable_tables(connection: Any, tables: dict[str, list[dict[str, An
     for model in PORTABLE_MODELS:
         table_name = _table(model).name
         rows = [dict(row) for row in tables.get(table_name, [])]
-        if model is Roadmap:
-            for row in rows:
-                roadmap_pointers.append(
-                    (
-                        row["id"],
-                        row.get("active_version_id"),
-                        row.get("current_phase_id"),
-                        row.get("is_current", False),
-                    )
-                )
-                row["active_version_id"] = None
-                row["current_phase_id"] = None
-                row["is_current"] = False
         if model is CompetencyDefinition:
             for row in rows:
                 parent_pointers.append((row["id"], row.get("parent_definition_id")))
@@ -2242,22 +2392,13 @@ def _insert_portable_tables(connection: Any, tables: dict[str, list[dict[str, An
                 .where(TodaySuggestion.id == suggestion_id)
                 .values(replaces_suggestion_id=replaces_suggestion_id)
             )
-    for roadmap_id, roadmap_version_id, phase_id, is_current in roadmap_pointers:
-        connection.execute(
-            _table(Roadmap)
-            .update()
-            .where(Roadmap.id == roadmap_id)
-            .values(
-                active_version_id=roadmap_version_id,
-                current_phase_id=phase_id,
-                is_current=is_current,
-            )
-        )
 
 
 def _clear_migration_seeded_portable_state(connection: Any) -> None:
     """Remove built-ins seeded by migrations before logical backup insertion."""
     connection.execute(_table(MigrationBackfillRun).delete())
+    connection.execute(_table(LearningControlAuthorityState).delete())
+    connection.execute(_table(LearningControlAuthorityEvent).delete())
     connection.execute(_table(DisciplineConfigurationEvent).delete())
     connection.execute(_table(ActivityCategoryVersion).delete())
     connection.execute(_table(CapabilityScaleLevel).delete())
@@ -2382,6 +2523,12 @@ def _normalize_portable_tables(
             "PORTABLE_MANIFEST_INVALID",
             "The portable V8 manifest is missing or does not match the recovery contract.",
         )
+    if schema_version == 9 and parsed.manifest != PORTABLE_V9_MANIFEST:
+        raise AppError(
+            422,
+            "PORTABLE_MANIFEST_INVALID",
+            "The portable V9 manifest is missing or does not match the recovery contract.",
+        )
     if schema_version == 1 and parsed.manifest is not None:
         raise AppError(
             422, "PORTABLE_SCHEMA_INVALID", "A V1 portable package cannot contain a V2 manifest."
@@ -2415,6 +2562,10 @@ def _normalize_portable_tables(
         raise AppError(
             422, "PORTABLE_SCHEMA_INVALID", "A V7 portable package cannot contain V8 tables."
         )
+    if schema_version == 8 and set(tables) & set(PORTABLE_V8_FORBIDDEN_TABLES):
+        raise AppError(
+            422, "PORTABLE_SCHEMA_INVALID", "A V8 portable package cannot contain V9 tables."
+        )
     unknown = set(tables) - set(PORTABLE_BY_TABLE)
     v2_tables = set(PORTABLE_V2_FOUNDATION_TABLES)
     v3_tables = set(PORTABLE_V3_CURRICULUM_TABLES)
@@ -2423,6 +2574,7 @@ def _normalize_portable_tables(
     v6_tables = set(PORTABLE_V6_ANALYSIS_TABLES)
     v7_tables = set(PORTABLE_V7_RECOMMENDATION_TABLES)
     v8_tables = set(PORTABLE_V8_TODAY_TABLES)
+    v9_tables = set(PORTABLE_V9_AUTHORITY_TABLES)
     missing = set(PORTABLE_BY_TABLE) - set(tables)
     allowed_v1_missing = (
         v2_tables
@@ -2432,6 +2584,7 @@ def _normalize_portable_tables(
         | v6_tables
         | v7_tables
         | v8_tables
+        | v9_tables
         | {"roadmap_scope_events"}
     )
     legacy_without_scope_history = schema_version == 1 and "roadmap_scope_events" in missing
@@ -2440,16 +2593,20 @@ def _normalize_portable_tables(
         or (
             schema_version == 2
             and missing
-            <= (v3_tables | v4_tables | v5_tables | v6_tables | v7_tables | v8_tables)
+            <= (v3_tables | v4_tables | v5_tables | v6_tables | v7_tables | v8_tables | v9_tables)
         )
         or (
             schema_version == 3
-            and missing <= (v4_tables | v5_tables | v6_tables | v7_tables | v8_tables)
+            and missing <= (v4_tables | v5_tables | v6_tables | v7_tables | v8_tables | v9_tables)
         )
-        or (schema_version == 4 and missing <= (v5_tables | v6_tables | v7_tables | v8_tables))
-        or (schema_version == 5 and missing <= (v6_tables | v7_tables | v8_tables))
-        or (schema_version == 6 and missing <= (v7_tables | v8_tables))
-        or (schema_version == 7 and missing <= v8_tables)
+        or (
+            schema_version == 4
+            and missing <= (v5_tables | v6_tables | v7_tables | v8_tables | v9_tables)
+        )
+        or (schema_version == 5 and missing <= (v6_tables | v7_tables | v8_tables | v9_tables))
+        or (schema_version == 6 and missing <= (v7_tables | v8_tables | v9_tables))
+        or (schema_version == 7 and missing <= (v8_tables | v9_tables))
+        or (schema_version == 8 and missing <= v9_tables)
         or not missing
     )
     if unknown or not valid_missing:
@@ -2461,6 +2618,17 @@ def _normalize_portable_tables(
         )
     if legacy_without_scope_history:
         tables["roadmap_scope_events"] = _legacy_scope_baseline(tables, package_id)
+
+    def upgrade_authority_compatibility() -> None:
+        try:
+            upgrade_v8_to_v9_tables(tables)
+        except ValueError as exc:
+            raise AppError(
+                422,
+                "PORTABLE_ROADMAP_POINTER_PARITY_INVALID",
+                "Portable legacy Roadmap pointers do not match compatibility state.",
+            ) from exc
+
     if schema_version == 1:
         upgrade_v1_profile_competency_tables(tables)
         upgrade_v1_activity_session_tables(tables)
@@ -2475,6 +2643,7 @@ def _normalize_portable_tables(
         upgrade_v5_to_v6_tables(tables)
         upgrade_v6_to_v7_tables(tables)
         upgrade_v7_to_v8_tables(tables)
+        upgrade_authority_compatibility()
     elif schema_version == 2:
         upgrade_v2_to_v3_tables(tables)
         upgrade_v3_to_v4_tables(tables)
@@ -2482,26 +2651,34 @@ def _normalize_portable_tables(
         upgrade_v5_to_v6_tables(tables)
         upgrade_v6_to_v7_tables(tables)
         upgrade_v7_to_v8_tables(tables)
+        upgrade_authority_compatibility()
     elif schema_version == 3:
         upgrade_v3_to_v4_tables(tables)
         upgrade_v4_to_v5_tables(tables)
         upgrade_v5_to_v6_tables(tables)
         upgrade_v6_to_v7_tables(tables)
         upgrade_v7_to_v8_tables(tables)
+        upgrade_authority_compatibility()
     elif schema_version == 4:
         upgrade_v4_to_v5_tables(tables)
         upgrade_v5_to_v6_tables(tables)
         upgrade_v6_to_v7_tables(tables)
         upgrade_v7_to_v8_tables(tables)
+        upgrade_authority_compatibility()
     elif schema_version == 5:
         upgrade_v5_to_v6_tables(tables)
         upgrade_v6_to_v7_tables(tables)
         upgrade_v7_to_v8_tables(tables)
+        upgrade_authority_compatibility()
     elif schema_version == 6:
         upgrade_v6_to_v7_tables(tables)
         upgrade_v7_to_v8_tables(tables)
+        upgrade_authority_compatibility()
     elif schema_version == 7:
         upgrade_v7_to_v8_tables(tables)
+        upgrade_authority_compatibility()
+    elif schema_version == 8:
+        upgrade_authority_compatibility()
     return tables, legacy_without_scope_history
 
 
@@ -2518,6 +2695,7 @@ def _validate_portable_payload(
     _validate_analysis_v3_checkpoint(payload, tables, schema_version)
     _validate_recommendation_v2_checkpoint(payload, tables, schema_version)
     _validate_today_v2_checkpoint(payload, tables, schema_version)
+    _validate_authority_checkpoint(payload, tables, schema_version)
     for table_name, rows in tables.items():
         if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
             raise AppError(422, "PORTABLE_SCHEMA_INVALID", f"Table {table_name} has invalid rows.")
@@ -2654,6 +2832,13 @@ def _validate_portable_payload(
             "initializedTodayV2Tables": len(PORTABLE_V8_TODAY_TABLES),
             "nativeTodayHistoryInferred": 0,
         }
+    if schema_version < 9:
+        compatibility_conversions.update(
+            {
+                "initializedAuthorityTables": len(PORTABLE_V9_AUTHORITY_TABLES),
+                "nativeAuthorityHistoryInferred": 0,
+            }
+        )
     return tables, {
         "tableCounts": {name: len(rows) for name, rows in sorted(tables.items())},
         "portableCompatibility": (
@@ -2731,6 +2916,7 @@ def _inspect_package(
         incoming_tables, validation_summary = _validate_portable_payload(
             payload.package.payload, payload.package.packageId, payload.package.schemaVersion
         )
+        _validate_authority_restore_transition(db, incoming_tables)
         summary.update(validation_summary)
         existing_state = portable_state_presence(db, PORTABLE_MODELS)
         existing_tables = _portable_payload(db)["tables"]
@@ -2854,11 +3040,6 @@ def _inspect_package(
 
 
 def _delete_portable_state(db: Session) -> None:
-    for roadmap in db.scalars(select(Roadmap)).all():
-        roadmap.active_version_id = None
-        roadmap.current_phase_id = None
-        roadmap.is_current = False
-    db.flush()
     db.execute(_table(ProjectionInvalidation).delete())
     db.execute(_table(CompetencyReviewState).delete())
     db.execute(_table(CompetencyCapabilityState).delete())
@@ -2920,6 +3101,7 @@ def _apply_portable_restore(
     tables, legacy_without_scope_history = _normalize_portable_tables(
         payload, package_id, schema_version
     )
+    _validate_authority_restore_transition(db, tables)
     previous_scope = _current_scope(db)
     existing_state = portable_state_presence(db, PORTABLE_MODELS)
     if existing_state and not replace_existing:

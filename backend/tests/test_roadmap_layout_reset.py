@@ -8,9 +8,9 @@ from app.models import (
     CompetencyIdentity,
     CompetencyState,
     LearningSession,
-    Roadmap,
     VerificationRecord,
 )
+from app.roadmap_projection.models import LegacyRoadmapActiveState
 from httpx import AsyncClient
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -129,7 +129,9 @@ async def test_reset_never_touches_learning_state(
             CompetencyState.competency_identity_id == basics["identityId"]
         )
     )
-    before_current_phase = db.get(Roadmap, roadmap_id).current_phase_id
+    active_state = db.get(LegacyRoadmapActiveState, roadmap_id)
+    assert active_state is not None
+    before_current_phase = active_state.current_phase_id
     assert before_status == "verified"
     assert before_current_phase == phase_two["id"]
 
@@ -150,7 +152,8 @@ async def test_reset_never_touches_learning_state(
         )
         == before_status
     )
-    assert db.get(Roadmap, roadmap_id).current_phase_id == before_current_phase
+    active_state = db.get(LegacyRoadmapActiveState, roadmap_id)
+    assert active_state is not None and active_state.current_phase_id == before_current_phase
     assert _stored_positions_by_key(db, roadmap["activeVersion"]["id"]) == _expected_all_cleared(
         roadmap
     )

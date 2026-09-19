@@ -4,7 +4,7 @@ import ast
 import copy
 import json
 import sqlite3
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError, asdict, replace
 from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,12 +25,14 @@ from app.analysis.v3.models import (
 from app.analysis.v3.policy import (
     ANALYSIS_ALGORITHM_VERSION,
     ANALYSIS_POLICY_VERSION,
+    LEGACY_NORMALIZATION_SCHEMA_VERSION,
     _signal,
     analyze_normalized_facts,
 )
 from app.analysis.v3.public import (
     _typed_fact,
     _typed_signal_facts,
+    load_legacy_recommendation_analysis_snapshot,
     load_public_analysis_snapshot,
 )
 from app.analysis.v3.service import (
@@ -40,6 +42,7 @@ from app.analysis.v3.service import (
     drain_analysis_invalidations,
     initialize_analysis_v3,
     record_failed_analysis_run,
+    replay_analysis,
     run_analysis,
 )
 from app.analysis_sources import (
@@ -48,17 +51,22 @@ from app.analysis_sources import (
     evidence_qualification_matches_target,
     readiness_evaluations_as_of,
 )
-from app.determinism import content_hash
+from app.determinism import canonical_json, content_hash
 from app.domain_integrity import validate_domain_integrity
 from app.import_export import _apply_portable_restore, _portable_payload, _validate_portable_payload
 from app.models import (
+    ActiveCompetencyDefinitionState,
     Activity,
     AnalysisRun,
     AnalysisSnapshot,
     CapabilityEvaluationRun,
+    CapabilityScaleLevel,
+    CapabilityScaleVersion,
     CapabilityStateEvent,
+    CompetencyDefinitionActivationEvent,
     CriterionDefinition,
     CriterionEvaluationResult,
+    CriterionIdentity,
     DisciplineConfigurationEvent,
     Evidence,
     EvidenceInvalidation,
@@ -74,7 +82,7 @@ from app.models import (
 from app.portability.registry import (
     PORTABLE_SCHEMA_CURRENT,
     PORTABLE_V6_ANALYSIS_TABLES,
-    PORTABLE_V8_MANIFEST,
+    PORTABLE_V9_MANIFEST,
     upgrade_v5_to_v6_tables,
 )
 from app.profile_views import (
@@ -82,9 +90,15 @@ from app.profile_views import (
     ReadinessPredicatePublicDTO,
     active_profile_projection_as_of,
 )
+from app.recommendation.v2.policy import LEGACY_POLICY_REGISTRY_VERSION, POLICY_REGISTRY_VERSION
+from app.recommendation.v2.service import (
+    _persist_completed_run,
+    record_failed_recommendation_run,
+    replay_recommendations,
+)
 from app.time_utils import utc_now_ms
 from httpx import AsyncClient
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 
@@ -637,6 +651,81 @@ async def test_analysis_session_actuality_and_discipline_boundaries(
     _client, _csrf, raw_roadmap = configured_client
     roadmap = cast(dict[str, Any], raw_roadmap)
     competency_id = str(roadmap["phases"][0]["tracks"][0]["competencies"][0]["identityId"])
+    contribution_criterion = db.scalar(
+        select(CriterionDefinition)
+        .join(
+            SemanticCompetencyDefinition,
+            SemanticCompetencyDefinition.id == CriterionDefinition.semantic_definition_id,
+        )
+        .where(SemanticCompetencyDefinition.competency_identity_id == competency_id)
+        .order_by(CriterionDefinition.definition_version, CriterionDefinition.id)
+        .limit(1)
+    )
+    if contribution_criterion is None:
+        scale = db.scalar(
+            select(CapabilityScaleVersion).where(
+                CapabilityScaleVersion.scale_stable_key == "technical"
+            )
+        )
+        assert scale is not None
+        level = db.scalar(
+            select(CapabilityScaleLevel)
+            .where(CapabilityScaleLevel.scale_version_id == scale.id)
+            .order_by(CapabilityScaleLevel.ordinal_rank, CapabilityScaleLevel.id)
+            .limit(1)
+        )
+        assert level is not None
+        semantic = SemanticCompetencyDefinition(
+            competency_identity_id=competency_id,
+            definition_version=1,
+            title="Analysis attribution fixture",
+            description="Immutable contribution attribution fixture.",
+            scope="Test-only semantic scope.",
+            scale_version_id=scale.id,
+            created_at=1_789_689_599_000,
+            creation_source="test",
+            effective_at=1_789_689_599_000,
+        )
+        identity = CriterionIdentity(
+            competency_identity_id=competency_id,
+            stable_key="analysis-attribution-fixture",
+            created_at=1_789_689_599_000,
+            creation_source="test",
+        )
+        db.add_all((semantic, identity))
+        db.flush()
+        contribution_criterion = CriterionDefinition(
+            criterion_identity_id=identity.id,
+            semantic_definition_id=semantic.id,
+            definition_version=1,
+            level_id=level.id,
+            dimension_id=None,
+            requirement_type="required",
+            demonstration_rule_json='{"rule":"independent_performance"}',
+            description="Attribution fixture criterion.",
+            created_at=1_789_689_599_000,
+        )
+        db.add(contribution_criterion)
+        db.add(
+            CompetencyDefinitionActivationEvent(
+                competency_identity_id=competency_id,
+                from_definition_id=None,
+                to_definition_id=semantic.id,
+                activated_at=1_789_689_599_000,
+                source="test",
+                reason="Analysis attribution fixture",
+                event_sequence=1,
+                idempotency_key="analysis-attribution-definition",
+            )
+        )
+        db.add(
+            ActiveCompetencyDefinitionState(
+                competency_identity_id=competency_id,
+                semantic_definition_id=semantic.id,
+                activated_at=1_789_689_599_000,
+            )
+        )
+        db.flush()
     # The configured fixture does not create actual work; insert one canonical Activity/Session
     # pair so the public Analysis source view is exercised without involving wall-clock timers.
     activity = Activity(
@@ -667,15 +756,15 @@ async def test_analysis_session_actuality_and_discipline_boundaries(
     )
     db.add(session)
     db.flush()
-    db.add(
-        SessionContribution(
-            session_id=session.id,
-            competency_identity_id=competency_id,
-            relevance="primary",
-            provenance="user_selected",
-            created_at=1_789_693_200_000,
-        )
+    contribution = SessionContribution(
+        session_id=session.id,
+        competency_identity_id=competency_id,
+        criterion_identity_id=contribution_criterion.criterion_identity_id,
+        relevance="primary",
+        provenance="user_selected",
+        created_at=1_789_693_200_000,
     )
+    db.add(contribution)
     db.commit()
 
     summaries = actual_session_summaries_as_of(
@@ -686,11 +775,113 @@ async def test_analysis_session_actuality_and_discipline_boundaries(
     assert summaries[0].duration_ms == 3_600_000
 
     correction_at = 1_789_693_201_000
+    legacy = run_analysis(
+        db,
+        idempotency_key="analysis-session-legacy-normalization",
+        purpose="learning_control",
+        cutoff_at=correction_at,
+        normalization_schema_version=LEGACY_NORMALIZATION_SCHEMA_VERSION,
+    )
+    legacy_lineage = json.loads(legacy.input_lineage_json)
+    assert "active_contribution_attributions" not in legacy_lineage["sessionSummaries"][0]
+    assert (
+        load_public_analysis_snapshot(db, legacy.id)
+        .actual_activity_summaries[0]
+        .active_contribution_attributions
+        == ()
+    )
+    legacy_public = load_legacy_recommendation_analysis_snapshot(db, legacy.id)
+    legacy_attributions = legacy_public.actual_activity_summaries[
+        0
+    ].active_contribution_attributions
+    assert len(legacy_attributions) == 1
+    assert legacy_attributions[0].criterion_definition_id == contribution_criterion.id
+    legacy_replay = replay_analysis(
+        db,
+        run_id=legacy.run_id,
+        idempotency_key="analysis-session-legacy-normalization-replay",
+    )
+    assert legacy_replay.input_hash == legacy.input_hash
+    assert legacy_replay.output_hash == legacy.output_hash
+    legacy_recommendation_input = {
+        "analysisSnapshot": {
+            "id": legacy.id,
+            "inputHash": legacy.input_hash,
+            "outputHash": legacy.output_hash,
+            "cutoffAt": legacy.cutoff_at,
+        },
+        "analysisPublicSnapshot": json.loads(canonical_json(asdict(legacy_public))),
+        "targetProfileVersion": legacy_lineage["profile"],
+        "learningGraph": legacy_lineage["graph"],
+        "curriculum": legacy_lineage["curriculumCatalog"],
+        "curriculumAvailability": [],
+        "projects": legacy_lineage["projectCatalog"],
+        "userConstraints": {
+            "availableTimeMs": None,
+            "contextCostPolicy": "explicit-only",
+            "contextCosts": [],
+        },
+        "availableTimeMs": None,
+        "candidates": [],
+    }
+    legacy_recommendation = _persist_completed_run(
+        db,
+        idempotency_key="analysis-session-legacy-recommendation",
+        analysis_snapshot_id=legacy.id,
+        available_time_ms=None,
+        replay_of_run_id=None,
+        policy_registry_version=POLICY_REGISTRY_VERSION,
+        snapshot=legacy_public,
+        frozen_input=legacy_recommendation_input,
+        candidates=(),
+    )
+    db.commit()
+    replayed_recommendation = replay_recommendations(
+        db,
+        run_id=legacy_recommendation.id,
+        idempotency_key="analysis-session-legacy-recommendation-replay",
+    )
+    assert replayed_recommendation.input_hash == legacy_recommendation.input_hash
+    assert replayed_recommendation.output_hash == legacy_recommendation.output_hash
+    failed_legacy_recommendation = record_failed_recommendation_run(
+        db,
+        idempotency_key="analysis-session-legacy-recommendation-failed",
+        analysis_snapshot_id=legacy.id,
+        available_time_ms=None,
+        replay_of_run_id=None,
+        error=RuntimeError("historical failure"),
+        frozen_input=legacy_recommendation_input,
+        policy_registry_version=LEGACY_POLICY_REGISTRY_VERSION,
+    )
+    assert failed_legacy_recommendation is not None
+    db.commit()
+    portable = _portable_payload(db)
+    _validate_portable_payload(portable, "analysis-legacy-recommendation-v9", 9)
+    validate_domain_integrity(db.connection())
     before_correction = run_analysis(
         db,
         idempotency_key="analysis-session-before-correction",
         purpose="learning_control",
         cutoff_at=correction_at,
+    )
+    frozen_public = load_public_analysis_snapshot(db, before_correction.id)
+    frozen_attributions = frozen_public.actual_activity_summaries[
+        0
+    ].active_contribution_attributions
+    assert len(frozen_attributions) == 1
+    assert frozen_attributions[0].criterion_definition_id == contribution_criterion.id
+    db.execute(
+        text(
+            "UPDATE session_contributions SET criterion_identity_id=NULL WHERE id=:contribution_id"
+        ),
+        {"contribution_id": contribution.id},
+    )
+    db.flush()
+    assert (
+        load_public_analysis_snapshot(db, before_correction.id)
+        .actual_activity_summaries[0]
+        .active_contribution_attributions
+        == frozen_attributions
     )
     session.duration_ms = 1_800_000
     session.accumulated_duration_ms = 1_800_000
@@ -1185,7 +1376,7 @@ async def test_analysis_v3_reconstructs_profile_capability_and_late_evidence_at_
         )
         tampered_row[field] = value
         with pytest.raises(Exception, match="Analysis V3|analysis"):
-            _validate_portable_payload(tampered_package, f"analysis-envelope-{field}", 8)
+            _validate_portable_payload(tampered_package, f"analysis-envelope-{field}", 9)
     for field in (
         "semantic_definition_references_json",
         "capability_scale_version_references_json",
@@ -1199,7 +1390,7 @@ async def test_analysis_v3_reconstructs_profile_capability_and_late_evidence_at_
         references = json.loads(snapshot_row[field])
         tampered_row[field] = json.dumps(references + references)
         with pytest.raises(Exception, match="Analysis V3|analysis"):
-            _validate_portable_payload(tampered_package, f"analysis-envelope-duplicate-{field}", 8)
+            _validate_portable_payload(tampered_package, f"analysis-envelope-duplicate-{field}", 9)
 
     contradiction = Evidence(
         evidence_type="assessment",
@@ -1570,14 +1761,14 @@ def test_analysis_v3_cutoff_replay_hash_and_portable_integrity(db: Session) -> N
     validate_domain_integrity(db.connection())
 
     package = _portable_payload(db)
-    assert PORTABLE_SCHEMA_CURRENT == 8
-    assert package["manifest"] == PORTABLE_V8_MANIFEST
-    tables, _summary = _validate_portable_payload(package, "analysis-v3-portable", 8)
+    assert PORTABLE_SCHEMA_CURRENT == 9
+    assert package["manifest"] == PORTABLE_V9_MANIFEST
+    tables, _summary = _validate_portable_payload(package, "analysis-v3-portable", 9)
     assert len(tables["analysis_v3_run_lineages"]) == 4
     tampered = copy.deepcopy(package)
     tampered["tables"]["analysis_v3_run_lineages"][0]["policy_bundle_hash"] = "0" * 64
     with pytest.raises(Exception, match="Analysis V3|analysis"):
-        _validate_portable_payload(tampered, "analysis-v3-tampered", 8)
+        _validate_portable_payload(tampered, "analysis-v3-tampered", 9)
 
     relabeled_policy = copy.deepcopy(package)
     relabeled_lineage = relabeled_policy["tables"]["analysis_v3_run_lineages"][0]
@@ -1658,7 +1849,7 @@ def test_analysis_v3_cutoff_replay_hash_and_portable_integrity(db: Session) -> N
         }
     )
     with pytest.raises(Exception, match="Analysis V3|analysis"):
-        _validate_portable_payload(relabeled_policy, "analysis-v3-policy-relabel", 8)
+        _validate_portable_payload(relabeled_policy, "analysis-v3-policy-relabel", 9)
 
     # Make stored facts and every public hash internally self-consistent. Restore must
     # still reject them because the pinned analyzer cannot reproduce the alteration.
@@ -1763,7 +1954,7 @@ def test_analysis_v3_cutoff_replay_hash_and_portable_integrity(db: Session) -> N
         }
     )
     with pytest.raises(Exception, match="Analysis V3|analysis"):
-        _validate_portable_payload(coherent_tamper, "analysis-v3-coherent-tamper", 8)
+        _validate_portable_payload(coherent_tamper, "analysis-v3-coherent-tamper", 9)
     for field, value in (
         ("scopeKey", "other-scope"),
         ("purpose", "candidate_readiness"),
@@ -1778,19 +1969,19 @@ def test_analysis_v3_cutoff_replay_hash_and_portable_integrity(db: Session) -> N
             {key: item for key, item in checkpoint.items() if key != "checkpointHash"}
         )
         with pytest.raises(Exception, match="Analysis V3|analysis"):
-            _validate_portable_payload(bad_checkpoint, f"analysis-checkpoint-{field}", 8)
+            _validate_portable_payload(bad_checkpoint, f"analysis-checkpoint-{field}", 9)
 
     bad_signal_cutoff = copy.deepcopy(package)
     bad_signal_cutoff["tables"]["analysis_v3_signals"][0]["generated_cutoff_at"] = 1
     with pytest.raises(Exception, match="Analysis V3|analysis"):
-        _validate_portable_payload(bad_signal_cutoff, "analysis-signal-cutoff", 8)
+        _validate_portable_payload(bad_signal_cutoff, "analysis-signal-cutoff", 9)
 
     missing_lineage = copy.deepcopy(package)
     missing_lineage["tables"]["analysis_v3_run_lineages"] = missing_lineage["tables"][
         "analysis_v3_run_lineages"
     ][1:]
     with pytest.raises(Exception, match="Analysis V3|analysis"):
-        _validate_portable_payload(missing_lineage, "analysis-missing-lineage", 8)
+        _validate_portable_payload(missing_lineage, "analysis-missing-lineage", 9)
 
     expected_current_output = live_current.output_hash
     run_count = db.scalar(select(func.count()).select_from(AnalysisRun))
@@ -1799,7 +1990,7 @@ def test_analysis_v3_cutoff_replay_hash_and_portable_integrity(db: Session) -> N
         package,
         True,
         package_id="analysis-v3-restore-parity",
-        schema_version=8,
+        schema_version=9,
     )
     db.commit()
     assert db.scalar(select(func.count()).select_from(AnalysisRun)) == run_count
@@ -1832,7 +2023,7 @@ def test_analysis_v3_cutoff_replay_hash_and_portable_integrity(db: Session) -> N
         stale_package,
         True,
         package_id="analysis-v3-restore-stale",
-        schema_version=8,
+        schema_version=9,
     )
     db.commit()
     assert db.scalar(select(func.count()).select_from(AnalysisRun)) == run_count
@@ -2021,7 +2212,7 @@ def test_analysis_v3_failed_run_rejects_coherent_policy_relabel(db: Session) -> 
     missing_lineage = copy.deepcopy(package)
     missing_lineage["tables"]["analysis_v3_run_lineages"] = []
     with pytest.raises(Exception, match="Analysis V3|analysis"):
-        _validate_portable_payload(missing_lineage, "analysis-failed-missing-lineage", 8)
+        _validate_portable_payload(missing_lineage, "analysis-failed-missing-lineage", 9)
     lineage = package["tables"]["analysis_v3_run_lineages"][0]
     bundle = json.loads(lineage["analyzer_bundle_json"])
     bundle.update(
@@ -2041,7 +2232,7 @@ def test_analysis_v3_failed_run_rejects_coherent_policy_relabel(db: Session) -> 
     )
     run["algorithm_version"] = bundle["algorithm"]
     with pytest.raises(Exception, match="Analysis V3|analysis"):
-        _validate_portable_payload(package, "analysis-failed-policy-relabel", 8)
+        _validate_portable_payload(package, "analysis-failed-policy-relabel", 9)
 
 
 def test_analysis_v3_initialization_supersedes_v1_once(db: Session) -> None:
@@ -2083,6 +2274,42 @@ def test_analysis_v3_initialization_supersedes_v1_once(db: Session) -> None:
     ).all()
     assert len(bootstraps) == 1
     assert bootstraps[0].source_fact_id == "analysis-v3-bootstrap"
+
+
+def test_analysis_normalization_upgrade_enqueues_and_recomputes_without_rewrite(
+    db: Session,
+) -> None:
+    legacy = run_analysis(
+        db,
+        idempotency_key="analysis-normalization-upgrade-legacy",
+        purpose="learning_control",
+        normalization_schema_version=LEGACY_NORMALIZATION_SCHEMA_VERSION,
+    )
+    db.commit()
+    legacy_input_hash = legacy.input_hash
+    legacy_output_hash = legacy.output_hash
+    assert current_analysis(db)["status"] == "stale"
+
+    initialize_analysis_v3(db)
+    initialize_analysis_v3(db)
+    upgrades = db.scalars(
+        select(ProjectionInvalidation).where(
+            ProjectionInvalidation.source_fact_id
+            == "analysis-normalization-upgrade:analysis-normalization/v3.1"
+        )
+    ).all()
+    assert len(upgrades) == 1
+    assert upgrades[0].status == "pending"
+    assert drain_analysis_invalidations(db) >= 1
+
+    state = db.get(AnalysisV3CurrentState, ("learning-control", "learning_control"))
+    assert state is not None and state.status == "current"
+    current_lineage = db.get(AnalysisV3RunLineage, state.run_id)
+    assert current_lineage is not None
+    assert current_lineage.normalization_schema_version == "analysis-normalization/v3.1"
+    assert current_analysis(db)["status"] == "current"
+    db.refresh(legacy)
+    assert (legacy.input_hash, legacy.output_hash) == (legacy_input_hash, legacy_output_hash)
 
 
 def test_analysis_v3_invalidation_drain_recomputes_purposes_and_records_failure(

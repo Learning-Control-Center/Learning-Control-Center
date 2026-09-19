@@ -27,7 +27,7 @@ const projection = {
       positionSource: 'roadmap-layout/v2.0',
       presentationParentId: 'semantic-0',
       isCurrent: true,
-      isToday: false,
+      isToday: true,
     },
     {
       id: 'semantic-0',
@@ -137,8 +137,11 @@ describe('Roadmap Projection V2 thin workflow', () => {
 
     expect(await screen.findByRole('heading', { name: 'Roadmap Projection' })).toBeInTheDocument()
     expect(
-      await screen.findByLabelText('Python delivery, Engineering, specialization child'),
+      await screen.findByLabelText(
+        'Python delivery, Engineering, specialization child, recommended for Today',
+      ),
     ).toBeInTheDocument()
+    expect(await screen.findByText(/Python delivery · Today/)).toBeInTheDocument()
     expect(await screen.findByLabelText('Graph prerequisite, graph foundation')).toBeInTheDocument()
     expect(screen.queryByText('prerequisite')).not.toBeInTheDocument()
 

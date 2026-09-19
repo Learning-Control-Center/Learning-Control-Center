@@ -4,7 +4,7 @@ import ast
 import json
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
-from dataclasses import FrozenInstanceError, asdict
+from dataclasses import FrozenInstanceError, asdict, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Barrier
@@ -27,9 +27,14 @@ from app.models import (
     DisciplineProfile,
     Evidence,
     LearningSession,
+    ProjectionInvalidation,
     new_id,
 )
-from app.portability.registry import PORTABLE_V7_MANIFEST, PORTABLE_V8_TODAY_TABLES
+from app.portability.registry import (
+    PORTABLE_V7_MANIFEST,
+    PORTABLE_V8_TODAY_TABLES,
+    PORTABLE_V9_AUTHORITY_TABLES,
+)
 from app.recommendation.v2.contracts import CandidateInputDTO
 from app.recommendation.v2.models import RecommendationV2Run
 from app.recommendation.v2.policy import POLICY_REGISTRY_VERSION
@@ -50,7 +55,7 @@ from app.time_utils import (
     local_day_bounds_ms,
     utc_now_ms,
 )
-from app.today.contracts import TODAY_POLICY_VERSION
+from app.today.contracts import LEGACY_TODAY_PRESENTATION_VERSION, TODAY_POLICY_VERSION
 from app.today.models import (
     SuggestionActivityRelation,
     SuggestionActivityRelationCorrection,
@@ -60,6 +65,7 @@ from app.today.models import (
     TodaySuggestion,
     TodaySuggestionCurrentState,
 )
+from app.today.public import current_roadmap_overlay
 from app.today.service import (
     VALID_TRANSITIONS,
     _append_interaction,
@@ -92,7 +98,7 @@ def _candidate(stable_id: str = "javascript-functions") -> CandidateInputDTO:
         candidate_key=f"candidate-key/v1|{stable_id}",
         stable_id=stable_id,
         stable_tie_key=f"candidate|{stable_id}",
-        source_type="curriculum_unit",
+        source_type="test_fixture",
         source_entity_id=stable_id,
         source_version_id="curriculum-version-1",
         title="JavaScript functions",
@@ -243,9 +249,12 @@ def test_generation_get_purity_transitions_and_regeneration(
         select(TodaySuggestion).where(TodaySuggestion.generation_id == generation.id)
     )
     assert suggestion is not None
-    assert suggestion.expires_at == local_day_bounds_ms(
-        datetime.fromisoformat(suggestion.local_date).date(), "Europe/Berlin"
-    )[1]
+    assert (
+        suggestion.expires_at
+        == local_day_bounds_ms(
+            datetime.fromisoformat(suggestion.local_date).date(), "Europe/Berlin"
+        )[1]
+    )
     assert generation.today_policy_version == TODAY_POLICY_VERSION
     recommendation_run = db.get(RecommendationV2Run, generation.recommendation_run_id)
     assert recommendation_run is not None
@@ -327,9 +336,7 @@ def test_today_recommendation_failure_persists_safe_lineage_without_today_histor
     def fail_generation(*_args: object, **_kwargs: object) -> None:
         raise AppError(409, "RECOMMENDATION_INPUT_STALE", "Forced public-command failure.")
 
-    monkeypatch.setattr(
-        "app.recommendation.v2.public.generate_recommendations", fail_generation
-    )
+    monkeypatch.setattr("app.recommendation.v2.public.generate_recommendations", fail_generation)
     context_costs = (
         ("curriculum_unit", "unit-z", "high"),
         ("project_task", "task-a", "low"),
@@ -451,12 +458,8 @@ def test_three_role_portfolio_presentation_is_stable_under_shuffled_input() -> N
     primary = item("primary", 1)
     complementary = item("complementary", 2)
     maintenance = item("maintenance", 3)
-    first = _prepare_suggestion_rows(
-        (maintenance, primary, complementary), expires_at=123_456
-    )
-    second = _prepare_suggestion_rows(
-        (complementary, maintenance, primary), expires_at=123_456
-    )
+    first = _prepare_suggestion_rows((maintenance, primary, complementary), expires_at=123_456)
+    second = _prepare_suggestion_rows((complementary, maintenance, primary), expires_at=123_456)
     assert [value.portfolio_role for value, _presentation in first[0]] == [
         "primary",
         "complementary",
@@ -590,12 +593,15 @@ def test_generation_and_start_faults_roll_back_their_full_units_of_work(
             now_ms=utc_now_ms(),
         )
     db.rollback()
-    assert db.scalar(
-        select(func.count(RecommendationV2Run.id)).where(
-            RecommendationV2Run.idempotency_key
-            == _recommendation_idempotency_key("today-atomic-generation-fault")
+    assert (
+        db.scalar(
+            select(func.count(RecommendationV2Run.id)).where(
+                RecommendationV2Run.idempotency_key
+                == _recommendation_idempotency_key("today-atomic-generation-fault")
+            )
         )
-    ) == 0
+        == 0
+    )
     assert db.scalar(select(func.count(TodayGeneration.id))) == 0
 
     source_run = _recommendation_run(db)
@@ -737,10 +743,94 @@ def test_direct_start_completion_and_expiration_are_actuality_safe(
             now_ms=now + 5,
         )
     db.rollback()
-    assert expire_due_suggestions(
-        db, idempotency_key="today-expire-terminal", now_ms=suggestion.expires_at + 1
-    ) == []
+    assert (
+        expire_due_suggestions(
+            db, idempotency_key="today-expire-terminal", now_ms=suggestion.expires_at + 1
+        )
+        == []
+    )
     _validate_today_v2(db.connection())
+
+
+@pytest.mark.parametrize(
+    ("source_type", "source_entity_id", "expected_port"),
+    (
+        ("curriculum_unit", "unit-definition", "curriculum"),
+        ("project_task", "task-definition", "project"),
+    ),
+)
+def test_direct_start_atomically_confirms_canonical_source_attribution(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    source_type: str,
+    source_entity_id: str,
+    expected_port: str,
+) -> None:
+    _recommendation_run(db)
+    now = utc_now_ms()
+    generation = _generate(db, monkeypatch, now_ms=now, key=f"today-source-{source_type}")
+    suggestion = db.scalar(
+        select(TodaySuggestion).where(TodaySuggestion.generation_id == generation.id)
+    )
+    assert suggestion is not None
+    public_item = next(
+        item
+        for item in load_public_recommendation_run(db, generation.recommendation_run_id).items
+        if item.candidate_id == suggestion.candidate_id
+    )
+    monkeypatch.setattr(
+        "app.today.service.load_public_recommendation_item",
+        lambda *_args, **_kwargs: replace(
+            public_item,
+            source_type=source_type,
+            source_entity_id=source_entity_id,
+            candidate_type=("project_task" if source_type == "project_task" else "curriculum_unit"),
+        ),
+    )
+    calls: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        "app.today.service.link_actual_activity_to_unit",
+        lambda _db, **kwargs: calls.append(("curriculum", kwargs)),
+    )
+    monkeypatch.setattr(
+        "app.today.service.link_actual_activity_to_project_task",
+        lambda _db, **kwargs: calls.append(("project", kwargs)),
+    )
+
+    started = start_suggestion(
+        db,
+        suggestion_id=suggestion.id,
+        idempotency_key=f"today-source-start-{source_type}",
+        assistance_mode="none",
+        notes=None,
+        contributions=[],
+        now_ms=now + 1,
+    )
+    persisted_activity = db.get(Activity, started.activity_id)
+    assert persisted_activity is not None
+    assert calls == [
+        (
+            expected_port,
+            {
+                "activity_id": started.activity_id,
+                (
+                    "task_definition_id"
+                    if source_type == "project_task"
+                    else "learning_unit_definition_id"
+                ): source_entity_id,
+                "provenance": "user_confirmed",
+                "idempotency_key": (
+                    f"today-project-link:today-source-start-{source_type}"
+                    if source_type == "project_task"
+                    else f"today-curriculum-link:today-source-start-{source_type}"
+                ),
+                "created_at": max(now + 1, persisted_activity.created_at),
+            },
+        )
+    ]
+    db.rollback()
+    assert db.scalar(select(func.count(Activity.id))) == 0
+    assert db.scalar(select(func.count(TodayInteraction.id))) == 0
 
 
 def test_start_idempotency_covers_all_command_inputs(
@@ -857,9 +947,7 @@ def test_interaction_correction_is_append_only_and_restores_prior_status(
 
 def test_transition_contract_is_explicit_and_terminal_states_have_no_outgoing_edges() -> None:
     assert VALID_TRANSITIONS == {
-        "suggested": frozenset(
-            {"viewed", "accepted", "started", "skipped", "replaced", "expired"}
-        ),
+        "suggested": frozenset({"viewed", "accepted", "started", "skipped", "replaced", "expired"}),
         "viewed": frozenset({"accepted", "started", "skipped", "replaced", "expired"}),
         "accepted": frozenset({"started", "skipped", "replaced", "expired"}),
         "started": frozenset({"completed", "partially_completed", "replaced", "expired"}),
@@ -1136,9 +1224,7 @@ def test_started_survives_regeneration_active_timer_wins_and_cancel_is_not_skip(
 ) -> None:
     _recommendation_run(db)
     now = datetime_to_epoch_ms(datetime(2026, 4, 4, 8, 0, tzinfo=UTC))
-    first_generation = _generate(
-        db, monkeypatch, now_ms=now, key="today-active-generation"
-    )
+    first_generation = _generate(db, monkeypatch, now_ms=now, key="today-active-generation")
     first = db.scalar(
         select(TodaySuggestion).where(TodaySuggestion.generation_id == first_generation.id)
     )
@@ -1166,6 +1252,26 @@ def test_started_survives_regeneration_active_timer_wins_and_cancel_is_not_skip(
         select(TodaySuggestion).where(TodaySuggestion.generation_id == second_generation.id)
     )
     assert second is not None
+    overlay = current_roadmap_overlay(db, now_ms=now + 2)
+    assert {item.suggestion_id: item.continuing_started for item in overlay.items} == {
+        first.id: True,
+        second.id: False,
+    }
+    assert {target for item in overlay.items for target in item.target_identity_ids} == {
+        "target-js"
+    }
+    invalidations = db.scalars(
+        select(ProjectionInvalidation).where(
+            ProjectionInvalidation.projection_kind == "roadmap_projection_v2",
+            ProjectionInvalidation.subject_type == "today_overlay",
+        )
+    ).all()
+    assert first_state.latest_interaction_id is not None
+    assert {item.source_fact_id for item in invalidations} >= {
+        first_generation.id,
+        second_generation.id,
+        first_state.latest_interaction_id,
+    }
     with pytest.raises(AppError, match="active Session"):
         start_suggestion(
             db,
@@ -1201,12 +1307,75 @@ def test_started_survives_regeneration_active_timer_wins_and_cancel_is_not_skip(
     db.commit()
     final_state = db.get(TodaySuggestionCurrentState, first.id)
     assert final_state is not None and final_state.status == "expired"
+    assert current_roadmap_overlay(db, now_ms=first.expires_at + 1).items == ()
     assert db.scalar(
-        select(func.count(TodayInteraction.id)).where(
-            TodayInteraction.suggestion_id == first.id,
-            TodayInteraction.interaction_type == "skipped",
+        select(func.count(ProjectionInvalidation.id)).where(
+            ProjectionInvalidation.projection_kind == "roadmap_projection_v2",
+            ProjectionInvalidation.subject_type == "today_overlay",
         )
-    ) == 0
+    ) > len(invalidations)
+    assert (
+        db.scalar(
+            select(func.count(TodayInteraction.id)).where(
+                TodayInteraction.suggestion_id == first.id,
+                TodayInteraction.interaction_type == "skipped",
+            )
+        )
+        == 0
+    )
+
+
+def test_active_legacy_presentation_uses_immutable_recommendation_for_roadmap_overlay(
+    db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _recommendation_run(db)
+    now = datetime_to_epoch_ms(datetime(2026, 4, 4, 8, 0, tzinfo=UTC))
+    generation = _generate(db, monkeypatch, now_ms=now, key="today-legacy-roadmap-overlay")
+    suggestion = db.scalar(
+        select(TodaySuggestion).where(TodaySuggestion.generation_id == generation.id)
+    )
+    assert suggestion is not None
+    presentation = json.loads(suggestion.presentation_json)
+    for field in (
+        "competencyIdentityId",
+        "targetIdentityId",
+        "servedTargetIdentityIds",
+    ):
+        presentation.pop(field)
+    presentation_hash = content_hash(presentation)
+    db.connection().execute(
+        TodaySuggestion.__table__.update()
+        .where(TodaySuggestion.id == suggestion.id)
+        .values(
+            presentation_json=json.dumps(presentation, sort_keys=True, separators=(",", ":")),
+            presentation_hash=presentation_hash,
+            presentation_version=LEGACY_TODAY_PRESENTATION_VERSION,
+        )
+    )
+    db.connection().execute(
+        TodayGeneration.__table__.update()
+        .where(TodayGeneration.id == generation.id)
+        .values(
+            output_hash=content_hash(
+                [
+                    {
+                        "ordinal": suggestion.ordinal,
+                        "recommendationId": suggestion.recommendation_id,
+                        "candidateId": suggestion.candidate_id,
+                        "presentationHash": presentation_hash,
+                        "expiresAt": suggestion.expires_at,
+                    }
+                ]
+            )
+        )
+    )
+    db.commit()
+
+    overlay = current_roadmap_overlay(db, now_ms=now + 1)
+    assert len(overlay.items) == 1
+    assert overlay.items[0].competency_identity_id is None
+    assert overlay.items[0].target_identity_ids == ("target-js",)
+    _validate_today_v2(db.connection())
 
 
 def test_two_connection_generation_and_terminal_races_are_linearizable(
@@ -1511,12 +1680,17 @@ def test_start_expire_race_never_fabricates_completion_or_debt(
     state = db.get(TodaySuggestionCurrentState, suggestion.id)
     assert state is not None and state.status == "expired"
     assert (db.scalar(select(func.count(LearningSession.id))) or 0) <= 1
-    assert db.scalar(
-        select(func.count(TodayInteraction.id)).where(
-            TodayInteraction.suggestion_id == suggestion.id,
-            TodayInteraction.interaction_type.in_(("completed", "partially_completed", "skipped")),
+    assert (
+        db.scalar(
+            select(func.count(TodayInteraction.id)).where(
+                TodayInteraction.suggestion_id == suggestion.id,
+                TodayInteraction.interaction_type.in_(
+                    ("completed", "partially_completed", "skipped")
+                ),
+            )
         )
-    ) == 0
+        == 0
+    )
 
 
 def test_replace_expire_race_keeps_exactly_one_terminal_advisory_state(
@@ -1585,7 +1759,7 @@ def test_replace_expire_race_keeps_exactly_one_terminal_advisory_state(
 
 def test_portable_v8_adds_no_fake_today_history_and_rebuilds_current_state(db: Session) -> None:
     package = _portable_payload(db)
-    tables, summary = _validate_portable_payload(package, "today-empty-v8", 8)
+    tables, summary = _validate_portable_payload(package, "today-empty-v8", 9)
     assert all(tables[name] == [] for name in PORTABLE_V8_TODAY_TABLES)
     assert summary["compatibilityConversions"] == {}
     assert package["todayV2CurrentCheckpoint"] == {
@@ -1614,13 +1788,18 @@ def test_v7_to_v8_adapter_initializes_empty_today_without_inference(db: Session)
     payload = _portable_payload(db)
     payload["manifest"] = PORTABLE_V7_MANIFEST
     payload.pop("todayV2CurrentCheckpoint")
+    payload.pop("authorityCheckpoint")
     for table_name in PORTABLE_V8_TODAY_TABLES:
+        payload["tables"].pop(table_name)
+    for table_name in PORTABLE_V9_AUTHORITY_TABLES:
         payload["tables"].pop(table_name)
     converted, summary = _validate_portable_payload(payload, "today-v7-adapter", 7)
     assert all(converted[name] == [] for name in PORTABLE_V8_TODAY_TABLES)
     assert summary["compatibilityConversions"] == {
         "initializedTodayV2Tables": len(PORTABLE_V8_TODAY_TABLES),
         "nativeTodayHistoryInferred": 0,
+        "initializedAuthorityTables": len(PORTABLE_V9_AUTHORITY_TABLES),
+        "nativeAuthorityHistoryInferred": 0,
     }
 
 
@@ -1706,6 +1885,7 @@ def test_populated_today_v8_serialization_and_checkpoint_tamper_rejection(
     with pytest.raises(AppError, match="current-state parity"):
         _validate_today_v2_checkpoint(tampered, tampered["tables"], 8)
 
+
 def test_today_integrity_rejects_frozen_recommendation_and_reason_tampering(
     db: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1716,6 +1896,54 @@ def test_today_integrity_rejects_frozen_recommendation_and_reason_tampering(
         select(TodaySuggestion).where(TodaySuggestion.generation_id == generation.id)
     )
     assert suggestion is not None
+    db.connection().execute(
+        TodayGeneration.__table__.update()
+        .where(TodayGeneration.id == generation.id)
+        .values(request_hash="f" * 64)
+    )
+    with pytest.raises(AppError, match="generation lineage"):
+        _validate_today_v2(db.connection())
+    db.rollback()
+
+    legacy_presentation = json.loads(suggestion.presentation_json)
+    for field in (
+        "competencyIdentityId",
+        "targetIdentityId",
+        "servedTargetIdentityIds",
+    ):
+        legacy_presentation.pop(field)
+    legacy_presentation_hash = content_hash(legacy_presentation)
+    db.connection().execute(
+        TodaySuggestion.__table__.update()
+        .where(TodaySuggestion.id == suggestion.id)
+        .values(
+            presentation_json=json.dumps(
+                legacy_presentation, sort_keys=True, separators=(",", ":")
+            ),
+            presentation_hash=legacy_presentation_hash,
+            presentation_version=LEGACY_TODAY_PRESENTATION_VERSION,
+        )
+    )
+    db.connection().execute(
+        TodayGeneration.__table__.update()
+        .where(TodayGeneration.id == generation.id)
+        .values(
+            output_hash=content_hash(
+                [
+                    {
+                        "ordinal": suggestion.ordinal,
+                        "recommendationId": suggestion.recommendation_id,
+                        "candidateId": suggestion.candidate_id,
+                        "presentationHash": legacy_presentation_hash,
+                        "expiresAt": suggestion.expires_at,
+                    }
+                ]
+            )
+        )
+    )
+    _validate_today_v2(db.connection())
+    db.rollback()
+
     db.connection().execute(
         TodaySuggestion.__table__.update()
         .where(TodaySuggestion.id == suggestion.id)

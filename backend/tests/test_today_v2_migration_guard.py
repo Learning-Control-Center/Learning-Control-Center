@@ -32,9 +32,7 @@ def _all_rows(connection: sqlite3.Connection, table_name: str) -> list[tuple[obj
 
 
 @pytest.mark.parametrize("marker_table", ["today_generations", "_alembic_tmp_today_generations"])
-def test_stamped_0016_with_today_marker_is_refused(
-    tmp_path: Path, marker_table: str
-) -> None:
+def test_stamped_0016_with_today_marker_is_refused(tmp_path: Path, marker_table: str) -> None:
     database_path = tmp_path / f"partial-0017-{marker_table}.sqlite3"
     command.upgrade(_migration_config(database_path), "0016_recommendation_v2")
     with sqlite3.connect(database_path) as connection:

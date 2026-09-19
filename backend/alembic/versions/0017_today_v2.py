@@ -35,9 +35,7 @@ def upgrade() -> None:
             "explicit_generation_sequence",
             name="uq_today_generation_key",
         ),
-        sa.CheckConstraint(
-            "explicit_generation_sequence > 0", name="ck_today_generation_sequence"
-        ),
+        sa.CheckConstraint("explicit_generation_sequence > 0", name="ck_today_generation_sequence"),
         sa.CheckConstraint(
             "length(request_hash) = 64 AND length(output_hash) = 64",
             name="ck_today_generation_hashes",
@@ -93,9 +91,7 @@ def upgrade() -> None:
             "portfolio_role IN ('primary','complementary','maintenance')",
             name="ck_today_suggestion_portfolio_role",
         ),
-        sa.CheckConstraint(
-            "expires_at > created_at", name="ck_today_suggestion_expiration_order"
-        ),
+        sa.CheckConstraint("expires_at > created_at", name="ck_today_suggestion_expiration_order"),
         sa.CheckConstraint(
             "advisory_duration_ms IS NULL OR advisory_duration_ms > 0",
             name="ck_today_suggestion_advisory_duration",
@@ -117,9 +113,7 @@ def upgrade() -> None:
             name="ck_today_suggestion_replacement_distinct",
         ),
     )
-    op.create_index(
-        "ix_today_suggestion_expiry", "today_suggestions", ["expires_at", "id"]
-    )
+    op.create_index("ix_today_suggestion_expiry", "today_suggestions", ["expires_at", "id"])
     op.create_table(
         "today_interactions",
         sa.Column("id", sa.String(36), primary_key=True),
@@ -155,9 +149,7 @@ def upgrade() -> None:
             name="ck_today_interaction_type",
         ),
         sa.CheckConstraint("actor IN ('user','system')", name="ck_today_interaction_actor"),
-        sa.CheckConstraint(
-            "length(payload_hash) = 64", name="ck_today_interaction_payload_hash"
-        ),
+        sa.CheckConstraint("length(payload_hash) = 64", name="ck_today_interaction_payload_hash"),
         sa.CheckConstraint(
             "(interaction_type IN ('started','completed','partially_completed') "
             "AND activity_id IS NOT NULL AND session_id IS NOT NULL) OR "
@@ -188,14 +180,10 @@ def upgrade() -> None:
         sa.Column("resulting_status", sa.String(32), nullable=False),
         sa.Column("payload_hash", sa.String(64), nullable=False),
         sa.Column("corrected_at", sa.Integer(), nullable=False),
-        sa.ForeignKeyConstraint(
-            ["interaction_id"], ["today_interactions.id"], ondelete="RESTRICT"
-        ),
+        sa.ForeignKeyConstraint(["interaction_id"], ["today_interactions.id"], ondelete="RESTRICT"),
         sa.UniqueConstraint("interaction_id", name="uq_today_interaction_correction_target"),
         sa.UniqueConstraint("idempotency_key", name="uq_today_interaction_correction_key"),
-        sa.CheckConstraint(
-            "length(payload_hash) = 64", name="ck_today_correction_payload_hash"
-        ),
+        sa.CheckConstraint("length(payload_hash) = 64", name="ck_today_correction_payload_hash"),
         sa.CheckConstraint("length(reason) > 0", name="ck_today_correction_reason"),
         sa.CheckConstraint(
             "actor IN ('user','system')", name="ck_today_interaction_correction_actor"
@@ -228,9 +216,7 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "actor IN ('user','system')", name="ck_suggestion_activity_relation_actor"
         ),
-        sa.CheckConstraint(
-            "length(payload_hash) = 64", name="ck_suggestion_relation_payload_hash"
-        ),
+        sa.CheckConstraint("length(payload_hash) = 64", name="ck_suggestion_relation_payload_hash"),
     )
     op.create_index(
         "ix_suggestion_relation_suggestion",
@@ -283,9 +269,7 @@ def upgrade() -> None:
         sa.Column("latest_interaction_id", sa.String(36)),
         sa.Column("terminal", sa.Boolean(), nullable=False),
         sa.Column("updated_at", sa.Integer(), nullable=False),
-        sa.ForeignKeyConstraint(
-            ["suggestion_id"], ["today_suggestions.id"], ondelete="CASCADE"
-        ),
+        sa.ForeignKeyConstraint(["suggestion_id"], ["today_suggestions.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(
             ["latest_interaction_id"], ["today_interactions.id"], ondelete="RESTRICT"
         ),

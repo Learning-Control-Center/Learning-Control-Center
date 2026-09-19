@@ -17,17 +17,25 @@ from app.requirements.contracts import READINESS_POLICY_VERSION
 
 ANALYSIS_ALGORITHM_VERSION = "analysis-algorithm/v3.0"
 ANALYSIS_POLICY_VERSION = "analysis-policy/v3.0"
-NORMALIZATION_SCHEMA_VERSION = "analysis-normalization/v3.0"
+LEGACY_NORMALIZATION_SCHEMA_VERSION = "analysis-normalization/v3.0"
+NORMALIZATION_SCHEMA_VERSION = "analysis-normalization/v3.1"
 PURPOSE_MATRIX_VERSION = "analysis-purpose-matrix/v3.0"
 APPLICATION_VERSION = "2.0.0"
 
 
-def analysis_policy_bundle() -> dict[str, str]:
+def analysis_policy_bundle(
+    normalization_schema_version: str = NORMALIZATION_SCHEMA_VERSION,
+) -> dict[str, str]:
     """Return the complete immutable producer/upstream policy lineage for V3."""
+    if normalization_schema_version not in {
+        LEGACY_NORMALIZATION_SCHEMA_VERSION,
+        NORMALIZATION_SCHEMA_VERSION,
+    }:
+        raise KeyError(normalization_schema_version)
     return {
         "algorithm": ANALYSIS_ALGORITHM_VERSION,
         "analysis": ANALYSIS_POLICY_VERSION,
-        "normalization": NORMALIZATION_SCHEMA_VERSION,
+        "normalization": normalization_schema_version,
         "purposeMatrix": PURPOSE_MATRIX_VERSION,
         "gap": ANALYSIS_POLICY_VERSION,
         "readiness": READINESS_POLICY_VERSION,

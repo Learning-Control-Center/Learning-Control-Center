@@ -112,19 +112,35 @@ class AuthRateLimitBucket(Base):
 
 class Roadmap(Base, TimestampMixin):
     __tablename__ = "roadmaps"
-    __table_args__ = (
-        Index(
-            "uq_one_current_roadmap", "is_current", unique=True, sqlite_where=text("is_current = 1")
-        ),
-    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     stable_key: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    is_current: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    active_version_id: Mapped[str | None] = mapped_column(ForeignKey("roadmap_versions.id"))
-    current_phase_id: Mapped[str | None] = mapped_column(ForeignKey("phases.id"))
+
+    @property
+    def is_current(self) -> bool:
+        return bool(self.__dict__.get("_legacy_is_current", False))
+
+    @is_current.setter
+    def is_current(self, value: bool) -> None:
+        self.__dict__["_legacy_is_current"] = bool(value)
+
+    @property
+    def active_version_id(self) -> str | None:
+        return self.__dict__.get("_legacy_active_version_id")
+
+    @active_version_id.setter
+    def active_version_id(self, value: str | None) -> None:
+        self.__dict__["_legacy_active_version_id"] = value
+
+    @property
+    def current_phase_id(self) -> str | None:
+        return self.__dict__.get("_legacy_current_phase_id")
+
+    @current_phase_id.setter
+    def current_phase_id(self, value: str | None) -> None:
+        self.__dict__["_legacy_current_phase_id"] = value
 
 
 class RoadmapVersion(Base):

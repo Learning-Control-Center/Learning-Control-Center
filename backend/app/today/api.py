@@ -85,9 +85,7 @@ async def get_today_generation(
     return generation_detail(db, generation)
 
 
-def _generate(
-    db: Session, payload: TodayGenerationRequest, *, regenerate: bool
-) -> TodayGeneration:
+def _generate(db: Session, payload: TodayGenerationRequest, *, regenerate: bool) -> TodayGeneration:
     return generate_today(
         db,
         idempotency_key=payload.idempotency_key,

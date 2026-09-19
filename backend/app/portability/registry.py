@@ -3,8 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 
-PORTABLE_SCHEMA_CURRENT = 8
-PORTABLE_SCHEMA_READABLE = frozenset({1, 2, 3, 4, 5, 6, 7, 8})
+PORTABLE_SCHEMA_CURRENT = 9
+PORTABLE_SCHEMA_READABLE = frozenset({1, 2, 3, 4, 5, 6, 7, 8, 9})
 PORTABLE_V2_FOUNDATION_TABLES = frozenset(
     {
         "analysis_runs",
@@ -396,6 +396,47 @@ PORTABLE_V8_MANIFEST = {
     ],
 }
 
+PORTABLE_V9_AUTHORITY_TABLES = frozenset(
+    {"learning_control_authority_state", "learning_control_authority_events"}
+)
+PORTABLE_V1_FORBIDDEN_TABLES = frozenset(
+    set(PORTABLE_V1_FORBIDDEN_TABLES) | set(PORTABLE_V9_AUTHORITY_TABLES)
+)
+PORTABLE_V2_FORBIDDEN_TABLES = frozenset(
+    set(PORTABLE_V2_FORBIDDEN_TABLES) | set(PORTABLE_V9_AUTHORITY_TABLES)
+)
+PORTABLE_V3_FORBIDDEN_TABLES = frozenset(
+    set(PORTABLE_V3_FORBIDDEN_TABLES) | set(PORTABLE_V9_AUTHORITY_TABLES)
+)
+PORTABLE_V4_FORBIDDEN_TABLES = frozenset(
+    set(PORTABLE_V4_FORBIDDEN_TABLES) | set(PORTABLE_V9_AUTHORITY_TABLES)
+)
+PORTABLE_V5_FORBIDDEN_TABLES = frozenset(
+    set(PORTABLE_V5_FORBIDDEN_TABLES) | set(PORTABLE_V9_AUTHORITY_TABLES)
+)
+PORTABLE_V6_FORBIDDEN_TABLES = frozenset(
+    set(PORTABLE_V6_FORBIDDEN_TABLES) | set(PORTABLE_V9_AUTHORITY_TABLES)
+)
+PORTABLE_V7_FORBIDDEN_TABLES = frozenset(
+    set(PORTABLE_V7_FORBIDDEN_TABLES) | set(PORTABLE_V9_AUTHORITY_TABLES)
+)
+PORTABLE_V8_FORBIDDEN_TABLES = PORTABLE_V9_AUTHORITY_TABLES
+PORTABLE_V9_MANIFEST = {
+    "includedCanonicalDomains": [
+        *PORTABLE_V8_MANIFEST["includedCanonicalDomains"],
+        "learning_control_authority_state",
+    ],
+    "includedImmutableHistory": [
+        *PORTABLE_V8_MANIFEST["includedImmutableHistory"],
+        "learning_control_authority_events",
+    ],
+    "omittedRebuildableState": [*PORTABLE_V8_MANIFEST["omittedRebuildableState"]],
+    "restoreActions": [
+        *PORTABLE_V8_MANIFEST["restoreActions"],
+        "verify_monotonic_learning_control_authority_history",
+    ],
+}
+
 
 def upgrade_v2_to_v3_tables(tables: dict[str, list[dict[str, object]]]) -> dict[str, int]:
     """Apply the lossless v2-to-v3 empty Curriculum-domain adapter in place."""
@@ -510,6 +551,96 @@ def upgrade_v7_to_v8_tables(tables: dict[str, list[dict[str, object]]]) -> dict[
             tables[table_name] = []
             created += 1
     return {"initializedTodayV2Tables": created}
+
+
+def upgrade_v8_to_v9_tables(tables: dict[str, list[dict[str, object]]]) -> dict[str, int]:
+    """Add the legacy authority baseline and contract Roadmap pointer columns."""
+    roadmaps = tables.get("roadmaps", [])
+    pointer_columns = {"is_current", "active_version_id", "current_phase_id"}
+    if roadmaps:
+        if any(not pointer_columns <= set(roadmap) for roadmap in roadmaps):
+            raise ValueError("Portable V8 Roadmap pointers are partially represented.")
+        states = {
+            str(row.get("roadmap_id")): row
+            for row in tables.get("legacy_roadmap_active_states", [])
+        }
+        if len(states) != len(roadmaps):
+            raise ValueError("Portable V8 Roadmap pointer parity is invalid.")
+        for roadmap in roadmaps:
+            roadmap_id = str(roadmap["id"])
+            state_row = states.get(roadmap_id)
+            pointer_state = {
+                "activeVersionId": roadmap.get("active_version_id"),
+                "currentPhaseId": roadmap.get("current_phase_id"),
+                "isCurrent": bool(roadmap.get("is_current")),
+                "roadmapId": roadmap_id,
+            }
+            expected_hash = hashlib.sha256(
+                json.dumps(pointer_state, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            if state_row is None or (
+                state_row.get("active_version_id") != roadmap.get("active_version_id")
+                or state_row.get("current_phase_id") != roadmap.get("current_phase_id")
+                or bool(state_row.get("is_current")) != bool(roadmap.get("is_current"))
+                or state_row.get("state_hash") != expected_hash
+            ):
+                raise ValueError("Portable V8 Roadmap pointer parity is invalid.")
+    state = {
+        "canonicalLearningAuthority": "legacy_v1",
+        "recommendationPresentation": "legacy_v1",
+        "roadmapPresentation": "legacy_v1",
+        "todayPresentation": "legacy_v1",
+    }
+    reason = "Initial legacy authority baseline"
+    event_payload = {
+        "commandType": "bootstrap",
+        "reason": reason,
+        "resultingState": state,
+    }
+    created = 0
+    if "learning_control_authority_events" not in tables:
+        tables["learning_control_authority_events"] = [
+            {
+                "id": "authority-bootstrap-legacy-v1",
+                "event_sequence": 1,
+                "idempotency_key": "authority-bootstrap-legacy-v1",
+                "command_type": "bootstrap",
+                "prior_state_json": None,
+                "resulting_state_json": json.dumps(state, sort_keys=True, separators=(",", ":")),
+                "reason": reason,
+                "actor": "system",
+                "source": "migration",
+                "payload_hash": hashlib.sha256(
+                    json.dumps(event_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                ).hexdigest(),
+                "occurred_at": 0,
+            }
+        ]
+        created += 1
+    if "learning_control_authority_state" not in tables:
+        tables["learning_control_authority_state"] = [
+            {
+                "id": 1,
+                "canonical_learning_authority": "legacy_v1",
+                "roadmap_presentation": "legacy_v1",
+                "recommendation_presentation": "legacy_v1",
+                "today_presentation": "legacy_v1",
+                "event_sequence": 1,
+                "last_event_id": "authority-bootstrap-legacy-v1",
+                "state_hash": hashlib.sha256(
+                    json.dumps(state, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                ).hexdigest(),
+                "updated_at": 0,
+            }
+        ]
+        created += 1
+    stripped = 0
+    for roadmap in roadmaps:
+        for column in ("is_current", "active_version_id", "current_phase_id"):
+            if column in roadmap:
+                roadmap.pop(column)
+                stripped += 1
+    return {"initializedAuthorityTables": created, "removedLegacyRoadmapPointers": stripped}
 
 
 def supports_portable_schema(version: int) -> bool:

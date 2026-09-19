@@ -20,6 +20,8 @@ from app.analysis.v3.models import (
     AnalysisV3SnapshotDetail,
     AnalysisV3UnknownMarker,
 )
+from app.authority.models import LearningControlAuthorityEvent, LearningControlAuthorityState
+from app.authority.semantics import is_valid_transition
 from app.capability_scales import builtin_scale_tables
 from app.compatibility.v1.activity_backfill import (
     POLICY_KEY as ACTIVITY_POLICY_KEY,
@@ -188,7 +190,11 @@ from app.roadmap_projection.models import (
 )
 from app.schemas import validate_external_reference
 from app.time_utils import datetime_to_epoch_ms, local_date_for_ms, local_day_bounds_ms
-from app.today.contracts import TODAY_POLICY_VERSION, TODAY_PRESENTATION_VERSION
+from app.today.contracts import (
+    LEGACY_TODAY_PRESENTATION_VERSION,
+    TODAY_POLICY_VERSION,
+    TODAY_PRESENTATION_VERSION,
+)
 from app.today.models import (
     SuggestionActivityRelation,
     SuggestionActivityRelationCorrection,
@@ -286,15 +292,15 @@ def _validate_json_columns(connection: Any) -> None:
 
 
 def _validate_roadmap_scope(connection: Any) -> None:
-    roadmaps = connection.execute(
-        select(
-            Roadmap.id,
-            Roadmap.is_current,
-            Roadmap.active_version_id,
-            Roadmap.current_phase_id,
+    roadmaps = {row.id for row in connection.execute(select(Roadmap.id)).all()}
+    states = connection.execute(select(*LegacyRoadmapActiveState.__table__.c)).all()
+    if roadmaps != {row.roadmap_id for row in states}:
+        raise AppError(
+            422,
+            "PORTABLE_ROADMAP_STATE_INVALID",
+            "Every configured roadmap requires one compatibility active-state row.",
         )
-    ).all()
-    if roadmaps and sum(bool(row.is_current) for row in roadmaps) != 1:
+    if states and sum(bool(row.is_current) for row in states) != 1:
         raise AppError(
             422,
             "PORTABLE_ROADMAP_STATE_INVALID",
@@ -310,14 +316,14 @@ def _validate_roadmap_scope(connection: Any) -> None:
             select(Phase.id, Phase.roadmap_version_id, Phase.archived)
         ).all()
     }
-    for roadmap in roadmaps:
-        if roadmap.is_current:
-            version = versions.get(roadmap.active_version_id)
-            phase = phases.get(roadmap.current_phase_id)
+    for state in states:
+        if state.is_current:
+            version = versions.get(state.active_version_id)
+            phase = phases.get(state.current_phase_id)
             if (
                 version is None
                 or phase is None
-                or version.roadmap_id != roadmap.id
+                or version.roadmap_id != state.roadmap_id
                 or phase.roadmap_version_id != version.id
                 or phase.archived
             ):
@@ -326,7 +332,7 @@ def _validate_roadmap_scope(connection: Any) -> None:
                     "PORTABLE_ROADMAP_STATE_INVALID",
                     "The current roadmap pointers are inconsistent.",
                 )
-        elif roadmap.active_version_id is not None or roadmap.current_phase_id is not None:
+        elif state.active_version_id is not None or state.current_phase_id is not None:
             raise AppError(
                 422,
                 "PORTABLE_ROADMAP_STATE_INVALID",
@@ -376,9 +382,11 @@ def _validate_roadmap_scope_history(connection: Any) -> None:
         )
 
     current = connection.execute(
-        select(Roadmap.id, Roadmap.active_version_id, Roadmap.current_phase_id).where(
-            Roadmap.is_current.is_(True)
-        )
+        select(
+            LegacyRoadmapActiveState.roadmap_id,
+            LegacyRoadmapActiveState.active_version_id,
+            LegacyRoadmapActiveState.current_phase_id,
+        ).where(LegacyRoadmapActiveState.is_current.is_(True))
     ).first()
     if current is None:
         return
@@ -390,7 +398,7 @@ def _validate_roadmap_scope_history(connection: Any) -> None:
         )
     latest = ordered_events[-1]
     if (
-        latest.roadmap_id != current.id
+        latest.roadmap_id != current.roadmap_id
         or latest.roadmap_version_id != current.active_version_id
         or latest.phase_id != current.current_phase_id
     ):
@@ -837,7 +845,15 @@ def _validate_analysis_v3(connection: Any) -> None:
                 "PORTABLE_ANALYSIS_V3_INVALID",
                 "Analysis V3 producer lineage or input hashes are inconsistent.",
             )
-        if policy_bundle != analysis_policy_bundle():
+        try:
+            expected_policy_bundle = analysis_policy_bundle(lineage.normalization_schema_version)
+        except KeyError as exc:
+            raise AppError(
+                422,
+                "PORTABLE_ANALYSIS_V3_POLICY_UNAVAILABLE",
+                "The Analysis V3 producer policy bundle is not supported for exact replay.",
+            ) from exc
+        if policy_bundle != expected_policy_bundle:
             raise AppError(
                 422,
                 "PORTABLE_ANALYSIS_V3_POLICY_UNAVAILABLE",
@@ -904,14 +920,24 @@ def _validate_analysis_v3(connection: Any) -> None:
                 reconstructed_facts,
                 reconstructed_unknowns,
                 reconstructed_lineage,
-            ) = build_analysis_inputs(connection, snapshot.cutoff_at, snapshot.purpose)
+            ) = build_analysis_inputs(
+                connection,
+                snapshot.cutoff_at,
+                snapshot.purpose,
+                normalization_schema_version=lineage.normalization_schema_version,
+            )
         else:
             with Session(bind=connection, autoflush=False) as validation_db:
                 (
                     reconstructed_facts,
                     reconstructed_unknowns,
                     reconstructed_lineage,
-                ) = build_analysis_inputs(validation_db, snapshot.cutoff_at, snapshot.purpose)
+                ) = build_analysis_inputs(
+                    validation_db,
+                    snapshot.cutoff_at,
+                    snapshot.purpose,
+                    normalization_schema_version=lineage.normalization_schema_version,
+                )
         frozen_lineage = json.loads(run.input_lineage_json)
         if content_hash(frozen_lineage) != content_hash(reconstructed_lineage):
             raise AppError(
@@ -2487,7 +2513,10 @@ def _validate_evidence(connection: Any) -> None:
 
 
 def _validate_recommendation_v2(connection: Any) -> None:
-    from app.analysis.v3.public import load_public_analysis_snapshot
+    from app.analysis.v3.public import (
+        load_legacy_recommendation_analysis_snapshot,
+        load_public_analysis_snapshot,
+    )
     from app.curriculum.service import unit_availability_as_of
     from app.recommendation.v2.contracts import candidate_from_payload
     from app.recommendation.v2.input_replay import regenerate_candidates_from_frozen_input
@@ -2526,6 +2555,16 @@ def _validate_recommendation_v2(connection: Any) -> None:
                 )
             ),
         )
+
+    def accepted_analysis_public_snapshots(snapshot_row: Any) -> set[str]:
+        return {
+            canonical_json(asdict(load_public_analysis_snapshot(public_session, snapshot_row.id))),
+            canonical_json(
+                asdict(
+                    load_legacy_recommendation_analysis_snapshot(public_session, snapshot_row.id)
+                )
+            ),
+        }
 
     runs = {
         row.id: row for row in connection.execute(select(*RecommendationV2Run.__table__.c)).all()
@@ -2577,8 +2616,7 @@ def _validate_recommendation_v2(connection: Any) -> None:
             or (
                 run.status == "completed"
                 and (
-                    run.input_hash != original.input_hash
-                    or run.output_hash != original.output_hash
+                    run.input_hash != original.input_hash or run.output_hash != original.output_hash
                 )
             )
         ):
@@ -2701,12 +2739,8 @@ def _validate_recommendation_v2(connection: Any) -> None:
                 or (
                     complete_inputs
                     and (
-                        frozen["analysisPublicSnapshot"]
-                        != json.loads(
-                            canonical_json(
-                                asdict(load_public_analysis_snapshot(public_session, snapshot.id))
-                            )
-                        )
+                        canonical_json(frozen["analysisPublicSnapshot"])
+                        not in accepted_analysis_public_snapshots(snapshot)
                         or frozen["targetProfileVersion"]
                         != json.loads(snapshot.input_lineage_json).get("profile")
                         or frozen["learningGraph"]
@@ -2727,9 +2761,7 @@ def _validate_recommendation_v2(connection: Any) -> None:
                 )
             if frozen_keys == frozenset(full_keys):
                 try:
-                    regenerate_candidates_from_frozen_input(
-                        frozen, run.policy_registry_version
-                    )
+                    regenerate_candidates_from_frozen_input(frozen, run.policy_registry_version)
                 except (KeyError, TypeError, ValueError) as exc:
                     raise AppError(
                         422,
@@ -2780,10 +2812,8 @@ def _validate_recommendation_v2(connection: Any) -> None:
             or run.user_constraints_hash != content_hash(frozen.get("userConstraints", {}))
             or run.project_reference
             != (frozen_projects.get("input_hash") if isinstance(frozen_projects, dict) else None)
-            or frozen.get("analysisPublicSnapshot")
-            != json.loads(
-                canonical_json(asdict(load_public_analysis_snapshot(public_session, snapshot.id)))
-            )
+            or canonical_json(frozen.get("analysisPublicSnapshot"))
+            not in accepted_analysis_public_snapshots(snapshot)
             or frozen.get("targetProfileVersion") != analysis_lineage.get("profile")
             or frozen.get("learningGraph") != analysis_lineage.get("graph")
             or frozen.get("curriculum") != analysis_lineage.get("curriculumCatalog")
@@ -3047,6 +3077,7 @@ def validate_domain_integrity(connection: Any) -> None:
     _validate_analysis_v3(connection)
     _validate_recommendation_v2(connection)
     _validate_today_v2(connection)
+    _validate_authority(connection)
     _validate_roadmap_scope(connection)
     _validate_roadmap_scope_history(connection)
     _validate_versioned_roadmap(connection)
@@ -3069,14 +3100,82 @@ def validate_domain_integrity(connection: Any) -> None:
             ) from exc
 
 
+def _validate_authority(connection: Any) -> None:
+    events = sorted(
+        connection.execute(select(*LearningControlAuthorityEvent.__table__.c)).all(),
+        key=lambda row: row.event_sequence,
+    )
+    states = connection.execute(select(*LearningControlAuthorityState.__table__.c)).all()
+    if len(states) != 1 or not events:
+        raise AppError(
+            422,
+            "PORTABLE_AUTHORITY_HISTORY_INVALID",
+            "Learning-control authority state/history is missing.",
+        )
+    previous: dict[str, Any] | None = None
+    canonical_v2 = False
+    event_by_id: dict[str, Any] = {}
+    for expected_sequence, event in enumerate(events, start=1):
+        event_by_id[event.id] = event
+        resulting = json.loads(event.resulting_state_json)
+        prior = json.loads(event.prior_state_json) if event.prior_state_json else None
+        payload = {
+            "commandType": event.command_type,
+            "reason": event.reason,
+            "resultingState": resulting,
+        }
+        if prior is not None:
+            payload["priorState"] = prior
+        if (
+            event.event_sequence != expected_sequence
+            or prior != previous
+            or event.payload_hash != content_hash(payload)
+            or not is_valid_transition(
+                sequence=event.event_sequence,
+                command_type=event.command_type,
+                prior=prior,
+                resulting=resulting,
+                actor=event.actor,
+                source=event.source,
+            )
+            or canonical_v2
+            and resulting.get("canonicalLearningAuthority") != "v2"
+        ):
+            raise AppError(
+                422,
+                "PORTABLE_AUTHORITY_HISTORY_INVALID",
+                "Learning-control authority history is invalid or non-monotonic.",
+            )
+        canonical_v2 = canonical_v2 or resulting.get("canonicalLearningAuthority") == "v2"
+        previous = resulting
+    state = states[0]
+    current = {
+        "canonicalLearningAuthority": state.canonical_learning_authority,
+        "recommendationPresentation": state.recommendation_presentation,
+        "roadmapPresentation": state.roadmap_presentation,
+        "todayPresentation": state.today_presentation,
+    }
+    last = event_by_id.get(state.last_event_id)
+    if (
+        state.id != 1
+        or last is None
+        or state.event_sequence != last.event_sequence
+        or json.loads(last.resulting_state_json) != current
+        or state.state_hash != content_hash(current)
+    ):
+        raise AppError(
+            422,
+            "PORTABLE_AUTHORITY_HISTORY_INVALID",
+            "Learning-control authority state does not match its history.",
+        )
+
+
 def _validate_today_v2(connection: Any) -> None:
     generations = {
-        row.id: row
-        for row in connection.execute(select(*TodayGeneration.__table__.c)).all()
+        row.id: row for row in connection.execute(select(*TodayGeneration.__table__.c)).all()
     }
     suggestions = {
-        row.id: row
-        for row in connection.execute(select(*TodaySuggestion.__table__.c)).all()
+        row.id: row for row in connection.execute(select(*TodaySuggestion.__table__.c)).all()
     }
     interactions: dict[str, list[Any]] = defaultdict(list)
     for row in connection.execute(select(*TodayInteraction.__table__.c)).all():
@@ -3106,15 +3205,13 @@ def _validate_today_v2(connection: Any) -> None:
         for row in connection.execute(select(*RecommendationV2Candidate.__table__.c)).all()
     }
     recommendation_runs = {
-        row.id: row
-        for row in connection.execute(select(*RecommendationV2Run.__table__.c)).all()
+        row.id: row for row in connection.execute(select(*RecommendationV2Run.__table__.c)).all()
     }
     reasons_by_candidate: dict[str, list[Any]] = defaultdict(list)
     for row in connection.execute(select(*RecommendationV2Reason.__table__.c)).all():
         reasons_by_candidate[row.candidate_id].append(row)
     sessions = {
-        row.id: row
-        for row in connection.execute(select(*LearningSession.__table__.c)).all()
+        row.id: row for row in connection.execute(select(*LearningSession.__table__.c)).all()
     }
     transition_map = {
         "suggested": {"viewed", "accepted", "started", "skipped", "replaced", "expired"},
@@ -3239,7 +3336,8 @@ def _validate_today_v2(connection: Any) -> None:
             or content_hash(presentation) != suggestion.presentation_hash
             or local_day_bounds_ms(local_date, suggestion.timezone)[1] != suggestion.expires_at
             or suggestion.today_policy_version != TODAY_POLICY_VERSION
-            or suggestion.presentation_version != TODAY_PRESENTATION_VERSION
+            or suggestion.presentation_version
+            not in {LEGACY_TODAY_PRESENTATION_VERSION, TODAY_PRESENTATION_VERSION}
             or recommendation_run is None
             or generation.recommendation_policy_version
             != recommendation_run.policy_registry_version
@@ -3291,6 +3389,16 @@ def _validate_today_v2(connection: Any) -> None:
                 else None
             ),
         }
+        if suggestion.presentation_version == TODAY_PRESENTATION_VERSION:
+            expected_presentation.update(
+                {
+                    "competencyIdentityId": candidate.competency_identity_id,
+                    "targetIdentityId": candidate.target_identity_id,
+                    "servedTargetIdentityIds": json.loads(
+                        candidate.served_target_identity_ids_json
+                    ),
+                }
+            )
         if presentation != expected_presentation:
             raise AppError(
                 422,
@@ -3311,6 +3419,22 @@ def _validate_today_v2(connection: Any) -> None:
             current = suggestions.get(current.replaces_suggestion_id)
     for generation_id, generation in generations.items():
         rows = sorted(by_generation.get(generation_id, []), key=lambda item: item.ordinal)
+        recommendation_run = recommendation_runs.get(generation.recommendation_run_id)
+        frozen_input = (
+            json.loads(recommendation_run.frozen_input_json)
+            if recommendation_run is not None
+            else {}
+        )
+        constraints = frozen_input.get("userConstraints", {})
+        expected_request = {
+            "analysisSnapshotId": (
+                recommendation_run.analysis_snapshot_id if recommendation_run is not None else None
+            ),
+            "availableTimeMs": constraints.get("availableTimeMs"),
+            "contextCosts": constraints.get("contextCosts", []),
+            "regenerate": generation.is_regeneration,
+            "todayPolicyVersion": generation.today_policy_version,
+        }
         expected_recommendation_ids = {
             row.id
             for row in recommendations.values()
@@ -3331,6 +3455,8 @@ def _validate_today_v2(connection: Any) -> None:
             != f"{generation.local_date}|{generation.recommendation_policy_version}|"
             f"{generation.explicit_generation_sequence}"
             or {row.recommendation_id for row in rows} != expected_recommendation_ids
+            or recommendation_run is None
+            or generation.request_hash != content_hash(expected_request)
             or generation.output_hash != content_hash(expected_output)
         ):
             raise AppError(
@@ -3346,17 +3472,11 @@ def _validate_today_v2(connection: Any) -> None:
             or correction.replacement_relation_id == correction.relation_id
             or (
                 correction.correction_type == "replaced"
-                and (
-                    replacement is None
-                    or replacement.suggestion_id != original.suggestion_id
-                )
+                and (replacement is None or replacement.suggestion_id != original.suggestion_id)
             )
             or not correction.reason
             or correction.corrected_at < original.created_at
-            or (
-                replacement is not None
-                and replacement.created_at > correction.corrected_at
-            )
+            or (replacement is not None and replacement.created_at > correction.corrected_at)
         ):
             raise AppError(
                 422,
@@ -6178,33 +6298,28 @@ def _validate_learning_graph_and_projection(connection: Any) -> None:
                 "PORTABLE_ROADMAP_PROJECTION_INPUT_INVALID",
                 "A Roadmap Projection override or preference has invalid scope.",
             )
-    roadmaps = {row.id: row for row in connection.execute(select(*Roadmap.__table__.c)).all()}
+    roadmaps = {row.id for row in connection.execute(select(Roadmap.id)).all()}
     compatibility_states = {
         row.roadmap_id: row
         for row in connection.execute(select(*LegacyRoadmapActiveState.__table__.c)).all()
     }
-    if set(roadmaps) != set(compatibility_states):
+    if roadmaps != set(compatibility_states):
         raise AppError(
             422,
             "PORTABLE_LEGACY_ROADMAP_STATE_INVALID",
             "Every legacy Roadmap requires exact active-state compatibility data.",
         )
-    for roadmap_id, roadmap in roadmaps.items():
+    for roadmap_id in roadmaps:
         state = compatibility_states[roadmap_id]
         expected_hash = content_hash(
             {
-                "roadmapId": roadmap.id,
-                "activeVersionId": roadmap.active_version_id,
-                "currentPhaseId": roadmap.current_phase_id,
-                "isCurrent": bool(roadmap.is_current),
+                "roadmapId": roadmap_id,
+                "activeVersionId": state.active_version_id,
+                "currentPhaseId": state.current_phase_id,
+                "isCurrent": bool(state.is_current),
             }
         )
-        if (
-            state.active_version_id != roadmap.active_version_id
-            or state.current_phase_id != roadmap.current_phase_id
-            or bool(state.is_current) != bool(roadmap.is_current)
-            or state.state_hash != expected_hash
-        ):
+        if state.state_hash != expected_hash:
             raise AppError(
                 422,
                 "PORTABLE_LEGACY_ROADMAP_STATE_INVALID",
@@ -6220,7 +6335,21 @@ def portable_state_presence(connection: Any, portable_models: list[Any]) -> dict
     }
     builtin_ids["activity_category_versions"] = {str(row["id"]) for row in activity_category_rows()}
     for model in portable_models:
-        if model is DisciplineProfile:
+        if model is LearningControlAuthorityEvent:
+            ids = set(connection.execute(select(LearningControlAuthorityEvent.id)).scalars())
+            count = len(ids - {"authority-bootstrap-legacy-v1"})
+        elif model is LearningControlAuthorityState:
+            state = connection.execute(select(*LearningControlAuthorityState.__table__.c)).first()
+            count = int(
+                state is None
+                or state.canonical_learning_authority != "legacy_v1"
+                or state.roadmap_presentation != "legacy_v1"
+                or state.recommendation_presentation != "legacy_v1"
+                or state.today_presentation != "legacy_v1"
+                or state.event_sequence != 1
+                or state.last_event_id != "authority-bootstrap-legacy-v1"
+            )
+        elif model is DisciplineProfile:
             profiles = connection.execute(select(DisciplineProfile)).scalars().all()
             count = sum(
                 profile.weekly_target_active_days != 5

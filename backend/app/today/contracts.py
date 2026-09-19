@@ -7,7 +7,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.schemas import AssistanceMode, SessionContributionCreate
 
 TODAY_POLICY_VERSION = "today-policy/v2.0"
-TODAY_PRESENTATION_VERSION = "today-presentation/v2.0"
+LEGACY_TODAY_PRESENTATION_VERSION = "today-presentation/v2.0"
+TODAY_PRESENTATION_VERSION = "today-presentation/v2.1"
 
 
 class StrictModel(BaseModel):

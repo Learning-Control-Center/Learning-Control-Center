@@ -153,14 +153,14 @@ export function RoadmapV2Page() {
       id: node.id,
       position: node.position,
       data: {
-        label: `${node.presentationParentId ? '↳ ' : ''}${node.title}\n${node.capability.scopes[0]?.assessmentStatus ?? 'Capability unknown'}`,
+        label: `${node.presentationParentId ? '↳ ' : ''}${node.title}${node.isToday ? ' · Today' : ''}\n${node.capability.scopes[0]?.assessmentStatus ?? 'Capability unknown'}`,
       },
-      ariaLabel: `${node.title}, ${node.profileDomain?.title ?? 'graph foundation'}${node.presentationParentId ? ', specialization child' : ''}`,
+      ariaLabel: `${node.title}, ${node.profileDomain?.title ?? 'graph foundation'}${node.presentationParentId ? ', specialization child' : ''}${node.isToday ? ', recommended for Today' : ''}`,
       style: {
         width: 220,
         borderRadius: 16,
-        border: node.profileTarget ? '2px solid #3f7258' : '1px solid #b8b4a7',
-        background: '#fffdf7',
+        border: node.isToday ? '3px solid #9a5c28' : node.profileTarget ? '2px solid #3f7258' : '1px solid #b8b4a7',
+        background: node.isToday ? '#fff4df' : '#fffdf7',
         whiteSpace: 'pre-line',
       },
     }))
@@ -178,7 +178,7 @@ export function RoadmapV2Page() {
     <section className="space-y-6" aria-labelledby="roadmap-v2-heading">
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <p className="font-mono text-xs uppercase tracking-[0.18em] text-fern">V2 projection preview</p>
+          <p className="font-mono text-xs uppercase tracking-[0.18em] text-fern">Canonical V2 projection</p>
           <h1 id="roadmap-v2-heading" className="font-display text-3xl font-semibold text-ink">Roadmap Projection</h1>
           <p className="mt-2 max-w-3xl text-sm text-ink/65">
             Derived from the active Target Profile and native Learning Graph. Legacy phases never decide eligibility here.

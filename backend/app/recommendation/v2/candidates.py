@@ -21,14 +21,13 @@ if TYPE_CHECKING:
     from app.profile_views import ActiveProfileProjectionPublicDTO
 
 _SEVERITY_RANK = {None: 0, "info": 1, "attention": 2, "high": 3, "critical": 4}
+_RECENT_SATURATION_MAX_DAYS = 2
+_RECENT_SATURATION_MIN_EXPOSURE_DAYS = 3
 
 
 def _frozen_object(value: object) -> dict[str, object] | None:
     if not isinstance(value, tuple) or not all(
-        isinstance(item, tuple)
-        and len(item) == 2
-        and isinstance(item[0], str)
-        for item in value
+        isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str) for item in value
     ):
         return None
     return {item[0]: item[1] for item in value}
@@ -435,6 +434,26 @@ def _base_candidate(
         if target is not None and criterion_definition_id is not None
         else (target.last_meaningful_activity_at if target is not None else None)
     )
+    learning_action = candidate_type in {
+        "curriculum_unit",
+        "practice_task",
+        "project_task",
+    }
+    repeated_without_new_evidence = bool(
+        learning_action
+        and matched_criterion is not None
+        and matched_criterion.state == "demonstrated"
+        and not supplies_missing_mode
+        and not supplies_missing_independent_mode
+        and not review_due
+    )
+    recently_saturated = bool(
+        learning_action
+        and target is not None
+        and target.days_since_meaningful_activity <= _RECENT_SATURATION_MAX_DAYS
+        and target.exposure_days_42 >= _RECENT_SATURATION_MIN_EXPOSURE_DAYS
+        and not review_due
+    )
     explanation = (
         ("analysisSnapshotId", snapshot.snapshot_id),
         ("targetIdentityId", target.target_identity_id if target else None),
@@ -442,6 +461,13 @@ def _base_candidate(
         ("deadlineStatus", aggregate_deadline),
         ("primaryOutcomeKind", primary_outcome_kind),
         ("primaryOutcomeId", primary_outcome_id),
+        (
+            "daysSinceMeaningfulActivity",
+            target.days_since_meaningful_activity if target else None,
+        ),
+        ("exposureDays42", target.exposure_days_42 if target else None),
+        ("recentSaturationMaximumDays", _RECENT_SATURATION_MAX_DAYS),
+        ("recentSaturationMinimumExposureDays", _RECENT_SATURATION_MIN_EXPOSURE_DAYS),
     )
     return CandidateInputDTO(
         candidate_type=candidate_type,
@@ -493,8 +519,8 @@ def _base_candidate(
             and _assessment_blocks_due_hard_unknown(target, criterion_definition_id)
             and target.assessment_status == "unknown"
         ),
-        repeated_without_new_evidence=False,
-        recently_saturated=False,
+        repeated_without_new_evidence=repeated_without_new_evidence,
+        recently_saturated=recently_saturated,
         active_target=target is not None,
         prerequisites_satisfied=prerequisites,
         hard_readiness_satisfied=_three_valued_and(gates, readiness),
@@ -924,3 +950,40 @@ def build_candidates(
                 )
             )
     return canonicalize_candidates(tuple(candidates))
+
+
+def build_candidates_v1(
+    snapshot: PublicAnalysisSnapshotDTO,
+    profile: ActiveProfileProjectionPublicDTO,
+    curriculum: CurriculumCatalogPublicDTO,
+    curriculum_availability: tuple[CurriculumAvailabilityPublicDTO, ...],
+    projects: ProjectCatalogPublicDTO,
+    graph: ActiveLearningGraphProjectionPublicDTO | None,
+    context_costs: tuple[tuple[str, str, str], ...] = (),
+) -> tuple[CandidateInputDTO, ...]:
+    """Replay-only candidate builder retained for registry/v1 historical identity."""
+    current_only_facts = {
+        "daysSinceMeaningfulActivity",
+        "exposureDays42",
+        "recentSaturationMaximumDays",
+        "recentSaturationMinimumExposureDays",
+    }
+    return tuple(
+        replace(
+            item,
+            repeated_without_new_evidence=False,
+            recently_saturated=False,
+            explanation_facts=tuple(
+                fact for fact in item.explanation_facts if fact[0] not in current_only_facts
+            ),
+        )
+        for item in build_candidates(
+            snapshot,
+            profile,
+            curriculum,
+            curriculum_availability,
+            projects,
+            graph,
+            context_costs,
+        )
+    )

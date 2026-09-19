@@ -653,6 +653,7 @@ class PortablePackagePayload(StrictModel):
     analysisV3CurrentCheckpoint: dict[str, Any] | None = None
     recommendationV2HistoryCheckpoint: dict[str, Any] | None = None
     todayV2CurrentCheckpoint: dict[str, Any] | None = None
+    authorityCheckpoint: dict[str, Any] | None = None
 
 
 class ImportInspectRequest(StrictModel):

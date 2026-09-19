@@ -23,6 +23,7 @@ from app.models import (
     Evidence,
     EvidenceInvalidation,
     EvidenceRetraction,
+    ProjectionInvalidation,
     SemanticCompetencyDefinition,
     SemanticDefinitionDimension,
 )
@@ -72,6 +73,83 @@ PROJECT_SCHEMA_VERSION = "project-definition/v1"
 PROJECT_REQUIREMENT_POLICY = "project-requirement-policy/v1"
 PROJECT_AVAILABILITY_POLICY = "project-availability-policy/v1"
 PROJECT_CRITERION_POLICY = "project-criterion-policy/v1"
+
+
+def link_actual_activity_to_project_task(
+    db: Session,
+    *,
+    activity_id: str,
+    task_definition_id: str,
+    provenance: str,
+    idempotency_key: str,
+    created_at: int,
+) -> ActivityProjectTaskLink:
+    """Create a transaction-aware canonical Activity-to-Project-task attribution."""
+    existing = db.scalar(
+        select(ActivityProjectTaskLink).where(
+            ActivityProjectTaskLink.idempotency_key == idempotency_key
+        )
+    )
+    if existing is not None:
+        if (
+            existing.activity_id == activity_id
+            and existing.task_definition_id == task_definition_id
+            and existing.provenance == provenance
+        ):
+            return existing
+        raise AppError(409, "IDEMPOTENCY_KEY_REUSED", "The activity-link key was reused.")
+    activity = db.get(Activity, activity_id)
+    task = db.get(ProjectTaskDefinition, task_definition_id)
+    if activity is None or task is None:
+        raise AppError(422, "PROJECT_ACTIVITY_LINK_INVALID", "The Activity or task does not exist.")
+    duplicate = db.scalar(
+        select(ActivityProjectTaskLink.id)
+        .outerjoin(
+            ActivityProjectTaskLinkCorrection,
+            ActivityProjectTaskLinkCorrection.activity_project_task_link_id
+            == ActivityProjectTaskLink.id,
+        )
+        .where(
+            ActivityProjectTaskLink.activity_id == activity_id,
+            ActivityProjectTaskLink.task_definition_id == task_definition_id,
+            ActivityProjectTaskLinkCorrection.id.is_(None),
+        )
+    )
+    if duplicate is not None:
+        raise AppError(
+            409,
+            "PROJECT_ACTIVITY_LINK_EXISTS",
+            "The active Activity-to-Project-task link already exists.",
+        )
+    link = ActivityProjectTaskLink(
+        activity_id=activity_id,
+        task_definition_id=task_definition_id,
+        provenance=provenance,
+        idempotency_key=idempotency_key,
+        created_at=created_at,
+    )
+    db.add(link)
+    db.flush()
+    version = db.get(ProjectVersion, task.project_version_id)
+    assert version is not None
+    for projection_kind, policy in (
+        ("project_availability", PROJECT_AVAILABILITY_POLICY),
+        ("roadmap_projection_v2", "roadmap-projection/v2.0"),
+        ("analysis", "analysis-policy/v3.0"),
+    ):
+        db.add(
+            ProjectionInvalidation(
+                projection_kind=projection_kind,
+                subject_type="project",
+                subject_id=version.project_id,
+                source_fact_id=link.id,
+                target_policy_version=policy,
+                status="pending",
+                attempt_count=0,
+                requested_at=created_at,
+            )
+        )
+    return link
 
 
 def evaluate_project_criterion_evidence(

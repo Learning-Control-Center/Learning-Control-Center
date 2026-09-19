@@ -45,6 +45,7 @@ from app.portability.registry import (
     PORTABLE_V6_MANIFEST,
     PORTABLE_V7_RECOMMENDATION_TABLES,
     PORTABLE_V8_TODAY_TABLES,
+    PORTABLE_V9_AUTHORITY_TABLES,
 )
 from app.profile_views import ActiveProfileProjectionPublicDTO, ProfileTargetProjectionPublicDTO
 from app.projects.contracts import (
@@ -74,6 +75,7 @@ from app.recommendation.v2.models import (
     RecommendationV2SelectionDecision,
 )
 from app.recommendation.v2.policy import (
+    LEGACY_POLICY_REGISTRY_VERSION,
     POLICY_REGISTRY_VERSION,
     evaluate,
     evaluate_registered,
@@ -504,6 +506,7 @@ def test_every_hard_eligibility_rejection_is_explicit(
     assert evaluated.eligible is False
     assert evaluated.score_components == ()
     assert output.decisions[0].reason_code == reason_code
+    assert [item.reason_code for item in output.reasons].count(reason_code) == 1
 
 
 def test_expected_learning_value_ordered_rules_are_exact() -> None:
@@ -559,6 +562,14 @@ def test_expected_learning_value_ordered_rules_are_exact() -> None:
             supplies_missing_independent_mode=True,
         )
     ) == ("high", ("MISSING_INDEPENDENT_EVIDENCE",))
+
+    not_useful = evaluate((candidate("not-useful", usefulness=False),), None)
+    assert not_useful.decisions[0].reason_code == "NOT_USEFUL"
+    assert dict(not_useful.decisions[0].decisive_facts) == {
+        "selectionConstraint": "usefulness",
+        "usefulness": False,
+        "primaryOutcomeId": "target-not-useful",
+    }
 
 
 def test_generated_candidate_uses_exact_primary_outcome_lineage() -> None:
@@ -702,9 +713,54 @@ def test_generated_candidate_uses_exact_primary_outcome_lineage() -> None:
     assert generated.assessment_blocks_critical_planning is True
     assert generated.supplies_missing_required_mode is True
     assert generated.supplies_missing_independent_mode is True
-    assert _supplies_demonstration_mode(
-        "curriculum_unit", "independent_performance", ("guided",)
-    ) is False
+    saturated_target = replace(
+        primary,
+        assessment_status="assessed",
+        unmet_required_criterion_ids=(),
+        missing_evidence_requirement_ids=(),
+        missing_independent_criterion_ids=(),
+        criterion_evaluations=(replace(criterion, state="demonstrated"),),
+        readiness_gates=(),
+        days_since_meaningful_activity=2,
+        exposure_days_42=3,
+    )
+    repeated = _base_candidate(
+        snapshot=public_snapshot(saturated_target),
+        profile=profile_for_targets(saturated_target),
+        target=saturated_target,
+        candidate_type="practice_task",
+        stable_id="practice|repeated",
+        source_type="curriculum_unit",
+        source_entity_id="unit-repeated",
+        source_version_id="curriculum-v1",
+        title="Repeat criterion A",
+        description="Repeat already demonstrated material.",
+        criterion_definition_id="criterion-a",
+        project_id=None,
+        duration_range_ms=(10 * MINUTE, 20 * MINUTE, 30 * MINUTE),
+        active_source=True,
+        availability=True,
+        readiness=True,
+        intended_modes=("independent",),
+    )
+    assert repeated.repeated_without_new_evidence is True
+    assert repeated.recently_saturated is True
+    assert expected_learning_value(repeated) == (
+        "low",
+        ("REPEATED_WITHOUT_NEW_EVIDENCE",),
+    )
+    evaluated = evaluate((repeated,), None).candidates[0]
+    elv_facts = dict(evaluated.expected_learning_value_facts)
+    assert elv_facts["repeatedWithoutNewEvidence"] is True
+    assert elv_facts["recentlySaturated"] is True
+    assert elv_facts["daysSinceMeaningfulActivity"] == 2
+    assert elv_facts["exposureDays42"] == 3
+    assert elv_facts["recentSaturationMaximumDays"] == 2
+    assert elv_facts["recentSaturationMinimumExposureDays"] == 3
+    assert (
+        _supplies_demonstration_mode("curriculum_unit", "independent_performance", ("guided",))
+        is False
+    )
     supporting_gate = replace(
         gate,
         predicates=(replace(gate.predicates[0], requirement_type="supporting"),),
@@ -1259,13 +1315,51 @@ def test_candidate_builder_covers_all_eight_contract_types() -> None:
     unblock = next(item for item in generated if item.candidate_type == "unblock_task")
     assert unblock.blocker_reference_id == "blocker-event"
     assert unblock.unblock_action_available is True
+    legacy_candidates = registered_candidate_builder(LEGACY_POLICY_REGISTRY_VERSION)(
+        snapshot,
+        profile,
+        curriculum,
+        availability,
+        projects,
+        graph,
+        (("curriculum_unit", units[0].unit_definition_id, "moderate"),),
+    )
+    legacy_candidate_hash = content_hash([asdict(item) for item in legacy_candidates])
+    legacy_output = evaluate_registered(LEGACY_POLICY_REGISTRY_VERSION, legacy_candidates, None)
+    assert legacy_candidate_hash == (
+        "1debb1a61402e327da3600adffe4611db5898945fdbd533613ee74c4357f0977"
+    )
+    assert legacy_output.output_hash == (
+        "f4143b7a4e5b39b85684a02064444ff9ad06134a2184bd8d0ca9b66cb8a6483f"
+    )
 
 
 def test_policy_registry_dispatch_is_explicit_copy_safe_and_version_pinned(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     bundle = registered_policy_bundle(POLICY_REGISTRY_VERSION)
-    assert bundle["candidate"] == "recommendation-candidate-policy/v1"
+    assert bundle["candidate"] == "recommendation-candidate-policy/v2"
+    assert bundle["portfolio"] == "recommendation-portfolio-policy/v2"
+    assert bundle["reason"] == "recommendation-reason-policy/v2"
+    legacy_bundle = registered_policy_bundle(LEGACY_POLICY_REGISTRY_VERSION)
+    assert legacy_bundle["algorithm"] == "recommendation-algorithm/v2.0"
+    assert legacy_bundle["candidate"] == "recommendation-candidate-policy/v1"
+    assert legacy_bundle["portfolio"] == "recommendation-portfolio-policy/v1"
+    assert legacy_bundle["reason"] == "recommendation-reason-policy/v1"
+    current_output = evaluate_registered(
+        POLICY_REGISTRY_VERSION, (candidate("registered-current"),), None
+    )
+    legacy_output = evaluate_registered(
+        LEGACY_POLICY_REGISTRY_VERSION, (candidate("registered-legacy"),), None
+    )
+    assert {item.policy_version for item in current_output.reasons} == {
+        "recommendation-reason-policy/v2"
+    }
+    assert {item.policy_version for item in legacy_output.reasons} == {
+        "recommendation-reason-policy/v1"
+    }
+    assert dict(current_output.decisions[0].decisive_facts)["usefulness"] is True
+    assert "usefulness" not in dict(legacy_output.decisions[0].decisive_facts)
     bundle["algorithm"] = "tampered"
     assert registered_policy_bundle(POLICY_REGISTRY_VERSION)["algorithm"] != "tampered"
     assert evaluate_registered(POLICY_REGISTRY_VERSION, (candidate("registered"),), None)
@@ -1651,7 +1745,8 @@ def persist_fixture_recommendations(
         snapshot=load_public_analysis_snapshot(db, analysis_snapshot_id),
         frozen_input=frozen_input,
         candidates=tuple(
-            candidate_from_payload(item) for item in frozen_input["candidates"]  # type: ignore[union-attr]
+            candidate_from_payload(item)
+            for item in frozen_input["candidates"]  # type: ignore[union-attr]
         ),
     )
 
@@ -1884,7 +1979,7 @@ def test_failed_run_persists_lineage_only_and_is_portable(db: Session) -> None:
     )
     validate_domain_integrity(db.connection())
     payload = _portable_payload(db)
-    tables, _summary = _validate_portable_payload(payload, "recommendation-failed-v8", 8)
+    tables, _summary = _validate_portable_payload(payload, "recommendation-failed-v8", 9)
     portable = next(row for row in tables["recommendation_v2_runs"] if row["id"] == failed.id)
     assert portable["status"] == "failed"
     assert portable["output_hash"] is None
@@ -1951,9 +2046,7 @@ async def test_recommendation_history_is_portable_tamper_evident_and_not_backfil
         now_ms=now + 3,
     )
     replacement_suggestion = db.scalar(
-        select(TodaySuggestion).where(
-            TodaySuggestion.generation_id == replacement_generation.id
-        )
+        select(TodaySuggestion).where(TodaySuggestion.generation_id == replacement_generation.id)
     )
     assert replacement_suggestion is not None
     db.connection().execute(
@@ -1991,7 +2084,7 @@ async def test_recommendation_history_is_portable_tamper_evident_and_not_backfil
     db.commit()
     db.expire_all()
     payload = _portable_payload(db)
-    tables, _summary = _validate_portable_payload(payload, "recommendation-v8", 8)
+    tables, _summary = _validate_portable_payload(payload, "recommendation-v8", 9)
     assert len(tables["recommendation_v2_runs"]) == 4
     assert len(tables["recommendation_v2_candidates"]) == 4
     assert len(tables["today_generations"]) == 2
@@ -2000,8 +2093,7 @@ async def test_recommendation_history_is_portable_tamper_evident_and_not_backfil
     assert len(tables["suggestion_activity_relations"]) == 1
     assert len(tables["suggestion_activity_relation_corrections"]) == 1
     assert any(
-        row["replaces_suggestion_id"] == suggestion.id
-        for row in tables["today_suggestions"]
+        row["replaces_suggestion_id"] == suggestion.id for row in tables["today_suggestions"]
     )
     original_today_tables = {
         name: sorted(deepcopy(tables[name]), key=lambda row: row["id"])
@@ -2011,7 +2103,7 @@ async def test_recommendation_history_is_portable_tamper_evident_and_not_backfil
     tampered = deepcopy(payload)
     tampered["tables"]["recommendation_v2_score_components"][0]["value"] += 1
     with pytest.raises(AppError, match="Recommendation V2 immutable history"):
-        _validate_portable_payload(tampered, "recommendation-v8-tampered", 8)
+        _validate_portable_payload(tampered, "recommendation-v8-tampered", 9)
 
     coherently_rehashed = deepcopy(tampered)
     history = {
@@ -2024,7 +2116,7 @@ async def test_recommendation_history_is_portable_tamper_evident_and_not_backfil
         {key: value for key, value in checkpoint.items() if key != "checkpointHash"}
     )
     with pytest.raises(AppError, match="persisted audit differs"):
-        _validate_portable_payload(coherently_rehashed, "recommendation-v8-rehashed", 8)
+        _validate_portable_payload(coherently_rehashed, "recommendation-v8-rehashed", 9)
 
     payload["tables"]["recommendation_v2_runs"].reverse()
     _apply_portable_restore(
@@ -2032,7 +2124,7 @@ async def test_recommendation_history_is_portable_tamper_evident_and_not_backfil
         payload,
         True,
         package_id="recommendation-v8-restore",
-        schema_version=8,
+        schema_version=9,
     )
     db.commit()
     restored = db.get(RecommendationV2Run, original.id)
@@ -2052,9 +2144,12 @@ async def test_recommendation_history_is_portable_tamper_evident_and_not_backfil
     v6["manifest"] = PORTABLE_V6_MANIFEST
     v6.pop("recommendationV2HistoryCheckpoint")
     v6.pop("todayV2CurrentCheckpoint")
+    v6.pop("authorityCheckpoint")
     for table_name in PORTABLE_V7_RECOMMENDATION_TABLES:
         v6["tables"].pop(table_name)
     for table_name in PORTABLE_V8_TODAY_TABLES:
+        v6["tables"].pop(table_name)
+    for table_name in PORTABLE_V9_AUTHORITY_TABLES:
         v6["tables"].pop(table_name)
     converted, summary = _validate_portable_payload(v6, "recommendation-v6-adapter", 6)
     assert all(converted[name] == [] for name in PORTABLE_V7_RECOMMENDATION_TABLES)

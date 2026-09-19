@@ -31,6 +31,7 @@ from app.portability.registry import (
     PORTABLE_V6_ANALYSIS_TABLES,
     PORTABLE_V7_RECOMMENDATION_TABLES,
     PORTABLE_V8_TODAY_TABLES,
+    PORTABLE_V9_AUTHORITY_TABLES,
 )
 from app.projects.contracts import ProjectVersionInput
 from app.projects.evidence_policy import derive_project_evidence_characteristics
@@ -433,9 +434,7 @@ async def test_project_lifecycle_blockers_evidence_and_capability_separation(
     assert len(candidates["build"]["evidence_opportunities"]) == 1
     assert candidates["build"]["evidence_opportunities"][0]["task_definition_id"] is not None
     assert (
-        candidates["build"]["evidence_opportunities"][0][
-            "project_criterion_definition_id"
-        ]
+        candidates["build"]["evidence_opportunities"][0]["project_criterion_definition_id"]
         is not None
     )
     assert candidates["release"]["evidence_opportunities"] == []
@@ -812,7 +811,7 @@ async def test_project_lifecycle_blockers_evidence_and_capability_separation(
     _validate_portable_payload(
         selective.json()["content"]["payload"],
         "selective-project-evidence",
-        schema_version=8,
+        schema_version=9,
     )
     tampered_actuality = deepcopy(selective.json()["content"]["payload"])
     project_evidence = next(
@@ -828,7 +827,7 @@ async def test_project_lifecycle_blockers_evidence_and_capability_separation(
     project_evidence["strength"] = "moderate"
     with pytest.raises(AppError, match="derived characteristics"):
         _validate_portable_payload(
-            tampered_actuality, "tampered-project-actuality", schema_version=8
+            tampered_actuality, "tampered-project-actuality", schema_version=9
         )
     malformed_characteristics = deepcopy(selective.json()["content"]["payload"])
     malformed_evidence = next(
@@ -843,7 +842,7 @@ async def test_project_lifecycle_blockers_evidence_and_capability_separation(
     )
     with pytest.raises(AppError, match="derived characteristics"):
         _validate_portable_payload(
-            malformed_characteristics, "malformed-project-characteristics", schema_version=8
+            malformed_characteristics, "malformed-project-characteristics", schema_version=9
         )
     project_row = db.get(Project, project["id"])
     assert project_row is not None
@@ -1077,7 +1076,7 @@ async def test_project_cutoff_corrections_idempotency_and_portable_v4(
     selective_scope = selective_package["payload"]["portableScope"]
     assert replacement_project.json()["id"] in selective_scope["closureAddedProjectIds"]
     _validate_portable_payload(
-        selective_package["payload"], "cross-project-closure", schema_version=8
+        selective_package["payload"], "cross-project-closure", schema_version=9
     )
 
     exported = await client.post(
@@ -1087,7 +1086,7 @@ async def test_project_cutoff_corrections_idempotency_and_portable_v4(
     )
     assert exported.status_code == 200, exported.text
     package = exported.json()["content"]
-    assert package["schemaVersion"] == 8
+    assert package["schemaVersion"] == 9
     checkpoint = package["payload"]["projectCatalogCheckpoint"]
     assert checkpoint["cutoffSemantics"] == "exclusive"
     assert checkpoint["policyVersion"] == "project-availability-policy/v1"
@@ -1111,20 +1110,20 @@ async def test_project_cutoff_corrections_idempotency_and_portable_v4(
     criterion_row["evaluation_policy_version"] = "project-criterion-policy/unsupported"
     with pytest.raises(AppError, match="unsupported evaluation policy"):
         _validate_portable_payload(
-            unsupported_policy, "unsupported-project-criterion-policy", schema_version=8
+            unsupported_policy, "unsupported-project-criterion-policy", schema_version=9
         )
 
     reversed_self_references = deepcopy(package["payload"])
     reversed_self_references["tables"]["project_events"].reverse()
     _validate_portable_payload(
-        reversed_self_references, "reversed-project-self-references", schema_version=8
+        reversed_self_references, "reversed-project-self-references", schema_version=9
     )
 
     tampered_definition = deepcopy(package["payload"])
     tampered_definition["tables"]["project_task_definitions"][0]["title"] = "Tampered"
     with pytest.raises(AppError, match="definition envelope"):
         _validate_portable_payload(
-            tampered_definition, "tampered-project-definition", schema_version=8
+            tampered_definition, "tampered-project-definition", schema_version=9
         )
 
     tampered = deepcopy(package["payload"])
@@ -1135,7 +1134,7 @@ async def test_project_cutoff_corrections_idempotency_and_portable_v4(
     )
     before = deepcopy(_portable_payload(db)["tables"])
     with pytest.raises(AppError, match="rebuilt Project catalog"):
-        _apply_portable_restore(db, tampered, True, package_id="tampered-project", schema_version=8)
+        _apply_portable_restore(db, tampered, True, package_id="tampered-project", schema_version=9)
     db.rollback()
     db.expire_all()
     assert _portable_payload(db)["tables"] == before
@@ -1249,6 +1248,7 @@ def test_v3_to_v4_adapter_is_empty_and_project_dependencies_are_public(db: Sessi
     payload.pop("analysisV3CurrentCheckpoint")
     payload.pop("recommendationV2HistoryCheckpoint")
     payload.pop("todayV2CurrentCheckpoint")
+    payload.pop("authorityCheckpoint")
     payload.pop("portableScope")
     for table_name in PORTABLE_V4_PROJECT_TABLES:
         payload["tables"].pop(table_name)
@@ -1259,6 +1259,8 @@ def test_v3_to_v4_adapter_is_empty_and_project_dependencies_are_public(db: Sessi
     for table_name in PORTABLE_V7_RECOMMENDATION_TABLES:
         payload["tables"].pop(table_name)
     for table_name in PORTABLE_V8_TODAY_TABLES:
+        payload["tables"].pop(table_name)
+    for table_name in PORTABLE_V9_AUTHORITY_TABLES:
         payload["tables"].pop(table_name)
     first, summary = _validate_portable_payload(payload, "v3-project-adapter", schema_version=3)
     second, _ = _validate_portable_payload(payload, "v3-project-adapter", schema_version=3)

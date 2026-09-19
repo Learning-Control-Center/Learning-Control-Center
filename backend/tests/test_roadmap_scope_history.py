@@ -19,6 +19,7 @@ from app.portability.registry import (
     PORTABLE_V6_ANALYSIS_TABLES,
     PORTABLE_V7_RECOMMENDATION_TABLES,
     PORTABLE_V8_TODAY_TABLES,
+    PORTABLE_V9_AUTHORITY_TABLES,
 )
 from httpx import AsyncClient
 from sqlalchemy import inspect, select, text
@@ -156,7 +157,7 @@ async def test_new_portable_backup_round_trips_scope_history_and_preserves_auth(
     assert restored_events[-1]["event_sequence"] == len(expected_events) + 1
     assert restored_events[-1]["phase_id"] == phase_two_id
     round_trip = await _portable_export(client, csrf)
-    assert round_trip["schemaVersion"] == 8
+    assert round_trip["schemaVersion"] == 9
     assert round_trip["payload"]["tables"]["roadmap_scope_events"] == restored_events
 
 
@@ -165,8 +166,22 @@ async def test_legacy_portable_backup_gets_only_deterministic_current_scope_base
 ) -> None:
     client, csrf, _roadmap = configured_client
     package = await _portable_export(client, csrf)
+    current_state = next(
+        row
+        for row in package["payload"]["tables"]["legacy_roadmap_active_states"]
+        if row["is_current"]
+    )
     current_roadmap = next(
-        row for row in package["payload"]["tables"]["roadmaps"] if row["is_current"]
+        row
+        for row in package["payload"]["tables"]["roadmaps"]
+        if row["id"] == current_state["roadmap_id"]
+    )
+    current_roadmap.update(
+        {
+            "is_current": True,
+            "active_version_id": current_state["active_version_id"],
+            "current_phase_id": current_state["current_phase_id"],
+        }
     )
     package["payload"]["tables"].pop("roadmap_scope_events")
     for table_name in PORTABLE_V2_FOUNDATION_TABLES:
@@ -183,12 +198,15 @@ async def test_legacy_portable_backup_gets_only_deterministic_current_scope_base
         package["payload"]["tables"].pop(table_name)
     for table_name in PORTABLE_V8_TODAY_TABLES:
         package["payload"]["tables"].pop(table_name)
+    for table_name in PORTABLE_V9_AUTHORITY_TABLES:
+        package["payload"]["tables"].pop(table_name)
     package["payload"].pop("curriculumCatalogCheckpoint")
     package["payload"].pop("projectCatalogCheckpoint")
     package["payload"].pop("roadmapProjectionCheckpoint")
     package["payload"].pop("analysisV3CurrentCheckpoint")
     package["payload"].pop("recommendationV2HistoryCheckpoint")
     package["payload"].pop("todayV2CurrentCheckpoint")
+    package["payload"].pop("authorityCheckpoint")
     package["payload"].pop("portableScope")
     package["payload"].pop("manifest")
     package["schemaVersion"] = 1

@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth import AuthContext, get_auth_context, require_csrf
+from app.authority.service import require_legacy_roadmap_writable
 from app.compatibility.v1.roadmap_active_state import (
     current_legacy_roadmap,
     synchronize_legacy_roadmap_state,
@@ -539,6 +540,7 @@ async def create_roadmap(
     _auth: AuthContext = Depends(require_csrf),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    require_legacy_roadmap_writable(db)
     roadmap = apply_roadmap_payload(db, payload)
     db.commit()
     return serialize_current_roadmap(db, roadmap)
@@ -550,6 +552,7 @@ async def set_current_phase(
     _auth: AuthContext = Depends(require_csrf),
     db: Session = Depends(get_db),
 ) -> dict[str, str]:
+    require_legacy_roadmap_writable(db)
     roadmap = current_legacy_roadmap(db)
     phase = db.get(Phase, phase_id)
     if (
@@ -588,6 +591,7 @@ async def set_status(
     _auth: AuthContext = Depends(require_csrf),
     db: Session = Depends(get_db),
 ) -> dict[str, str]:
+    require_legacy_roadmap_writable(db)
     if payload.status == "verified":
         raise AppError(
             422,
@@ -612,6 +616,7 @@ async def set_exit_criterion_state(
     _auth: AuthContext = Depends(require_csrf),
     db: Session = Depends(get_db),
 ) -> dict[str, str]:
+    require_legacy_roadmap_writable(db)
     criterion = db.get(ExitCriterionIdentity, criterion_identity_id)
     if criterion is None:
         raise AppError(404, "EXIT_CRITERION_NOT_FOUND", "The exit criterion does not exist.")
@@ -687,6 +692,7 @@ async def set_position(
     _auth: AuthContext = Depends(require_csrf),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    require_legacy_roadmap_writable(db)
     definition = db.get(CompetencyDefinition, definition_id)
     if definition is None:
         raise AppError(404, "COMPETENCY_NOT_FOUND", "The competency does not exist.")
@@ -710,6 +716,7 @@ async def reset_layout_positions(
     sessions, verification records, current phase, and definitions of any
     other (inactive) roadmap version are never modified.
     """
+    require_legacy_roadmap_writable(db)
     roadmap = current_legacy_roadmap(db)
     if roadmap is None or roadmap.active_version_id is None:
         raise AppError(409, "ROADMAP_STATE_INVALID", "The current roadmap has no active version.")

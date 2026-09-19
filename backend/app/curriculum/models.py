@@ -402,3 +402,4 @@ for _immutable_model in (
     ActivityCurriculumLinkCorrection,
 ):
     event.listen(_immutable_model, "before_update", _reject_curriculum_history_mutation)
+    event.listen(_immutable_model, "before_delete", _reject_curriculum_history_mutation)

@@ -47,6 +47,7 @@ from app.models import (
     CapabilityScaleLevel,
     CapabilityScaleVersion,
     CriterionDefinition,
+    ProjectionInvalidation,
     SemanticCompetencyDefinition,
     SemanticDefinitionDimension,
 )
@@ -63,6 +64,70 @@ CURRICULUM_SCHEMA_VERSION = "curriculum-schema/v1"
 CURRICULUM_REQUIREMENT_POLICY = "curriculum-requirement-policy/v1"
 CURRICULUM_OPPORTUNITY_POLICY = "curriculum-evidence-opportunity-policy/v1"
 CURRICULUM_AVAILABILITY_POLICY = "curriculum-availability-policy/v1"
+
+
+def link_actual_activity_to_unit(
+    db: Session,
+    *,
+    activity_id: str,
+    learning_unit_definition_id: str,
+    provenance: str,
+    idempotency_key: str,
+    created_at: int,
+) -> ActivityCurriculumUnitLink:
+    """Create a transaction-aware canonical Activity-to-Curriculum attribution."""
+    existing = db.scalar(
+        select(ActivityCurriculumUnitLink).where(
+            ActivityCurriculumUnitLink.idempotency_key == idempotency_key
+        )
+    )
+    if existing is not None:
+        if (
+            existing.activity_id == activity_id
+            and existing.learning_unit_definition_id == learning_unit_definition_id
+            and existing.provenance == provenance
+        ):
+            return existing
+        raise AppError(409, "IDEMPOTENCY_CONFLICT", "The idempotency key was already used.")
+    if (
+        activity_actuality_as_of(
+            db,
+            activity_id=activity_id,
+            exclusive_cutoff_at=created_at + 1,
+        )
+        is None
+    ):
+        raise AppError(404, "ACTIVITY_NOT_FOUND", "The Activity does not exist.")
+    unit = db.get(LearningUnitDefinition, learning_unit_definition_id)
+    if unit is None:
+        raise AppError(404, "LEARNING_UNIT_NOT_FOUND", "The learning unit does not exist.")
+    link = ActivityCurriculumUnitLink(
+        activity_id=activity_id,
+        learning_unit_definition_id=learning_unit_definition_id,
+        provenance=provenance,
+        idempotency_key=idempotency_key,
+        created_at=created_at,
+    )
+    db.add(link)
+    db.flush()
+    for projection_kind, policy in (
+        ("curriculum_availability", CURRICULUM_AVAILABILITY_POLICY),
+        ("roadmap_projection_v2", "roadmap-projection/v2.0"),
+        ("analysis", "analysis-policy/v3.0"),
+    ):
+        db.add(
+            ProjectionInvalidation(
+                projection_kind=projection_kind,
+                subject_type="curriculum_version",
+                subject_id=unit.curriculum_version_id,
+                source_fact_id=link.id,
+                target_policy_version=policy,
+                status="pending",
+                attempt_count=0,
+                requested_at=created_at,
+            )
+        )
+    return link
 
 
 def _unique(values: list[Any], label: str) -> None:

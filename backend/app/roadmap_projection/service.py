@@ -37,6 +37,7 @@ from app.roadmap_projection.models import (
     RoadmapProjectionPreference,
 )
 from app.time_utils import utc_now_ms
+from app.today.public import current_roadmap_overlay
 
 logger = logging.getLogger(__name__)
 
@@ -223,10 +224,12 @@ def build_projection(
     active_semantics = active_semantic_definition_ids_as_of(db, exclusive_cutoff_at=cutoff)
     targets = profile.targets
     target_by_identity: dict[str, ProfileTargetProjectionPublicDTO] = {}
+    competency_by_target_identity: dict[str, str] = {}
     domain_by_identity: dict[str, ProfileDomainPublicDTO] = {}
     for target in targets:
         competency_id = target.competency_identity_id
         target_by_identity[competency_id] = target
+        competency_by_target_identity[target.target_identity_id] = competency_id
         domain_by_identity[competency_id] = domains[target.profile_domain_id]
     node_ids = set(target_by_identity)
     definition_by_identity = dict(active_semantics)
@@ -293,6 +296,23 @@ def build_projection(
             node_id,
         ),
     )
+    today_overlay = current_roadmap_overlay(db, now_ms=cutoff) if use_current_presentation else None
+    today_competency_ids = (
+        {
+            item.competency_identity_id
+            for item in today_overlay.items
+            if item.competency_identity_id is not None
+        }
+        if today_overlay is not None
+        else set()
+    )
+    if today_overlay is not None:
+        today_competency_ids.update(
+            competency_by_target_identity[target_id]
+            for item in today_overlay.items
+            for target_id in item.target_identity_ids
+            if target_id in competency_by_target_identity
+        )
     nodes: list[dict[str, Any]] = []
     layer_counts: dict[tuple[int, int], int] = {}
     domain_stride = (max(depths.values(), default=0) + 2) * 300
@@ -351,7 +371,7 @@ def build_projection(
                 else canonical_position,
                 "positionSource": override.provenance if override else LAYOUT_POLICY,
                 "isCurrent": bool(node_target),
-                "isToday": False,
+                "isToday": competency_id in today_competency_ids,
             }
         )
     satisfaction = {
@@ -489,6 +509,14 @@ def build_projection(
             for item in projects.active_version_references
         ],
         "projectCatalogHash": _catalog_projection_hash(projects),
+        "todayOverlay": (
+            {
+                "inputHash": today_overlay.input_hash,
+                "items": [asdict(item) for item in today_overlay.items],
+            }
+            if today_overlay is not None
+            else {"mode": "excluded_historical"}
+        ),
         "presentationInputs": {
             "mode": "current" if use_current_presentation else "excluded_historical",
             "positionOverrides": [
@@ -713,4 +741,7 @@ def cached_projection(db: Session) -> dict[str, Any]:
         or output.get("sourceLineage") != stored_lineage
     ):
         return {**build_projection(db), "cacheState": "cache_integrity_bypassed"}
+    today_overlay = current_roadmap_overlay(db, now_ms=utc_now_ms() + 1)
+    if stored_lineage.get("todayOverlay", {}).get("inputHash") != today_overlay.input_hash:
+        return {**build_projection(db), "cacheState": "today_overlay_stale_bypassed"}
     return {**output, "outputHash": cache.output_hash, "rebuiltAt": cache.built_at}

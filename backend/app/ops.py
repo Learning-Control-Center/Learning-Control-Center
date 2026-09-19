@@ -31,13 +31,24 @@ def _expected_revision() -> str:
     return revision
 
 
+def _supported_restore_revisions() -> set[str]:
+    root = Path(__file__).resolve().parents[2]
+    config = Config(str(root / "alembic.ini"))
+    config.set_main_option("script_location", str(root / "backend" / "alembic"))
+    scripts = ScriptDirectory.from_config(config)
+    head = scripts.get_current_head()
+    if head is None:
+        raise RuntimeError("The migration graph has no current head.")
+    return {revision.revision for revision in scripts.iterate_revisions(head, "base")}
+
+
 def _validate_database(connection: sqlite3.Connection, *, require_current: bool = True) -> str:
     if connection.execute("PRAGMA integrity_check").fetchone() != ("ok",):
         raise RuntimeError("Database integrity validation failed.")
     if connection.execute("PRAGMA foreign_key_check").fetchall():
         raise RuntimeError("Database foreign-key validation failed.")
     revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
-    supported = {"0001_initial", "0002_roadmap_scope_events", _expected_revision()}
+    supported = _supported_restore_revisions()
     if revision is None or revision[0] not in supported:
         raise RuntimeError("Database schema revision is not supported by this application.")
     if require_current and revision != (_expected_revision(),):

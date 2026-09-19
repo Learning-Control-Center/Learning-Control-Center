@@ -85,6 +85,8 @@ class PublicRecommendationItemDTO:
     duration_preferred_ms: int | None
     duration_maximum_ms: int | None
     reasons: tuple[PublicRecommendationReasonDTO, ...]
+    target_identity_id: str | None = None
+    served_target_identity_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -96,9 +98,7 @@ class PublicRecommendationRunDTO:
     items: tuple[PublicRecommendationItemDTO, ...]
 
 
-def load_public_recommendation_run(
-    db: Session, run_id: str
-) -> PublicRecommendationRunDTO:
+def load_public_recommendation_run(db: Session, run_id: str) -> PublicRecommendationRunDTO:
     run = db.get(RecommendationV2Run, run_id)
     if run is None:
         raise AppError(404, "RECOMMENDATION_RUN_NOT_FOUND", "Recommendation run not found.")
@@ -150,6 +150,10 @@ def load_public_recommendation_run(
                         facts=freeze_public_json(json.loads(reason.explanation_facts_json)),
                     )
                     for reason in reasons
+                ),
+                target_identity_id=candidate.target_identity_id,
+                served_target_identity_ids=tuple(
+                    json.loads(candidate.served_target_identity_ids_json)
                 ),
             )
         )

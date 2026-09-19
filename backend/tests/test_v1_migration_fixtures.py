@@ -22,7 +22,7 @@ from app.compatibility.v1.evidence_backfill import build_evidence_backfill
 from app.config import get_settings
 from app.database import Base, create_database_engine
 from app.import_export import _validate_portable_payload
-from app.models import AnalysisRun, AnalysisSnapshot, LearningSession, RecommendationSnapshot
+from app.models import AnalysisRun, AnalysisSnapshot, LearningSession, RecommendationSnapshot, User
 from app.recommendation.v1_policy import evaluate
 from app.recommendations import today_recommendation
 from app.sessions import serialize_session
@@ -291,6 +291,15 @@ def test_populated_0002_upgrades_without_changing_v1_values(
             for table in tables
         }
         rows_before = {table: _table_rows(before, table, columns[table]) for table in tables}
+        roadmap_pointers_before = before.execute(
+            "SELECT id,active_version_id,current_phase_id,is_current FROM roadmaps ORDER BY id"
+        ).fetchall()
+        retained_roadmap_columns = [
+            column
+            for column in columns["roadmaps"]
+            if column not in {"is_current", "active_version_id", "current_phase_id"}
+        ]
+        retained_roadmap_rows_before = _table_rows(before, "roadmaps", retained_roadmap_columns)
     finally:
         before.close()
     command.upgrade(_config(target), "head")
@@ -298,7 +307,20 @@ def test_populated_0002_upgrades_without_changing_v1_values(
     after = sqlite3.connect(target)
     try:
         for table in tables:
-            assert _table_rows(after, table, columns[table]) == rows_before[table]
+            retained_columns = columns[table]
+            if table == "roadmaps":
+                retained_columns = retained_roadmap_columns
+                before_rows = retained_roadmap_rows_before
+            else:
+                before_rows = rows_before[table]
+            assert _table_rows(after, table, retained_columns) == before_rows
+        assert (
+            after.execute(
+                "SELECT roadmap_id,active_version_id,current_phase_id,is_current "
+                "FROM legacy_roadmap_active_states ORDER BY roadmap_id"
+            ).fetchall()
+            == roadmap_pointers_before
+        )
         assert after.execute("SELECT credential_generation FROM users").fetchone() == (1,)
         assert after.execute("SELECT credential_generation FROM auth_sessions").fetchone() == (1,)
         assert (
@@ -351,7 +373,7 @@ def test_migration_creates_verified_backup_before_mutation(
     manifest = json.loads(manifest_path.read_text())
     assert manifest["checksumSha256"] == backup_digest
     assert manifest["sourceRevision"] == "0002_roadmap_scope_events"
-    assert manifest["targetRevision"] == "0017_today_v2"
+    assert manifest["targetRevision"] == "0019_remove_legacy_roadmap_pointer_cycle"
     assert os.stat(manifest_path).st_mode & 0o777 == 0o600
     original = sqlite3.connect(FIXTURES / "populated-0002.sqlite3")
     copied = sqlite3.connect(backup)
@@ -407,13 +429,7 @@ def test_migrated_schema_matches_orm_and_only_known_cycle_is_accepted(tmp_path: 
         for item in captured
         if "Cannot correctly sort tables" in str(item.message)
     ]
-    assert len(cycle_warnings) >= 1
-    assert set(cycle_warnings) == {
-        'Cannot correctly sort tables; there are unresolvable cycles between tables "phases, '
-        'roadmap_versions, roadmaps", which is usually caused by mutually dependent foreign key '
-        "constraints.  Foreign key constraints involving these tables will not be considered; "
-        "this warning may raise an error in a future release."
-    }
+    assert cycle_warnings == []
     unexpected = [
         str(item.message)
         for item in captured
@@ -458,7 +474,7 @@ def test_partial_0003_is_refused_then_verified_v1_restore_can_upgrade(
     restored = sqlite3.connect(database_path)
     try:
         assert restored.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "0017_today_v2",
+            "0019_remove_legacy_roadmap_pointer_cycle",
         )
         assert restored.execute("SELECT credential_generation FROM users").fetchone() == (2,)
         assert restored.execute("SELECT revoked_at IS NOT NULL FROM auth_sessions").fetchone() == (
@@ -469,6 +485,48 @@ def test_partial_0003_is_refused_then_verified_v1_restore_can_upgrade(
     finally:
         restored.close()
     assert len(list(backup_directory.glob("lcc-pre-restore-*.sqlite3"))) == 1
+
+
+@pytest.mark.parametrize("source_revision", ["0017_today_v2", "0018_v2_authority_state"])
+def test_verified_pre_cutover_physical_backup_restores_through_current_head(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source_revision: str
+) -> None:
+    source_path = tmp_path / f"source-{source_revision}.sqlite3"
+    destination_path = tmp_path / "destination.sqlite3"
+    backup_directory = tmp_path / "backups"
+    command.upgrade(_config(source_path), source_revision)
+    source_engine = create_database_engine(f"sqlite:///{source_path}")
+    with Session(source_engine) as source_db:
+        source_db.add(User(username="restored", password_hash="$argon2id$fixture"))
+        source_db.commit()
+    source_engine.dispose()
+    command.upgrade(_config(destination_path), "head")
+    destination_engine = create_database_engine(f"sqlite:///{destination_path}")
+    with Session(destination_engine) as destination_db:
+        destination_db.add(User(username="replaced", password_hash="$argon2id$fixture"))
+        destination_db.commit()
+    destination_engine.dispose()
+    database_url = f"sqlite:///{destination_path}"
+    monkeypatch.setenv("LCC_DATABASE_URL", database_url)
+    monkeypatch.setenv("LCC_BACKUP_DIRECTORY", str(backup_directory))
+    get_settings.cache_clear()
+    try:
+        assert ops.restore_database(source_path) == 0
+    finally:
+        get_settings.cache_clear()
+    restored = sqlite3.connect(destination_path)
+    try:
+        assert restored.execute("SELECT version_num FROM alembic_version").fetchone() == (
+            "0019_remove_legacy_roadmap_pointer_cycle",
+        )
+        assert restored.execute("SELECT username,credential_generation FROM users").fetchone() == (
+            "restored",
+            2,
+        )
+        assert restored.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert restored.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        restored.close()
 
 
 @pytest.mark.parametrize(
@@ -491,6 +549,78 @@ def test_partial_0005_is_refused(tmp_path: Path, partial_sql: str) -> None:
         connection.close()
     with pytest.raises(RuntimeError, match="ambiguously partial profile/competency migration"):
         database.run_migrations(f"sqlite:///{database_path}")
+
+
+@pytest.mark.parametrize(
+    ("revision", "partial_sql", "message"),
+    (
+        (
+            "0017_today_v2",
+            "CREATE TABLE learning_control_authority_events (id TEXT PRIMARY KEY)",
+            "partial authority-state migration",
+        ),
+        (
+            "0018_v2_authority_state",
+            "DROP TABLE learning_control_authority_state",
+            "partial authority-state migration",
+        ),
+        (
+            "0018_v2_authority_state",
+            "CREATE TABLE _alembic_tmp_roadmaps (id TEXT PRIMARY KEY)",
+            "partial legacy Roadmap pointer contraction",
+        ),
+    ),
+)
+def test_partial_cp7_migrations_are_refused(
+    tmp_path: Path, revision: str, partial_sql: str, message: str
+) -> None:
+    database_path = tmp_path / f"partial-{revision}.sqlite3"
+    command.upgrade(_config(database_path), revision)
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.execute(partial_sql)
+        connection.commit()
+    finally:
+        connection.close()
+    with pytest.raises(RuntimeError, match=message):
+        database.run_migrations(f"sqlite:///{database_path}")
+
+
+def test_cp7_empty_downgrade_reupgrade_and_populated_refusals(tmp_path: Path) -> None:
+    empty_path = tmp_path / "empty-cp7.sqlite3"
+    config = _config(empty_path)
+    command.upgrade(config, "head")
+    command.downgrade(config, "0017_today_v2")
+    command.upgrade(config, "head")
+    connection = sqlite3.connect(empty_path)
+    try:
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        connection.close()
+
+    populated_path = tmp_path / "populated-cp7.sqlite3"
+    shutil.copyfile(FIXTURES / "populated-0002.sqlite3", populated_path)
+    populated_config = _config(populated_path)
+    command.upgrade(populated_config, "head")
+    with pytest.raises(RuntimeError, match="Populated legacy Roadmap pointer contraction"):
+        command.downgrade(populated_config, "0018_v2_authority_state")
+
+    activated_path = tmp_path / "activated-cp7.sqlite3"
+    activated_config = _config(activated_path)
+    command.upgrade(activated_config, "0018_v2_authority_state")
+    activated = sqlite3.connect(activated_path)
+    try:
+        activated.execute(
+            "UPDATE learning_control_authority_state SET "
+            "canonical_learning_authority='v2',roadmap_presentation='v2',"
+            "recommendation_presentation='v2',today_presentation='v2' WHERE id=1"
+        )
+        activated.commit()
+    finally:
+        activated.close()
+    with pytest.raises(RuntimeError, match="Authority history is populated"):
+        command.downgrade(activated_config, "0017_today_v2")
 
 
 @pytest.mark.parametrize(

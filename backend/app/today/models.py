@@ -24,9 +24,7 @@ class TodayGeneration(Base):
             "explicit_generation_sequence",
             name="uq_today_generation_key",
         ),
-        CheckConstraint(
-            "explicit_generation_sequence > 0", name="ck_today_generation_sequence"
-        ),
+        CheckConstraint("explicit_generation_sequence > 0", name="ck_today_generation_sequence"),
         CheckConstraint(
             "length(request_hash) = 64 AND length(output_hash) = 64",
             name="ck_today_generation_hashes",
@@ -63,9 +61,7 @@ class TodaySuggestion(Base):
             "portfolio_role IN ('primary','complementary','maintenance')",
             name="ck_today_suggestion_portfolio_role",
         ),
-        CheckConstraint(
-            "expires_at > created_at", name="ck_today_suggestion_expiration_order"
-        ),
+        CheckConstraint("expires_at > created_at", name="ck_today_suggestion_expiration_order"),
         CheckConstraint(
             "advisory_duration_ms IS NULL OR advisory_duration_ms > 0",
             name="ck_today_suggestion_advisory_duration",
@@ -133,9 +129,7 @@ class TodayInteraction(Base):
             "'partially_completed','skipped','replaced','expired')",
             name="ck_today_interaction_type",
         ),
-        CheckConstraint(
-            "actor IN ('user','system')", name="ck_today_interaction_actor"
-        ),
+        CheckConstraint("actor IN ('user','system')", name="ck_today_interaction_actor"),
         CheckConstraint("length(payload_hash) = 64", name="ck_today_interaction_payload_hash"),
         CheckConstraint(
             "(interaction_type IN ('started','completed','partially_completed') "
@@ -187,9 +181,7 @@ class SuggestionActivityRelation(Base):
             "relation_type IN ('matched','partially_matched','replaced')",
             name="ck_suggestion_activity_relation_type",
         ),
-        CheckConstraint(
-            "actor IN ('user','system')", name="ck_suggestion_activity_relation_actor"
-        ),
+        CheckConstraint("actor IN ('user','system')", name="ck_suggestion_activity_relation_actor"),
         CheckConstraint("length(payload_hash) = 64", name="ck_suggestion_relation_payload_hash"),
         Index("ix_suggestion_relation_suggestion", "suggestion_id", "created_at"),
         Index("ix_suggestion_relation_activity", "activity_id", "created_at"),
@@ -218,9 +210,7 @@ class TodayInteractionCorrection(Base):
         UniqueConstraint("idempotency_key", name="uq_today_interaction_correction_key"),
         CheckConstraint("length(payload_hash) = 64", name="ck_today_correction_payload_hash"),
         CheckConstraint("length(reason) > 0", name="ck_today_correction_reason"),
-        CheckConstraint(
-            "actor IN ('user','system')", name="ck_today_interaction_correction_actor"
-        ),
+        CheckConstraint("actor IN ('user','system')", name="ck_today_interaction_correction_actor"),
         CheckConstraint(
             "resulting_status IN ('suggested','viewed','accepted','started','completed',"
             "'partially_completed','skipped','replaced','expired')",

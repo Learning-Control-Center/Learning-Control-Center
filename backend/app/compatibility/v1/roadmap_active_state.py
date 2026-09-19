@@ -45,17 +45,7 @@ def synchronize_legacy_roadmap_state(db: Session, roadmap: Roadmap) -> LegacyRoa
 
 def assert_legacy_roadmap_state_parity(db: Session, roadmap: Roadmap) -> LegacyRoadmapActiveState:
     state = db.get(LegacyRoadmapActiveState, roadmap.id)
-    if state is None or (
-        state.active_version_id,
-        state.current_phase_id,
-        state.is_current,
-        state.state_hash,
-    ) != (
-        roadmap.active_version_id,
-        roadmap.current_phase_id,
-        roadmap.is_current,
-        legacy_pointer_hash(roadmap),
-    ):
+    if state is None or state.state_hash != legacy_pointer_hash(roadmap):
         raise AppError(
             409,
             "LEGACY_ROADMAP_ACTIVE_STATE_MISMATCH",
@@ -69,17 +59,12 @@ def current_legacy_roadmap(db: Session) -> Roadmap | None:
         select(LegacyRoadmapActiveState).where(LegacyRoadmapActiveState.is_current.is_(True))
     )
     if state is None:
-        # Empty/pre-expand databases may legitimately have no roadmap.
-        roadmap = db.scalar(select(Roadmap).where(Roadmap.is_current.is_(True)))
-        if roadmap is not None:
-            raise AppError(
-                409,
-                "LEGACY_ROADMAP_ACTIVE_STATE_MISSING",
-                "The legacy Roadmap active-state adapter is missing.",
-            )
         return None
     roadmap = db.get(Roadmap, state.roadmap_id)
     if roadmap is None:
         raise AppError(409, "ROADMAP_STATE_INVALID", "The active Roadmap is missing.")
+    roadmap.active_version_id = state.active_version_id
+    roadmap.current_phase_id = state.current_phase_id
+    roadmap.is_current = state.is_current
     assert_legacy_roadmap_state_parity(db, roadmap)
     return roadmap

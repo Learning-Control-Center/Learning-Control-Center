@@ -52,9 +52,7 @@ class RecommendationRunRequest(StrictModel):
 
     @model_validator(mode="after")
     def unique_context_cost_sources(self) -> RecommendationRunRequest:
-        source_keys = [
-            (item.source_type, item.source_entity_id) for item in self.context_costs
-        ]
+        source_keys = [(item.source_type, item.source_entity_id) for item in self.context_costs]
         if len(source_keys) != len(set(source_keys)):
             raise ValueError("context_costs must contain each source exactly once")
         return self

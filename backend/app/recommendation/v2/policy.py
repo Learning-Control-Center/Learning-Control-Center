@@ -5,7 +5,7 @@ from dataclasses import asdict, replace
 from typing import cast
 
 from app.determinism import content_hash
-from app.recommendation.v2.candidates import build_candidates
+from app.recommendation.v2.candidates import build_candidates, build_candidates_v1
 from app.recommendation.v2.contracts import (
     CandidateInputDTO,
     EligibilityRuleResultDTO,
@@ -17,16 +17,19 @@ from app.recommendation.v2.contracts import (
     SelectionDecisionDTO,
 )
 
-RECOMMENDATION_ALGORITHM_VERSION = "recommendation-algorithm/v2.0"
+LEGACY_RECOMMENDATION_ALGORITHM_VERSION = "recommendation-algorithm/v2.0"
+RECOMMENDATION_ALGORITHM_VERSION = "recommendation-algorithm/v2.1"
 APPLICATION_VERSION = "2.0.0"
 ELV_POLICY_VERSION = "expected-learning-value-policy/v1"
 SCORE_POLICY_VERSION = "recommendation-score-policy/v1"
 DURATION_POLICY_VERSION = "recommendation-duration-policy/v1"
 ELIGIBILITY_POLICY_VERSION = "recommendation-eligibility-policy/v1"
-PORTFOLIO_POLICY_VERSION = "recommendation-portfolio-policy/v1"
-REASON_POLICY_VERSION = "recommendation-reason-policy/v1"
-POLICY_REGISTRY_VERSION = "recommendation-policy-registry/v1"
-CANDIDATE_POLICY_VERSION = "recommendation-candidate-policy/v1"
+PORTFOLIO_POLICY_VERSION = "recommendation-portfolio-policy/v2"
+REASON_POLICY_VERSION = "recommendation-reason-policy/v2"
+POLICY_REGISTRY_VERSION = "recommendation-policy-registry/v2"
+CANDIDATE_POLICY_VERSION = "recommendation-candidate-policy/v2"
+LEGACY_POLICY_REGISTRY_VERSION = "recommendation-policy-registry/v1"
+OWNER_APPROVED_POLICY_REGISTRY_VERSION = "recommendation-policy-registry/v2"
 
 QUANTUM_MS = 300_000
 
@@ -83,6 +86,7 @@ _REASON_TITLES = {
     "SELECTED_COMPLEMENTARY": "Selected as Complementary",
     "SELECTED_MAINTENANCE": "Selected as Maintenance",
     "PORTFOLIO_NOT_SELECTED": "Not selected for this portfolio",
+    "NOT_USEFUL": "Not useful for the current learning state",
     "DURATION_UNKNOWN": "Advisory duration is unknown",
     "TARGET_PRIORITY": "Target priority",
     "PRIMARY_NEED": "Primary learning need",
@@ -417,12 +421,15 @@ def expected_learning_value(candidate: CandidateInputDTO) -> tuple[str, tuple[st
 
 
 def _elv_audit(
-    candidate: CandidateInputDTO, reasons: tuple[str, ...]
+    candidate: CandidateInputDTO,
+    reasons: tuple[str, ...],
+    *,
+    include_proxy_facts: bool,
 ) -> tuple[
     tuple[tuple[str, str | int | bool | None], ...],
     tuple[str, ...],
 ]:
-    facts = (
+    facts: tuple[tuple[str, str | int | bool | None], ...] = (
         ("primaryOutcomeKind", candidate.primary_outcome_kind),
         ("primaryOutcomeId", candidate.primary_outcome_id),
         ("targetPriority", candidate.target_priority),
@@ -437,6 +444,23 @@ def _elv_audit(
         ("supportsTransferTargetCount", len(candidate.supports_transfer_target_ids)),
         ("reasonCodes", ",".join(reasons)),
     )
+    if include_proxy_facts:
+        explanation = dict(candidate.explanation_facts)
+        facts += (
+            ("repeatedWithoutNewEvidence", candidate.repeated_without_new_evidence),
+            ("recentlySaturated", candidate.recently_saturated),
+            ("reviewDue", candidate.review_due),
+            ("daysSinceMeaningfulActivity", explanation.get("daysSinceMeaningfulActivity")),
+            ("exposureDays42", explanation.get("exposureDays42")),
+            (
+                "recentSaturationMaximumDays",
+                explanation.get("recentSaturationMaximumDays"),
+            ),
+            (
+                "recentSaturationMinimumExposureDays",
+                explanation.get("recentSaturationMinimumExposureDays"),
+            ),
+        )
     sources = tuple(
         sorted(
             {
@@ -661,6 +685,9 @@ def _duration_allocate(
 def _reason_records(
     evaluated: tuple[EvaluatedCandidateDTO, ...],
     decisions: tuple[SelectionDecisionDTO, ...],
+    *,
+    reason_policy_version: str,
+    deduplicate_reason_codes: bool,
 ) -> tuple[RecommendationReasonDTO, ...]:
     decisions_by_id = {item.candidate_stable_id: item for item in decisions}
     rows: list[RecommendationReasonDTO] = []
@@ -732,6 +759,15 @@ def _reason_records(
                     default_sources,
                 )
             )
+        if deduplicate_reason_codes:
+            seen_reason_codes: set[str] = set()
+            distinct_reason_items = []
+            for item in reason_items:
+                if item[0] in seen_reason_codes:
+                    continue
+                seen_reason_codes.add(item[0])
+                distinct_reason_items.append(item)
+            reason_items = distinct_reason_items
         for ordinal, (reason_code, contribution, facts, source_ids) in enumerate(reason_items):
             title = _REASON_TITLES.get(reason_code)
             if title is None:
@@ -750,17 +786,23 @@ def _reason_records(
                     facts,
                     contribution,
                     f"recommendation-reason/{reason_code.lower()}",
-                    REASON_POLICY_VERSION,
+                    reason_policy_version,
                     rendered,
                     source_ids,
-                    REASON_POLICY_VERSION,
+                    reason_policy_version,
                 )
             )
     return tuple(rows)
 
 
-def evaluate(
-    candidates: tuple[CandidateInputDTO, ...], available_time_ms: int | None
+def _evaluate(
+    candidates: tuple[CandidateInputDTO, ...],
+    available_time_ms: int | None,
+    *,
+    explicit_usefulness_decision: bool,
+    enhanced_elv_audit: bool,
+    reason_policy_version: str,
+    deduplicate_reason_codes: bool,
 ) -> RecommendationPolicyOutputDTO:
     evaluated: list[EvaluatedCandidateDTO] = []
     for candidate in sorted(candidates, key=lambda item: item.stable_tie_key):
@@ -773,7 +815,11 @@ def evaluate(
             )
             continue
         elv, elv_reasons = expected_learning_value(candidate)
-        elv_facts, elv_sources = _elv_audit(candidate, elv_reasons)
+        elv_facts, elv_sources = _elv_audit(
+            candidate,
+            elv_reasons,
+            include_proxy_facts=enhanced_elv_audit,
+        )
         components = score(candidate, elv)
         evaluated.append(
             EvaluatedCandidateDTO(
@@ -908,10 +954,30 @@ def evaluate(
                     (
                         ("portfolioRole", role_by_id[stable_id]),
                         ("rankOrdinal", item.rank_ordinal),
+                        *(((("usefulness", True)),) if explicit_usefulness_decision else ()),
                     ),
                 )
             )
         else:
+            if explicit_usefulness_decision and not item.candidate.usefulness:
+                decisions.append(
+                    SelectionDecisionDTO(
+                        stable_id,
+                        "not_selected",
+                        None,
+                        "NOT_USEFUL",
+                        None,
+                        None,
+                        None,
+                        None,
+                        (
+                            ("selectionConstraint", "usefulness"),
+                            ("usefulness", False),
+                            ("primaryOutcomeId", item.candidate.primary_outcome_id),
+                        ),
+                    )
+                )
+                continue
             was_provisional = stable_id in provisional_by_id
             displaced_by = displacement_for(item, was_provisional)
             decisions.append(
@@ -931,12 +997,18 @@ def evaluate(
                         ),
                         ("displacedByCandidateStableId", displaced_by),
                         ("primaryOutcomeId", item.candidate.primary_outcome_id),
+                        *(((("usefulness", True)),) if explicit_usefulness_decision else ()),
                     ),
                 )
             )
     evaluated_output = tuple(evaluated)
     decision_output = tuple(decisions)
-    reasons = _reason_records(evaluated_output, decision_output)
+    reasons = _reason_records(
+        evaluated_output,
+        decision_output,
+        reason_policy_version=reason_policy_version,
+        deduplicate_reason_codes=deduplicate_reason_codes,
+    )
     evaluated_by_id = {item.candidate.stable_id: item for item in evaluated_output}
     recommendations = tuple(
         SelectedRecommendationDTO(
@@ -972,7 +1044,52 @@ def evaluate(
     )
 
 
+def evaluate(
+    candidates: tuple[CandidateInputDTO, ...], available_time_ms: int | None
+) -> RecommendationPolicyOutputDTO:
+    return _evaluate(
+        candidates,
+        available_time_ms,
+        explicit_usefulness_decision=True,
+        enhanced_elv_audit=True,
+        reason_policy_version=REASON_POLICY_VERSION,
+        deduplicate_reason_codes=True,
+    )
+
+
+def evaluate_v1(
+    candidates: tuple[CandidateInputDTO, ...], available_time_ms: int | None
+) -> RecommendationPolicyOutputDTO:
+    """Replay-only evaluator retained for registry/v1 historical output identity."""
+    return _evaluate(
+        candidates,
+        available_time_ms,
+        explicit_usefulness_decision=False,
+        enhanced_elv_audit=False,
+        reason_policy_version="recommendation-reason-policy/v1",
+        deduplicate_reason_codes=False,
+    )
+
+
+_LEGACY_POLICY_BUNDLE = {
+    "application": APPLICATION_VERSION,
+    "algorithm": LEGACY_RECOMMENDATION_ALGORITHM_VERSION,
+    "candidate": "recommendation-candidate-policy/v1",
+    "eligibility": ELIGIBILITY_POLICY_VERSION,
+    "expectedLearningValue": ELV_POLICY_VERSION,
+    "score": SCORE_POLICY_VERSION,
+    "duration": DURATION_POLICY_VERSION,
+    "portfolio": "recommendation-portfolio-policy/v1",
+    "reason": "recommendation-reason-policy/v1",
+    "registry": LEGACY_POLICY_REGISTRY_VERSION,
+}
+
 _REGISTERED_POLICIES = {
+    LEGACY_POLICY_REGISTRY_VERSION: (
+        _LEGACY_POLICY_BUNDLE,
+        evaluate_v1,
+        build_candidates_v1,
+    ),
     POLICY_REGISTRY_VERSION: (policy_bundle(), evaluate, build_candidates),
 }
 
