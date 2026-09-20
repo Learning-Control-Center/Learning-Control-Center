@@ -1,6 +1,13 @@
-# Phase 3 Product QA
+# Product quality assurance
 
-Macro Phase 3 prepares repeatable product-quality evidence. It does not perform or replace the separate Final Visual / Product QA screenshot campaign.
+The Final Visual / Product QA campaign is complete for the recorded candidate. The campaign used
+the production frontend build and disposable realistic fixture, captured and reviewed the declared
+visual states, corrected the accepted product issues, and repeated the affected review. The final
+independent critic reported no P0 or P1 findings.
+
+That completed visual/product review is not a claim of real-device or assistive-technology
+certification. The automated browser evidence and the real-platform ledger remain separate: rows
+that were unavailable are still `Not executed`.
 
 ## Disposable realistic fixture
 
@@ -28,7 +35,7 @@ The checked-in evidence for the validated candidate is deliberately small and re
 
 - `frontend/qa/checkpoint6-release-evidence.json` binds the four-stage result to the exact source revision, candidate-runtime hash, production-build hash, fixture hash, browser versions, and performance artifact.
 - `frontend/qa/wcag-2.2-aa-evidence.json` maps the declared WCAG 2.2 A/AA scope to concrete automated, component, code-review, and product-review evidence.
-- `frontend/qa/roadmap-first-use-review.json` records the bounded first-use Roadmap comprehension review required by Phase 3. It is not the later screenshot campaign.
+- `frontend/qa/roadmap-first-use-review.json` records the bounded first-use Roadmap comprehension review.
 - `frontend/qa/platform-qa-ledger.json` separates executed engine automation from real platform/device/assistive-technology checks. Unavailable checks remain `Not executed`.
 
 The automated small-height check proves that a focused Activity input can be scrolled into the 568×320 viewport. It is only a precheck; it does not claim a real mobile virtual keyboard or safe-area pass.
@@ -72,8 +79,19 @@ Platform coverage required for final human/device validation:
 - Android: Chrome on a real touch-capable phone or tablet; TalkBack.
 - iOS/iPadOS: Safari on real iPhone and iPad-class devices; VoiceOver.
 
-Rows that cannot be exercised in the current environment remain `Not executed`. Phase 3 completion does not convert those rows to passes; they remain explicit work for the separate final human/device campaign.
+Rows that could not be exercised in the available environment remain `Not executed`. Completion of
+the screenshot-based product review does not convert those rows to passes; they remain explicit
+real-platform validation work.
 
-## Final Visual / Product QA handoff
+## Final Visual / Product QA result
 
-The later campaign must use a production build, the disposable fixture, the named manifest entries, and recorded fixture/build identity. It then captures screenshots, performs visual analysis, ranks fixes by severity, re-screenshots corrected states, and obtains an independent product review. None of those screenshot-adjudication steps are claimed by Macro Phase 3.
+The completed campaign used the named manifest entries at their declared viewports with the
+production build and disposable fixture. It performed screenshot-based visual analysis, ranked
+findings by severity, re-reviewed corrected states, and obtained an independent final critique. No
+P0 or P1 finding remained after that critique.
+
+The checked-in automated evidence remains the reproducible release gate. Screenshot adjudication
+was a human product review, while `platform-qa-ledger.json` is the authority for which named browser,
+operating-system, real-device, and screen-reader combinations were actually executed. In
+particular, Playwright WebKit is not Safari certification and touch-enabled Chromium is not Android
+or iOS certification.

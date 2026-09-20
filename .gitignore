@@ -2,6 +2,8 @@
 .env
 .env.*
 !.env.example
+/learning-control-center.env
+/deploy/learning-control-center.env
 *.pem
 *.key
 
@@ -23,9 +25,13 @@ dist/
 .vite/
 coverage/
 test-results/
+playwright-report/
+blob-report/
 *.tsbuildinfo
 frontend/vite.config.js
 frontend/vite.config.d.ts
+/frontend/qa/screenshots/
+/frontend/qa/artifacts/
 
 # Runtime data and operational backups
 *.db
@@ -41,16 +47,21 @@ frontend/vite.config.d.ts
 *.sqlite3-wal
 *.sqlite3-shm
 !backend/tests/fixtures/v1/*.sqlite3
+!backend/tests/fixtures/v2/*.sqlite3
 backups/
 
 # Logs and temporary files
 *.log
+*.pid
 *.tmp
 tmp/
 .cache/
 
 # Local/private agent context
 memory-bank/
+.abacusai/
+.agents/
+.codex/
 
 # Editors and operating systems
 .idea/

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
-  "campaign": "LCC V2 Final Visual / Product QA",
-  "status": "Prepared; screenshot capture and adjudication are not part of Macro Phase 3",
+  "campaign": "LCC Final Visual / Product QA",
+  "status": "Completed; screenshot review and final independent critique reported no P0/P1 findings",
   "scenarioId": "roadmap-25",
   "setupProfile": "roadmap-25",
   "clock": "2026-09-19T10:00:00Z",

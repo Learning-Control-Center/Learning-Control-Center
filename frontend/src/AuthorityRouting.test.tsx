@@ -58,7 +58,8 @@ describe('learning-control authority routing', () => {
     for (const link of screen.getAllByRole('link', { name: 'Legacy V1 history' })) {
       expect(link).toHaveAttribute('href', '/insights/legacy')
     }
-    expect(screen.getByText('Center / V2')).toBeInTheDocument()
+    expect(screen.getAllByText('Learning Control Center')).not.toHaveLength(0)
+    expect(screen.queryByText('Center / V2')).not.toBeInTheDocument()
     await waitFor(() => expect(fetchMock).not.toHaveBeenCalledWith('/api/v1/recommendations/today', expect.anything()))
   })
 

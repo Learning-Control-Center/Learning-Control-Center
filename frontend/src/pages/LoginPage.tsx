@@ -32,7 +32,10 @@ export function LoginPage() {
       <section className="relative hidden overflow-hidden bg-ink p-12 text-white lg:flex lg:flex-col lg:justify-between">
         <div className="absolute -right-40 -top-40 size-[34rem] rounded-full border border-fern/20" />
         <div className="absolute -right-16 -top-16 size-[20rem] rounded-full border border-fern/30" />
-        <p className="font-mono text-xs uppercase tracking-[0.2em] text-fern">Learning-Control-Center</p>
+        <div className="flex items-center gap-3">
+          <img src="/logo.png" alt="" className="size-12 rounded-xl bg-white object-contain" aria-hidden="true" />
+          <p className="font-display text-lg font-semibold tracking-tight">Learning Control Center</p>
+        </div>
         <div className="relative max-w-2xl">
           <p className="mb-5 font-mono text-xs uppercase tracking-[0.2em] text-fern">Evidence over intention</p>
           <h1 className="font-display text-6xl font-semibold leading-[1.03] tracking-[-0.04em]">
@@ -51,6 +54,10 @@ export function LoginPage() {
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.28 }}
         >
+          <div className="mb-8 flex items-center gap-3 lg:hidden">
+            <img src="/logo.png" alt="" className="size-12 rounded-xl bg-white object-contain shadow-soft" aria-hidden="true" />
+            <p className="font-display font-semibold tracking-tight">Learning Control Center</p>
+          </div>
           <span className="mb-8 grid size-12 place-items-center rounded-2xl bg-moss text-white shadow-soft">
             <LockKeyhole className="size-5" />
           </span>

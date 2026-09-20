@@ -6,6 +6,8 @@ build-backend = "setuptools.build_meta"
 name = "learning-control-center"
 version = "1.0.0"
 description = "Single-user, self-hosted learning and discipline control system"
+readme = "README.md"
+license = "GPL-3.0-only"
 requires-python = ">=3.12"
 dependencies = [
   "alembic>=1.14,<2",

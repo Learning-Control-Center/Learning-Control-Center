@@ -7,7 +7,7 @@
   "productionBuildSha256": "6184fb8d6a9056a6485c263f427b2ee9ef748dae1a691fe79484183c8405fc7d",
   "fixture": "roadmap-25 / fb4bf5c2d234c4da585f727d9158fa45f01c1ab0a2f3102741bc63bb7c1de258 / UTC / 2026-09-19T10:00:00Z",
   "releaseEvidence": "frontend/qa/checkpoint6-release-evidence.json",
-  "manualChecklist": "docs/phase3-product-qa.md#real-platform-smoke-record",
+  "manualChecklist": "docs/PRODUCT_QA.md#real-platform-smoke-record",
   "automatedEvidence": [
     {
       "platform": "Linux 7.0.0-31-generic x86_64",

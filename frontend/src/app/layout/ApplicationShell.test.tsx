@@ -60,6 +60,9 @@ describe('application shell navigation and focus', () => {
   it('renders seven primary and two utility destinations with the current route marked', async () => {
     render(<ShellHarness />)
 
+    expect(screen.getAllByText('Learning Control Center')).not.toHaveLength(0)
+    expect(screen.queryByText(/Center \/ V2/)).not.toBeInTheDocument()
+    expect(document.querySelectorAll('img[src="/logo.png"]')).not.toHaveLength(0)
     const productNavigation = screen.getByRole('navigation', { name: 'Product navigation' })
     expect(within(productNavigation).getAllByRole('link').map((link) => link.textContent)).toEqual([
       'Today',

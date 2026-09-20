@@ -1,0 +1,14 @@
+* text=auto eol=lf
+
+*.sh text eol=lf
+scripts/lcc-admin text eol=lf
+*.service text eol=lf
+*.timer text eol=lf
+Caddyfile text eol=lf
+Caddyfile.* text eol=lf
+
+*.png binary
+*.ico binary
+*.db binary
+*.sqlite binary
+*.sqlite3 binary

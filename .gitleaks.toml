@@ -1,0 +1,39 @@
+title = "Learning Control Center secret scanning"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "FastAPI openapi_url configuration is not a credential"
+condition = "AND"
+regexTarget = "line"
+paths = ['''^backend/app/main\.py$''']
+regexes = ['''openapi_url=None if settings\.environment == "production"''']
+
+[[allowlists]]
+description = "Adjudicated synthetic Settings secret used only by clock tests"
+condition = "AND"
+regexTarget = "line"
+paths = ['''^backend/tests/test_process_clock\.py$''']
+regexes = ['''security_secret="A1b2C3d4E5f6G7h8J9k0LmnopQrstUVW"''']
+
+[[allowlists]]
+description = "Adjudicated synthetic Settings secret used only by release validation"
+condition = "AND"
+regexTarget = "line"
+paths = ['''^backend/tests/test_release_validation\.py$''']
+regexes = ['''"security_secret": "A1b2C3d4E5f6G7h8J9k0LmnopQrstUVW"''']
+
+[[allowlists]]
+description = "Adjudicated synthetic Settings secret used only by security tests"
+condition = "AND"
+regexTarget = "line"
+paths = ['''^backend/tests/test_security_foundation_v2\.py$''']
+regexes = ['''security_secret="Q7vN2xK9mR4pT8wY3cF6hJ1sD5gL0bZa"''']
+
+[[allowlists]]
+description = "Adjudicated synthetic browser-test secret"
+condition = "AND"
+regexTarget = "line"
+paths = ['''^scripts/run-production-e2e\.sh$''']
+regexes = ['''LCC_SECURITY_SECRET=Q7vN2xK9mR4pT8wY3cF6hJ1sD5gL0bZa''']
