@@ -38,7 +38,42 @@ caddy version
 sqlite3 --version
 ```
 
-## Prepare production configuration
+## Release-pinned bootstrap installation
+
+Published releases provide a deterministic archive and companion SHA-256 file. The bootstrap is a
+thin acquisition layer: it selects no implicit version, verifies and safely extracts the named
+release, then invokes the canonical `scripts/install-ubuntu.sh` contained in that archive.
+
+Download the production template from the same immutable release tag:
+
+```bash
+sudo curl -fsSLo /root/learning-control-center.env \
+  https://raw.githubusercontent.com/Learning-Control-Center/Learning-Control-Center/v1.0.0/deploy/learning-control-center.env.example
+sudo chmod 0600 /root/learning-control-center.env
+sudo editor /root/learning-control-center.env
+```
+
+Replace every `CHANGE_ME` value, then run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Learning-Control-Center/Learning-Control-Center/v1.0.0/scripts/bootstrap-ubuntu.sh \
+  | sudo bash -s -- \
+      --ref v1.0.0 \
+      --domain lcc.example.com \
+      --env-file /root/learning-control-center.env
+```
+
+The command works only after the `v1.0.0` GitHub release and its exact archive/checksum assets have
+been published. It never accepts bootstrap or application secrets as arguments; only the path to
+the root-readable environment file is passed. To download and validate without invoking the
+installer, add `--dry-run` and run the script from a reviewed local copy.
+
+Production use must name an explicit semantic release tag or a full 40-character commit identity
+with deliberately published matching assets. `main`, `latest`, and other moving refs are rejected.
+
+## Manual installation from reviewed source
+
+### Prepare production configuration
 
 Obtain a deliberate LCC source release or clean Git checkout. Do not deploy a working tree with
 unreviewed changes. From that source directory:
@@ -61,7 +96,7 @@ array values are enclosed in single quotes intentionally; this preserves their i
 when systemd reads the file. The public origin and allowed host must match the DNS hostname exactly.
 Caddy does not read this secret-bearing environment file.
 
-## Install
+### Run the canonical installer
 
 Choose a stable release identity such as a signed tag or the full Git commit SHA:
 

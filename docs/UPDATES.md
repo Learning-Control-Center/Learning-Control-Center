@@ -2,14 +2,27 @@
 
 ## Controlled update
 
-Obtain a deliberate clean release checkout. Review its release notes and migration implications;
-the update command never fetches a remote or chooses "latest" automatically.
+Obtain the deliberate tagged release archive and companion checksum from the canonical GitHub
+release. Review its release notes and migration implications. For example:
+
+```bash
+mkdir -p /srv/releases/v1.1.0
+cd /srv/releases/v1.1.0
+curl -fLO https://github.com/Learning-Control-Center/Learning-Control-Center/releases/download/v1.1.0/learning-control-center-v1.1.0.tar.gz
+curl -fLO https://github.com/Learning-Control-Center/Learning-Control-Center/releases/download/v1.1.0/learning-control-center-v1.1.0.tar.gz.sha256
+sha256sum --check learning-control-center-v1.1.0.tar.gz.sha256
+tar -xzf learning-control-center-v1.1.0.tar.gz
+```
+
+Inspect the extracted `RELEASE_ID`, `SOURCE_REVISION`, `RELEASE_MANIFEST`, changelog, and archive
+contents before proceeding. The update command never fetches a remote or chooses `main`, `latest`,
+or another implicit version automatically.
 
 Run the updater from the currently installed release or the reviewed candidate source:
 
 ```bash
 sudo /opt/learning-control-center/current/scripts/update-ubuntu.sh apply \
-  --source /srv/releases/Learning-Control-Center-v1.1.0 \
+  --source /srv/releases/v1.1.0/Learning-Control-Center-v1.1.0 \
   --release-id v1.1.0
 ```
 

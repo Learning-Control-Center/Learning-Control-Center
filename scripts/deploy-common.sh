@@ -240,6 +240,8 @@ lcc_require_inactive_service() {
 lcc_run_as_service_user() {
     local release_root="$1"
     shift
+    # The service-user shell expands the quoted script body.
+    # shellcheck disable=SC2016
     runuser -u "$LCC_SERVICE_USER" -- /usr/bin/env -i \
         HOME="$LCC_DATA_DIRECTORY" \
         PATH="$release_root/.venv/bin:/usr/bin:/bin" \

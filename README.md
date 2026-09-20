@@ -73,6 +73,7 @@ Production administration uses systemd and `lcc-admin`:
 - [Installation](docs/INSTALLATION.md)
 - [Production operations](docs/PRODUCTION_OPERATIONS.md)
 - [Updates, rollback, and uninstall](docs/UPDATES.md)
+- [Public release process](docs/RELEASING.md)
 - [Import/export format](docs/IMPORT_EXPORT_FORMAT.md)
 - [Security policy](SECURITY.md)
 
