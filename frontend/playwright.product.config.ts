@@ -4,6 +4,10 @@ if (!process.env.LCC_PRODUCT_BASE_URL) {
   throw new Error('LCC_PRODUCT_BASE_URL is required for the isolated product fixture project.')
 }
 
+const webkitLaunchEnvironment = process.env.LCC_WEBKIT_LIBRARY_PATH
+  ? Object.fromEntries(Object.entries({ ...process.env, LD_LIBRARY_PATH: process.env.LCC_WEBKIT_LIBRARY_PATH }).filter((entry): entry is [string, string] => typeof entry[1] === 'string'))
+  : undefined
+
 export default defineConfig({
   testDir: './e2e/product',
   outputDir: process.env.LCC_PRODUCT_ARTIFACT_DIR ?? './test-results/product',
@@ -35,27 +39,40 @@ export default defineConfig({
       },
     },
     {
-      name: 'product-wide-desktop-chromium',
+      name: 'product-mobile-chromium',
       use: {
         ...devices['Desktop Chrome'],
         channel: 'chrome',
-        viewport: { width: 1920, height: 1080 },
-      },
-    },
-    ...[
-      ['product-compact-landscape-chromium', 1024, 768],
-      ['product-tablet-portrait-chromium', 768, 1024],
-      ['product-mobile-chromium', 390, 844],
-      ['product-minimum-mobile-chromium', 320, 568],
-      ['product-narrow-landscape-chromium', 568, 320],
-    ].map(([name, width, height]) => ({
-      name: String(name),
-      use: {
-        ...devices['Desktop Chrome'],
-        channel: 'chrome',
-        viewport: { width: Number(width), height: Number(height) },
+        viewport: { width: 390, height: 844 },
         hasTouch: true,
       },
-    })),
+    },
+    {
+      name: 'product-mobile-landscape-chromium',
+      grep: /@cross-browser/,
+      use: {
+        ...devices['Desktop Chrome'],
+        channel: 'chrome',
+        viewport: { width: 568, height: 320 },
+        hasTouch: true,
+      },
+    },
+    {
+      name: 'product-firefox',
+      grep: /@cross-browser/,
+      use: {
+        ...devices['Desktop Firefox'],
+        viewport: { width: 1440, height: 900 },
+      },
+    },
+    {
+      name: 'product-webkit',
+      grep: /@cross-browser/,
+      use: {
+        ...devices['Desktop Safari'],
+        viewport: { width: 1440, height: 900 },
+        launchOptions: webkitLaunchEnvironment ? { env: webkitLaunchEnvironment } : undefined,
+      },
+    },
   ],
 })

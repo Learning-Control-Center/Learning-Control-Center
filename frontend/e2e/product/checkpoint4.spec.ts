@@ -44,7 +44,7 @@ test('Checkpoint 4 connects Profile, Learn, Projects, and explicit Activity hand
   await expect(activationDialog).toBeHidden()
   await expect(reviewActivation).toBeFocused()
 
-  await page.getByRole('link', { name: 'Start or log actual work' }).click()
+  await page.getByRole('link', { name: 'Start or log actual work' }).first().click()
   await expect(page.getByRole('heading', { name: /Continue: Practice the next Roadmap capability/ })).toBeVisible()
   await expectAccessible(page)
 

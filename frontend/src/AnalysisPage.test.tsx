@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { AnalysisPage } from './pages/AnalysisPage'
+import { AnalysisPage } from './features/insights/AnalysisPage'
 
 const json = (value: unknown, status = 200) =>
   new Response(JSON.stringify(value), {

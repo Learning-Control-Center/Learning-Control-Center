@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "status": "Passed",
+  "capturedAt": "2026-09-20T09:54:00Z",
+  "sourceRevision": "69f6d75a5c8dbcf36c0587c657beb84733b9a1d7",
+  "validatedCandidateRuntimeSha256": "d8af6f4bd5e8b9479b6c189449c7f1caebeac0853b3ea76fa0c30a2ca662f8bd",
+  "productionBuildHash": "6184fb8d6a9056a6485c263f427b2ee9ef748dae1a691fe79484183c8405fc7d",
+  "browser": { "name": "Google Chrome", "version": "153.0.8010.52" },
+  "viewport": { "width": 1440, "height": 900, "deviceScaleFactor": 1 },
+  "sampling": { "warmups": 5, "repeats": 30, "cacheModes": ["cold", "warm"], "longTaskThresholdMs": 50 },
+  "bundle": {
+    "combinedGzipBytes": 204835,
+    "roadmapRouteGzipBytes": 76712,
+    "sharedApplicationGzipBytes": 128123,
+    "budgetPassed": true
+  },
+  "pureLayout": [
+    { "size": 25, "medianMs": 0.195, "p95Ms": 0.22, "budgetPassed": true },
+    { "size": 100, "medianMs": 0.578, "p95Ms": 8.733, "budgetPassed": true },
+    { "size": 250, "medianMs": 1.651, "p95Ms": 4.562, "budgetPassed": true }
+  ],
+  "browserMeasurements": [
+    {
+      "fixtureSize": 100,
+      "fixtureHash": "2d8d79ba6c891eecfaf50ddb8a4a14f7b30eb9e4b7adc32afd89a13792faab0c",
+      "projectionOutputHash": "b6a3cd5d68a96d3016a4a6d03cd01cddc4067ad7c8b3ea4c9919941fd201b140",
+      "edgeCount": 113,
+      "median": {
+        "coldNavigationMs": 1083.4,
+        "warmNavigationMs": 824.2,
+        "coldSelectionMs": 98.7,
+        "warmSelectionMs": 75.1,
+        "reactCommitsPerSelection": 2,
+        "journeyNodeRendersPerSelection": 9
+      },
+      "p95": {
+        "coldNavigationMs": 1109,
+        "warmNavigationMs": 836.9,
+        "coldSelectionMs": 120.3,
+        "warmSelectionMs": 119,
+        "navigationLongTaskCount": 1,
+        "navigationLongTaskTotalMs": 57,
+        "selectionLongTaskCount": 0,
+        "reactCommitsPerSelection": 2,
+        "journeyNodeRendersPerSelection": 9
+      },
+      "budgetVerdicts": { "navigation": true, "selection": true, "longTasks": true, "reactCommits": true, "journeyNodeRenders": true, "pureLayout": true, "bundle": true }
+    },
+    {
+      "fixtureSize": 250,
+      "fixtureHash": "15022d0566ee81c7d905dda2f3fe27ab4a21435c1fe79e26d9d9e4096db7684f",
+      "projectionOutputHash": "bb31d5df63045f35a62114324114536b05dc2f7f46b37019e8b2e837341aedac",
+      "edgeCount": 263,
+      "median": {
+        "coldNavigationMs": 1590.3,
+        "warmNavigationMs": 1328.3,
+        "coldSelectionMs": 77.6,
+        "warmSelectionMs": 68.5,
+        "reactCommitsPerSelection": 2,
+        "journeyNodeRendersPerSelection": 9
+      },
+      "p95": {
+        "coldNavigationMs": 1655.8,
+        "warmNavigationMs": 1365.7,
+        "coldSelectionMs": 121.7,
+        "warmSelectionMs": 103.9,
+        "navigationLongTaskCount": 2,
+        "navigationLongTaskTotalMs": 171,
+        "selectionLongTaskCount": 0,
+        "reactCommitsPerSelection": 2,
+        "journeyNodeRendersPerSelection": 9
+      },
+      "budgetVerdicts": { "navigation": true, "selection": true, "longTasks": true, "reactCommits": true, "journeyNodeRenders": true, "pureLayout": true, "bundle": true }
+    }
+  ],
+  "protocol": "frontend/performance/roadmap-v3-protocol.json",
+  "notes": [
+    "The 25-node product/geometry/long-content browser checks are covered by the Checkpoint 6 product harness.",
+    "The measurements are bound to the exact production build hash used by the final Checkpoint 6 candidate; later QA-orchestration-only changes did not change that build hash.",
+    "The full raw 30-sample outputs were reviewed during the checkpoint; this bounded summary persists the release decision inputs without committing transient browser traces."
+  ]
+}

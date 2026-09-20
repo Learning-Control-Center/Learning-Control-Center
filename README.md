@@ -2,11 +2,11 @@
 
 Learning-Control-Center is a single-user, self-hosted system for competency-based roadmaps, daily learning recommendations, session tracking, verification, deterministic analytics, reports, and safe data transfer.
 
-## V2 Macro Phase 1 foundation
+## V2 product
 
-The application preserves its V1 routes and user experience while introducing the durable V2 domain foundation. That foundation includes versioned Target Profiles and competency semantics, canonical Activities and exact-duration Learning Sessions, immutable provenance-bearing Evidence, deterministic capability and review projections, and immutable Analysis Snapshots behind the existing recommendation behavior. Portable package schema version 2 carries these canonical facts and the checkpoints required to validate rebuilt projections.
+The application uses canonical V2 authority for versioned Target Profiles and capability semantics, Activities and exact-duration Sessions, immutable Evidence, Curriculum, Projects, the native Learning Graph, Roadmap Projection, Analysis V3, Recommendation V2, and Today V2. Historical V1 records remain immutable and readable in explicitly labeled compatibility views.
 
-Profile management UI, Projects, the native Learning Graph and Roadmap V2 projection, Analysis V3, Recommendation V2, Today V2, Curriculum, and authoritative LLM behavior remain deferred to later macro phases.
+The Phase 3 frontend organizes the product around Today, Activity, Profile, Roadmap, Learn, Projects, and Insights. Roadmap presents the projection as a left-to-right learning journey with synchronized Map and accessible Outline experiences. The deterministic core has no LLM dependency.
 
 ## Local development
 
@@ -66,6 +66,16 @@ npm run lint
 npm run test
 npm run build
 ```
+
+The isolated product fixture runs against disposable temporary databases. Its aggregate final Phase 3 gate uses fresh stacks for the Profile/Learn/Projects, daily-control-loop, Roadmap/shell, and release-matrix stages; it includes primary Chromium flows, touch-oriented Chromium coverage, focused Firefox and Playwright WebKit compatibility checks, accessibility scans, and executable smoke validation of the later visual-QA manifest:
+
+```bash
+.venv/bin/python scripts/product_fixture_harness.py checkpoint6-playwright \
+  --timezone UTC \
+  --clock 2026-09-19T10:00:00Z
+```
+
+See `docs/phase3-product-qa.md` for the reproducible fixture-inspection command and real-platform browser/screen-reader checklist. Automated WebKit is not Safari certification, Chromium emulation is not Android certification, and unavailable real OS/device/assistive-technology checks remain explicitly `Not executed`.
 
 With Caddy and Chrome installed, run the production-like TLS, authentication, timer, backup, and restore flow from the repository root:
 

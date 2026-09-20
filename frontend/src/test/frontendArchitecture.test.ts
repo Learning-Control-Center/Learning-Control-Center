@@ -8,9 +8,9 @@ const v2Pages = [
   '../pages/CurriculumPage.tsx',
   '../pages/ProjectsPage.tsx',
   '../pages/RoadmapV2Page.tsx',
-  '../pages/AnalysisPage.tsx',
-  '../pages/RecommendationsV2Page.tsx',
-  '../pages/TodayV2Page.tsx',
+  '../features/insights/AnalysisPage.tsx',
+  '../features/insights/RecommendationsV2Page.tsx',
+  '../features/today/TodayV2Page.tsx',
 ]
 
 const appFeatureEntries = new Set([

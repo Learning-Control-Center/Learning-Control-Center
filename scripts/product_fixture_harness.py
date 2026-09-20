@@ -116,6 +116,43 @@ def _repository_revision() -> str:
     return result.stdout.strip()
 
 
+def _candidate_runtime_hash() -> str:
+    """Identify the exact backend/frontend/test/harness candidate independently of QA records."""
+
+    listed = subprocess.run(
+        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        cwd=REPOSITORY_ROOT,
+        capture_output=True,
+        check=True,
+    ).stdout.split(b"\0")
+    runtime_prefixes = ("backend/", "frontend/src/", "frontend/e2e/", "scripts/")
+    frontend_config_patterns = (
+        re.compile(r"frontend/package(?:-lock)?\.json$"),
+        re.compile(r"frontend/playwright.*\.ts$"),
+        re.compile(r"frontend/vite.*\.ts$"),
+        re.compile(r"frontend/tailwind.*\.js$"),
+    )
+    files = []
+    for encoded_path in listed:
+        if not encoded_path:
+            continue
+        relative_path = encoded_path.decode("utf-8")
+        if not relative_path.startswith(runtime_prefixes) and not any(
+            pattern.fullmatch(relative_path) for pattern in frontend_config_patterns
+        ):
+            continue
+        path = REPOSITORY_ROOT / relative_path
+        if path.is_file():
+            files.append(path)
+    digest = hashlib.sha256()
+    for path in sorted(set(files)):
+        digest.update(path.relative_to(REPOSITORY_ROOT).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 def _production_build_hash() -> str:
     digest = hashlib.sha256()
     for path in sorted((FRONTEND_ROOT / "dist").rglob("*")):
@@ -414,6 +451,7 @@ class FixtureRun:
                 "matchesSeedResponse": True,
             },
             "repositoryRevision": _repository_revision(),
+            "candidateRuntimeSha256": _candidate_runtime_hash(),
             "productionBuildHash": _production_build_hash(),
             "publicContractCalls": client.calls,
             "fixtureHash": _fixture_hash(self.scenario, self.timezone, self.clock_at, client.calls),
@@ -1458,7 +1496,9 @@ def _seed_roadmap_scale(client: PublicApiClient, run: FixtureRun, size: int) -> 
         expected=201,
     )
     if run.clock_at is not None:
-        report_clock = datetime.fromisoformat(run.clock_at.replace("Z", "+00:00")) + timedelta(days=1)
+        report_clock = datetime.fromisoformat(run.clock_at.replace("Z", "+00:00")) + timedelta(
+            days=1
+        )
         restarted = run.restart_backend(report_clock.isoformat().replace("+00:00", "Z"))
         restarted.calls = client.calls
         restarted.login()
@@ -1606,7 +1646,9 @@ def _verify_checkpoint5_state_matrix(
         expected=201,
     )
     skip_interaction = next(
-        item for item in reversed(skipped_for_correction["interactions"]) if item["type"] == "skipped"
+        item
+        for item in reversed(skipped_for_correction["interactions"])
+        if item["type"] == "skipped"
     )
     client.request(
         "POST",
@@ -1652,7 +1694,9 @@ def _verify_checkpoint5_state_matrix(
         },
         expected=201,
     )
-    if not historical_regeneration.get("regeneration") or not historical_regeneration.get("suggestions"):
+    if not historical_regeneration.get("regeneration") or not historical_regeneration.get(
+        "suggestions"
+    ):
         raise RuntimeError("Checkpoint 5 fixture did not create regenerated history.")
     continuing = client.request("GET", "/api/v2/today/current")["continuingStartedSuggestions"]
     if not any(item["id"] == suggestion["id"] for item in continuing):
@@ -1776,11 +1820,14 @@ def _verify_checkpoint5_state_matrix(
 
     analysis_history = client.request("GET", "/api/v2/analysis/history")
     analysis_ids = {item["id"] for item in analysis_history}
-    if not {
-        initial_analysis["id"],
-        followup_analysis["id"],
-        post_session_analysis["id"],
-    } <= analysis_ids:
+    if (
+        not {
+            initial_analysis["id"],
+            followup_analysis["id"],
+            post_session_analysis["id"],
+        }
+        <= analysis_ids
+    ):
         raise RuntimeError("Checkpoint 5 fixture did not retain Analysis snapshot history.")
 
     recommendation_history = client.request("GET", "/api/v2/recommendations/history")
@@ -1792,7 +1839,9 @@ def _verify_checkpoint5_state_matrix(
     )
     candidate_audit = recommendation.get("candidateAudit", [])
     if not candidate_audit or not any(not item.get("eligible", False) for item in candidate_audit):
-        raise RuntimeError("Checkpoint 5 fixture did not expose a rejected Recommendation audit row.")
+        raise RuntimeError(
+            "Checkpoint 5 fixture did not expose a rejected Recommendation audit row."
+        )
 
     sessions = client.request("GET", "/api/v1/sessions?limit=100")
     if not sessions.get("items"):
@@ -1952,7 +2001,7 @@ def run_roadmap_playwright(
     timezone: str,
     clock_at: str | None,
     *,
-    grep_pattern: str = "Roadmap",
+    grep_pattern: str | None = "Roadmap",
 ) -> JsonObject:
     if size not in {25, 100, 250}:
         raise ValueError("Roadmap fixture size must be 25, 100, or 250.")
@@ -1974,9 +2023,17 @@ def run_roadmap_playwright(
                 "LCC_PRODUCT_ARTIFACT_DIR": str(run.root / "artifacts" / "playwright"),
             }
         )
+        if webkit_library_path := environment.get("LCC_WEBKIT_LIBRARY_PATH"):
+            # Managed runners may supply locally extracted runtime libraries when
+            # they cannot install Playwright's optional WebKit packages system-wide.
+            environment["LD_LIBRARY_PATH"] = webkit_library_path
+            environment["PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS"] = "1"
+        playwright_command = ["npm", "run", "test:e2e:product"]
+        if grep_pattern is not None:
+            playwright_command.extend(["--", "--grep", grep_pattern])
         with (run.root / "playwright.log").open("wb") as playwright_log:
             result = subprocess.run(
-                ["npm", "run", "test:e2e:product", "--", "--grep", grep_pattern],
+                playwright_command,
                 cwd=FRONTEND_ROOT,
                 env=environment,
                 stdout=playwright_log,
@@ -2000,6 +2057,57 @@ def run_roadmap_playwright(
         run.finish(success=success)
         if not success:
             print(f"Fixture failure artifacts retained at {run.root}", file=sys.stderr)
+
+
+def run_visual_qa_inspection(timezone: str, clock_at: str | None) -> JsonObject:
+    """Keep one disposable populated stack alive for the later human QA campaign."""
+
+    run = FixtureRun(scenario="roadmap-25", timezone=timezone, clock_at=clock_at)
+    success = False
+    metadata: JsonObject = {}
+    try:
+        client = run.start()
+        projection = _seed_roadmap_scale(client, run, 25)
+        authority = client.request("GET", "/api/v2/authority")
+        authority = _verify_authority_read_parity(client, authority, "v2")
+        metadata_path = run.write_metadata(client, authority, "v2")
+        metadata = cast(JsonObject, json.loads(metadata_path.read_text(encoding="utf-8")))
+        inspection = {
+            "frontendUrl": run.frontend_url,
+            "username": USERNAME,
+            "password": PASSWORD,
+            "scenarioId": "roadmap-25",
+            "fixtureHash": metadata["fixtureHash"],
+            "productionBuildHash": metadata["productionBuildHash"],
+            "repositoryRevision": metadata["repositoryRevision"],
+            "candidateRuntimeSha256": metadata["candidateRuntimeSha256"],
+            "declaredClockAt": metadata["declaredClockAt"],
+            "timezone": metadata["timezone"],
+            "manifest": str(FRONTEND_ROOT / "qa" / "visual-product-qa-manifest.json"),
+            "metadata": str(metadata_path),
+            "databaseIsolation": "temporary disposable SQLite database; user database untouched",
+            "cleanup": "Press Ctrl+C to stop both processes and delete the fixture directory.",
+            "screenshotCampaignExecuted": False,
+            "roadmapProjection": {
+                "layoutPolicyVersion": projection["layoutPolicyVersion"],
+                "outputHash": projection["outputHash"],
+                "nodeCount": len(projection["nodes"]),
+                "edgeCount": len(projection["edges"]),
+            },
+        }
+        print(json.dumps(inspection, indent=2, sort_keys=True), flush=True)
+        print("Fixture is ready for inspection. Press Ctrl+C to clean up.", file=sys.stderr)
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            success = True
+            return inspection
+    finally:
+        run.finish(success=success)
+        if not success:
+            print(f"Fixture failure artifacts retained at {run.root}", file=sys.stderr)
+    return metadata
 
 
 def main() -> int:
@@ -2044,6 +2152,18 @@ def main() -> int:
     )
     checkpoint_five_browser.add_argument("--timezone", default=DEFAULT_TIMEZONE)
     checkpoint_five_browser.add_argument("--clock", default=DEFAULT_CLOCK)
+    checkpoint_six_browser = subparsers.add_parser(
+        "checkpoint6-playwright",
+        help="Run final manifest, cross-browser, responsive, and accessibility product checks.",
+    )
+    checkpoint_six_browser.add_argument("--timezone", default=DEFAULT_TIMEZONE)
+    checkpoint_six_browser.add_argument("--clock", default=DEFAULT_CLOCK)
+    visual_qa_inspect = subparsers.add_parser(
+        "visual-qa-inspect",
+        help="Keep a disposable populated production build alive for human visual/product QA.",
+    )
+    visual_qa_inspect.add_argument("--timezone", default=DEFAULT_TIMEZONE)
+    visual_qa_inspect.add_argument("--clock", default=DEFAULT_CLOCK)
     arguments = parser.parse_args()
     if arguments.command == "smoke":
         result = run_smoke(arguments.scenario, arguments.timezone, arguments.clock)
@@ -2062,6 +2182,7 @@ def main() -> int:
                     "fixtureHash": result["fixtureHash"],
                     "productionBuildHash": result["productionBuildHash"],
                     "repositoryRevision": result["repositoryRevision"],
+                    "candidateRuntimeSha256": result["candidateRuntimeSha256"],
                     "expectedAuthority": result["expectedAuthority"],
                     "roadmapProjection": result["roadmapProjection"],
                 },
@@ -2120,6 +2241,53 @@ def main() -> int:
                 sort_keys=True,
             )
         )
+        return 0
+    if arguments.command == "checkpoint6-playwright":
+        stage_patterns = {
+            "profile-learn-projects": "Checkpoint 4",
+            "daily-control-loop": "Checkpoint 5",
+            "roadmap-and-shell": "Roadmap|isolated fixture",
+            "release-matrix": "Checkpoint 6|@cross-browser",
+        }
+        stage_results = {
+            name: run_roadmap_playwright(
+                25,
+                arguments.timezone,
+                arguments.clock,
+                grep_pattern=pattern,
+            )
+            for name, pattern in stage_patterns.items()
+        }
+        for identity_key in (
+            "repositoryRevision",
+            "candidateRuntimeSha256",
+            "productionBuildHash",
+            "fixtureHash",
+        ):
+            identities = {str(stage[identity_key]) for stage in stage_results.values()}
+            if len(identities) != 1:
+                raise RuntimeError(
+                    f"Checkpoint 6 stage identity mismatch for {identity_key}: {sorted(identities)}"
+                )
+        result = stage_results["release-matrix"]
+        print(
+            json.dumps(
+                {
+                    "scenarioId": result["scenarioId"],
+                    "fixtureHash": result["fixtureHash"],
+                    "productionBuildHash": result["productionBuildHash"],
+                    "repositoryRevision": result["repositoryRevision"],
+                    "candidateRuntimeSha256": result["candidateRuntimeSha256"],
+                    "roadmapProjection": result["roadmapProjection"],
+                    "stages": list(stage_results),
+                    "screenshotCampaignExecuted": False,
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+    if arguments.command == "visual-qa-inspect":
+        run_visual_qa_inspection(arguments.timezone, arguments.clock)
         return 0
     return 2
 

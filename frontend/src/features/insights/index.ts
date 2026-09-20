@@ -1,3 +1,3 @@
-export { AnalysisPage } from '../../pages/AnalysisPage'
-export { RecommendationsV2Page } from '../../pages/RecommendationsV2Page'
+export { AnalysisPage } from './AnalysisPage'
+export { RecommendationsV2Page } from './RecommendationsV2Page'
 export { InsightsIndexPage, LegacyIndexPage } from './InsightsIndexPage'

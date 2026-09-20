@@ -3,6 +3,8 @@ import { expect, test } from '@playwright/test'
 
 const expectedAuthority = process.env.LCC_PRODUCT_SCENARIO === 'legacy-shell' ? 'V1 compatibility' : 'V2'
 
+test.skip(process.env.LCC_ENVIRONMENT === 'production', 'The shell fixture uses isolated product-harness credentials.')
+
 test('isolated fixture exposes an accessible, reduced-motion product shell without overflow', async ({ page }) => {
   await page.goto('/')
   await page.getByLabel('Username').fill('fixture-learner')

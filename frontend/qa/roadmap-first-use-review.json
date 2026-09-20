@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-09-20T10:58:25Z",
+  "result": "Passed",
+  "reviewType": "Bounded browser-assisted first-use comprehension review; not the Final Visual / Product QA screenshot campaign",
+  "sourceRevision": "69f6d75a5c8dbcf36c0587c657beb84733b9a1d7",
+  "candidateRuntimeSha256": "d8af6f4bd5e8b9479b6c189449c7f1caebeac0853b3ea76fa0c30a2ca662f8bd",
+  "productionBuildSha256": "6184fb8d6a9056a6485c263f427b2ee9ef748dae1a691fe79484183c8405fc7d",
+  "fixture": {
+    "scenarioId": "roadmap-25",
+    "fixtureSha256": "fb4bf5c2d234c4da585f727d9158fa45f01c1ab0a2f3102741bc63bb7c1de258",
+    "timezone": "UTC",
+    "declaredClockAt": "2026-09-19T10:00:00Z"
+  },
+  "environment": {
+    "platform": "Linux",
+    "browser": "Codex in-app browser (Chromium family; exact version unavailable)",
+    "observedViewport": "1552x949",
+    "input": "Browser accessibility tree plus direct visual inspection"
+  },
+  "questions": [
+    { "question": "Can a first-time reviewer identify the intended journey direction?", "result": "Passed", "evidence": "The primary instruction explicitly says to read left to right from shared foundations through domain branches to targets; the Map follows that progression." },
+    { "question": "Can the reviewer identify domain branches and specialization hierarchy?", "result": "Passed", "evidence": "The domain branch rail separates cross-domain targets, four learning domains, and graph foundations; Outline labels specialization children explicitly." },
+    { "question": "Can the reviewer distinguish current capability from target state?", "result": "Passed", "evidence": "Node summaries and the detail panel present Current, Target, Comparison, Confidence, and Freshness as separate facts." },
+    { "question": "Can the reviewer identify Today work?", "result": "Passed", "evidence": "Today is visible as text and an icon/status badge in Map, Outline, the domain counts, and the focused detail context." },
+    { "question": "Can the reviewer identify a blocked or Unknown prerequisite state?", "result": "Passed", "evidence": "Unknown capability and prerequisite-status-unknown labels are visible without relying on color, with exact relationship state in Outline/details." },
+    { "question": "Does selecting a target make the complete prerequisite closure dominant without inventing a single path?", "result": "Passed", "evidence": "Focusing a target marks every relevant prerequisite/branch item as Focused path, exposes the relationship list, and enables Fit path while retaining branching relationships." },
+    { "question": "Is collapse/expand meaningful while a focused path is active?", "result": "Passed", "evidence": "Collapsing the selected domain reduces it to the two relevant items and labels the branch temporarily revealed instead of hiding required closure." },
+    { "question": "Do Map and Outline preserve the same facts and actions?", "result": "Passed", "evidence": "The focused item retained current/target/Today/review/path context and the same detail/actions when switching to Outline. Automated parity coverage provides the exact assertion set." }
+  ],
+  "acceptableTradeoffs": [
+    "At Fit all, the 25-node Map is an orientation overview and individual labels are intentionally secondary; selection/Fit path and Outline are the reading modes.",
+    "The horizontally scrollable domain rail is an intentional local navigation region; automated checks confirm no page-level horizontal overflow."
+  ],
+  "unresolvedP0P1": [],
+  "screenshotCampaignExecuted": false
+}

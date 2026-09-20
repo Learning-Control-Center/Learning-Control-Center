@@ -371,11 +371,11 @@ test('production V2 authority cutover routes the default learning surfaces', asy
   await page.goto('/')
   await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible()
   await page.getByRole('link', { name: 'Roadmap', exact: true }).click()
-  await expect(page.getByRole('heading', { name: 'Roadmap Projection' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Roadmap', exact: true })).toBeVisible()
   await page.goto('/insights/recommendations')
   await expect(page.getByRole('heading', { name: 'Recommendations' })).toBeVisible()
   await page.getByRole('link', { name: 'Profile', exact: true }).click()
-  await expect(page.getByRole('heading', { name: 'Profile & Capability' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Profile', exact: true })).toBeVisible()
   await page.goto('/insights/legacy/roadmap')
   await expect(page.getByRole('heading', { name: 'Legacy Roadmap' })).toBeVisible()
   const blockedLegacyWrite = await page.request.put('/api/v1/roadmap/current-phase/not-a-phase', {

@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-09-20T11:31:23Z",
+  "result": "Passed",
+  "sourceRevision": "69f6d75a5c8dbcf36c0587c657beb84733b9a1d7",
+  "candidateRuntimeSha256": "d8af6f4bd5e8b9479b6c189449c7f1caebeac0853b3ea76fa0c30a2ca662f8bd",
+  "productionBuildSha256": "6184fb8d6a9056a6485c263f427b2ee9ef748dae1a691fe79484183c8405fc7d",
+  "fixture": {
+    "scenarioId": "roadmap-25",
+    "fixtureSha256": "fb4bf5c2d234c4da585f727d9158fa45f01c1ab0a2f3102741bc63bb7c1de258",
+    "timezone": "UTC",
+    "declaredClockAt": "2026-09-19T10:00:00Z",
+    "databaseIsolation": "A fresh temporary SQLite database was created and deleted for each stage; data/lcc.db was not opened."
+  },
+  "command": "env LCC_WEBKIT_LIBRARY_PATH=<distro-matched-runtime-directory> .venv/bin/python scripts/product_fixture_harness.py checkpoint6-playwright --timezone UTC --clock 2026-09-19T10:00:00Z",
+  "stages": [
+    { "name": "profile-learn-projects", "grep": "Checkpoint 4", "result": "Passed", "scope": "Profile, competency detail, Learn, Curriculum, Projects, and explicit Activity handoff in desktop and touch Chromium." },
+    { "name": "daily-control-loop", "grep": "Checkpoint 5", "result": "Passed", "scope": "Today, Activity, authoritative Session lifecycle, Analysis, Recommendation, legacy Insights, and keyboard-only mobile control loop." },
+    { "name": "roadmap-and-shell", "grep": "Roadmap|isolated fixture", "result": "Passed", "scope": "Product shell plus Roadmap Map/Outline parity, focus closure, layout editing/reset, responsive, touch, text-spacing, forced-colors, reduced-motion, small-height, and axe checks." },
+    { "name": "release-matrix", "grep": "Checkpoint 6|@cross-browser", "result": "Passed", "scope": "38-entry route/state manifest; the complete Analysis-to-Today-to-Activity Session/replacement lifecycle at all six target viewports; and focused recovery/lifecycle coverage in Chrome, Firefox, and Playwright WebKit." }
+  ],
+  "environment": {
+    "os": "Linux 7.0.0-31-generic x86_64",
+    "node": "22.22.1",
+    "npm": "9.2.0",
+    "playwright": "1.63.0",
+    "chrome": "153.0.8010.52",
+    "firefox": "155.0",
+    "webkit": "WPE WebKit 2.55.0 (Playwright engine; not Safari certification)"
+  },
+  "coverage": {
+    "manifest": "frontend/qa/visual-product-qa-manifest.json",
+    "manifestEntries": 38,
+    "manifestSha256": "a3351c21985c8dfface748be16026af7a20e034076493946ad1afa26b948b5a8",
+    "viewports": ["320x568", "390x844 touch", "768x1024", "1024x768", "1440x900", "1920x1080"],
+    "additionalResponsivePrecheck": "568x320 touch landscape",
+    "roadmapPerformance": "frontend/performance/roadmap-phase3-release.json",
+    "roadmapPerformanceSha256": "06351ddb4a9fa1c922cb1c5185a2e00c4a3b613bf320b99c410607606bccabf5"
+  },
+  "roadmapProjection": {
+    "layoutPolicyVersion": "roadmap-layout/v3.0",
+    "nodeCount": 25,
+    "edgeCount": 38,
+    "outputSha256": "669f495dad213537bdc17b2c95a7c7a7e3e1c9fbff75074770379aca5f8c5f88"
+  },
+  "screenshotCampaignExecuted": false,
+  "notes": [
+    "The four stages use independent full-stack fixtures so mutation-heavy scenarios cannot contaminate later stages.",
+    "Only automated engine coverage is reported here. Real OS, device, browser, and assistive-technology checks are recorded separately and are never inferred from this pass."
+  ]
+}

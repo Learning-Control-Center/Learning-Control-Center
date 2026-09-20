@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 2,
+  "allowedResults": ["Passed", "Failed", "Blocked", "Not executed"],
+  "recordedAt": "2026-09-20T11:31:23Z",
+  "sourceRevision": "69f6d75a5c8dbcf36c0587c657beb84733b9a1d7",
+  "candidateRuntimeSha256": "d8af6f4bd5e8b9479b6c189449c7f1caebeac0853b3ea76fa0c30a2ca662f8bd",
+  "productionBuildSha256": "6184fb8d6a9056a6485c263f427b2ee9ef748dae1a691fe79484183c8405fc7d",
+  "fixture": "roadmap-25 / fb4bf5c2d234c4da585f727d9158fa45f01c1ab0a2f3102741bc63bb7c1de258 / UTC / 2026-09-19T10:00:00Z",
+  "releaseEvidence": "frontend/qa/checkpoint6-release-evidence.json",
+  "manualChecklist": "docs/phase3-product-qa.md#real-platform-smoke-record",
+  "automatedEvidence": [
+    {
+      "platform": "Linux 7.0.0-31-generic x86_64",
+      "browser": "Google Chrome 153.0.8010.52",
+      "assistiveTechnology": "None",
+      "viewportOrientation": "Six targets: 320x568, 390x844 touch portrait, 768x1024, 1024x768, 1440x900, 1920x1080; additional 568x320 touch-landscape precheck",
+      "result": "Passed",
+      "evidence": "Four-stage Checkpoint 6 product gate and 38-entry manifest smoke",
+      "issue": null
+    },
+    {
+      "platform": "Linux 7.0.0-31-generic x86_64",
+      "browser": "Playwright Firefox 155.0",
+      "assistiveTechnology": "None",
+      "viewportOrientation": "1440x900 landscape",
+      "result": "Passed",
+      "evidence": "Focused full Today-to-Activity Session lifecycle, Roadmap, recovery, responsive, and axe smoke",
+      "issue": null
+    },
+    {
+      "platform": "Linux Playwright engine",
+      "browser": "WPE WebKit 2.55.0",
+      "assistiveTechnology": "None",
+      "viewportOrientation": "1440x900 landscape",
+      "result": "Passed",
+      "evidence": "Focused full Today-to-Activity Session lifecycle, Roadmap, recovery, responsive, and axe smoke; not Safari certification",
+      "issue": null
+    }
+  ],
+  "realPlatformSmokes": [
+    { "platform": "Windows", "browser": "Chrome", "browserVersion": "Not available", "assistiveTechnology": "None", "assistiveTechnologyVersion": "Not applicable", "viewportOrientation": "Desktop portrait-equivalent and landscape", "result": "Not executed", "evidence": "Requires final human/device validation using the reproducible checklist", "issue": null },
+    { "platform": "Windows", "browser": "Edge", "browserVersion": "Not available", "assistiveTechnology": "None", "assistiveTechnologyVersion": "Not applicable", "viewportOrientation": "Desktop landscape", "result": "Not executed", "evidence": "Requires final human/device validation using the reproducible checklist", "issue": null },
+    { "platform": "Windows", "browser": "Firefox", "browserVersion": "Not available", "assistiveTechnology": "None", "assistiveTechnologyVersion": "Not applicable", "viewportOrientation": "Desktop landscape", "result": "Not executed", "evidence": "Requires final human/device validation using the reproducible checklist", "issue": null },
+    { "platform": "Windows", "browser": "Chrome or Edge and Firefox", "browserVersion": "Not available", "assistiveTechnology": "NVDA", "assistiveTechnologyVersion": "Not available", "viewportOrientation": "Desktop landscape", "result": "Not executed", "evidence": "NVDA was unavailable; execute the screen-reader portion of the reproducible checklist on real Windows", "issue": null },
+    { "platform": "Linux", "browser": "Chrome/Chromium", "browserVersion": "Not available for manual smoke", "assistiveTechnology": "Orca", "assistiveTechnologyVersion": "Not available", "viewportOrientation": "Desktop landscape", "result": "Not executed", "evidence": "Orca interaction was unavailable; execute where a reproducible Orca environment is practical", "issue": null },
+    { "platform": "Linux", "browser": "Firefox", "browserVersion": "Not available for manual smoke", "assistiveTechnology": "Orca", "assistiveTechnologyVersion": "Not available", "viewportOrientation": "Desktop landscape", "result": "Not executed", "evidence": "Orca interaction was unavailable; execute where a reproducible Orca environment is practical", "issue": null },
+    { "platform": "macOS", "browser": "Safari", "browserVersion": "Not available", "assistiveTechnology": "VoiceOver", "assistiveTechnologyVersion": "Not available", "viewportOrientation": "Desktop landscape", "result": "Not executed", "evidence": "Requires final human/device validation using the reproducible checklist", "issue": null },
+    { "platform": "macOS", "browser": "Chrome", "browserVersion": "Not available", "assistiveTechnology": "None", "assistiveTechnologyVersion": "Not applicable", "viewportOrientation": "Desktop landscape", "result": "Not executed", "evidence": "Requires final human/device validation using the reproducible checklist", "issue": null },
+    { "platform": "macOS", "browser": "Firefox", "browserVersion": "Not available", "assistiveTechnology": "None", "assistiveTechnologyVersion": "Not applicable", "viewportOrientation": "Desktop landscape", "result": "Not executed", "evidence": "Requires final human/device validation using the reproducible checklist", "issue": null },
+    { "platform": "Android", "browser": "Chrome on real touch device", "browserVersion": "Not available", "assistiveTechnology": "TalkBack", "assistiveTechnologyVersion": "Not available", "viewportOrientation": "Phone portrait and landscape", "result": "Not executed", "evidence": "Chromium touch emulation is not Android certification; requires final human/device validation", "issue": null },
+    { "platform": "iOS", "browser": "Safari on real iPhone", "browserVersion": "Not available", "assistiveTechnology": "VoiceOver", "assistiveTechnologyVersion": "Not available", "viewportOrientation": "Phone portrait and landscape", "result": "Not executed", "evidence": "Playwright WebKit is not iOS Safari certification; requires final human/device validation", "issue": null },
+    { "platform": "iPadOS", "browser": "Safari on real iPad-class device", "browserVersion": "Not available", "assistiveTechnology": "VoiceOver", "assistiveTechnologyVersion": "Not available", "viewportOrientation": "Tablet portrait and landscape", "result": "Not executed", "evidence": "Playwright WebKit is not iPadOS Safari certification; requires final human/device validation", "issue": null }
+  ]
+}
