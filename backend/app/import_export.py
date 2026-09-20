@@ -467,6 +467,25 @@ def _row_dict(item: Any) -> dict[str, Any]:
     return {column.name: getattr(item, column.name) for column in _table(type(item)).columns}
 
 
+def _sanitize_portable_host_metadata(tables: dict[str, list[dict[str, Any]]]) -> None:
+    """Remove host-local metadata without changing the portable table shape."""
+    for row_index, row in enumerate(tables.get("import_records", [])):
+        if "pre_import_backup_reference" in row:
+            value = row["pre_import_backup_reference"]
+            if value is not None and not isinstance(value, str):
+                raise AppError(
+                    422,
+                    "PORTABLE_TYPE_INVALID",
+                    "Portable backup values must use canonical data types.",
+                    {
+                        "table": "import_records",
+                        "row": row_index,
+                        "column": "pre_import_backup_reference",
+                    },
+                )
+            row["pre_import_backup_reference"] = None
+
+
 def _capability_projection_checkpoints(db: Session) -> list[dict[str, str]]:
     checkpoints: list[dict[str, str]] = []
     for state in db.scalars(select(CompetencyCapabilityState)).all():
@@ -498,6 +517,7 @@ def _portable_payload(db: Session, project_ids: set[str] | None = None) -> dict[
         },
     }
     tables = payload["tables"]
+    _sanitize_portable_host_metadata(tables)
     all_project_ids = {row["id"] for row in tables["projects"]}
     if project_ids is not None and project_ids - all_project_ids:
         raise AppError(
@@ -927,9 +947,7 @@ def _validate_roadmap_projection_checkpoint(payload: dict[str, Any], schema_vers
         )
     if checkpoint["configured"]:
         try:
-            layout_policy = require_registered_layout_policy(
-                str(checkpoint["layoutPolicyVersion"])
-            )
+            layout_policy = require_registered_layout_policy(str(checkpoint["layoutPolicyVersion"]))
         except ValueError as exc:
             raise AppError(
                 422,
@@ -2724,6 +2742,7 @@ def _normalize_portable_tables(
         upgrade_authority_compatibility()
     elif schema_version == 8:
         upgrade_authority_compatibility()
+    _sanitize_portable_host_metadata(tables)
     return tables, legacy_without_scope_history
 
 

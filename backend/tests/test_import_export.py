@@ -1,7 +1,19 @@
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 
+import pytest
+from app.authority import service as authority_service
+from app.authority.models import LearningControlAuthorityState
+from app.errors import AppError
+from app.import_diff import PORTABLE_DOMAIN_TABLES, build_portable_replacement_diff
+from app.import_export import (
+    PORTABLE_BY_TABLE,
+    _apply_portable_restore,
+    _portable_payload,
+    _validate_portable_payload,
+)
 from app.models import (
     AuthSession,
     CompetencyIdentity,
@@ -29,6 +41,26 @@ def _package(package_type: str, package_id: str, payload: dict[str, object]) -> 
     }
 
 
+def _activate_v2_for_import_test(db: Session, idempotency_key: str) -> None:
+    state = db.get(LearningControlAuthorityState, 1)
+    assert state is not None
+    authority_service._append_event(
+        db,
+        state,
+        idempotency_key=idempotency_key,
+        command_type="activate_v2",
+        resulting={
+            "canonicalLearningAuthority": "v2",
+            "recommendationPresentation": "v2",
+            "roadmapPresentation": "v2",
+            "todayPresentation": "v2",
+        },
+        reason="Test-only activation without operational backup",
+        now_ms=utc_now_ms(),
+    )
+    db.commit()
+
+
 async def _portable_export(client: AsyncClient, csrf: str) -> dict[str, object]:
     response = await client.post(
         "/api/v1/import-export/export",
@@ -43,6 +75,20 @@ async def test_export_taxonomy_and_secret_exclusion(
     configured_client: tuple[AsyncClient, str, dict[str, object]], db: Session
 ) -> None:
     client, csrf, _roadmap = configured_client
+    local_backup_path = "/srv/lcc/backups/pre-import-sensitive.sqlite3"
+    db.add(
+        ImportRecord(
+            package_id="historical-import-with-local-path",
+            import_type="roadmap_update",
+            schema_version=1,
+            source_filename="roadmap.json",
+            dry_run_summary_json="{}",
+            applied=True,
+            applied_at=utc_now_ms(),
+            pre_import_backup_reference=local_backup_path,
+        )
+    )
+    db.commit()
     invalid = await client.post(
         "/api/v1/import-export/export",
         json={"purpose": "portable_logical_backup", "format": "markdown"},
@@ -58,6 +104,13 @@ async def test_export_taxonomy_and_secret_exclusion(
     assert "password_hash" not in serialized
     assert "token_lookup_hash" not in serialized
     assert "csrf_secret_hash" not in serialized
+    assert local_backup_path not in json.dumps(package)
+    exported_import_record = next(
+        row
+        for row in tables["import_records"]
+        if row["package_id"] == "historical-import-with-local-path"
+    )
+    assert exported_import_record["pre_import_backup_reference"] is None
 
     analysis = await client.post(
         "/api/v1/import-export/export",
@@ -121,6 +174,74 @@ async def test_export_taxonomy_and_secret_exclusion(
     )
     assert human.status_code == 200
     assert human.json()["content"].startswith("# Learning-Control-Center export")
+
+
+def test_historical_v9_backup_paths_are_readable_but_not_restored(db: Session) -> None:
+    historical_path = "/var/lib/lcc/backups/old-host-pre-import.sqlite3"
+    db.add(
+        ImportRecord(
+            package_id="historical-v9-audit-record",
+            import_type="state_update",
+            schema_version=1,
+            source_filename="state.json",
+            dry_run_summary_json="{}",
+            applied=True,
+            applied_at=utc_now_ms(),
+            pre_import_backup_reference=historical_path,
+        )
+    )
+    db.commit()
+    payload = _portable_payload(db)
+    historical_row = next(
+        row
+        for row in payload["tables"]["import_records"]
+        if row["package_id"] == "historical-v9-audit-record"
+    )
+    historical_row["pre_import_backup_reference"] = historical_path
+
+    validated_tables, _summary = _validate_portable_payload(
+        payload, "historical-v9-path-package", 9
+    )
+    validated_row = next(
+        row
+        for row in validated_tables["import_records"]
+        if row["package_id"] == "historical-v9-audit-record"
+    )
+    assert validated_row["pre_import_backup_reference"] is None
+
+    invalid_type = deepcopy(payload)
+    invalid_type["tables"]["import_records"][0]["pre_import_backup_reference"] = {
+        "path": historical_path
+    }
+    with pytest.raises(AppError) as raised:
+        _validate_portable_payload(invalid_type, "historical-v9-invalid-path-type", 9)
+    assert raised.value.code == "PORTABLE_TYPE_INVALID"
+    assert raised.value.details == {
+        "table": "import_records",
+        "row": 0,
+        "column": "pre_import_backup_reference",
+    }
+
+    missing_column = deepcopy(payload)
+    del missing_column["tables"]["import_records"][0]["pre_import_backup_reference"]
+    with pytest.raises(AppError) as raised:
+        _validate_portable_payload(missing_column, "historical-v9-missing-column", 9)
+    assert raised.value.code == "PORTABLE_SCHEMA_INVALID"
+
+    _apply_portable_restore(
+        db,
+        payload,
+        True,
+        package_id="historical-v9-path-restore",
+        schema_version=9,
+    )
+    db.commit()
+    db.expire_all()
+    restored = db.scalar(
+        select(ImportRecord).where(ImportRecord.package_id == "historical-v9-audit-record")
+    )
+    assert restored is not None
+    assert restored.pre_import_backup_reference is None
 
 
 async def test_dry_run_does_not_mutate_and_full_restore_preserves_authentication(
@@ -243,8 +364,78 @@ async def test_portable_restore_preview_compares_existing_replacement_scope(
         "removed": 1,
         "changed": True,
     }
-    assert replacement["categories"]["settings"]["modified"] == 1
-    assert {"reflections", "settings"} <= set(replacement["categoriesTouched"])
+    assert replacement["categories"]["discipline"]["modified"] == 1
+    assert {"discipline", "reflections"} <= set(replacement["categoriesTouched"])
+
+
+@pytest.mark.parametrize(
+    ("table_name", "category"),
+    [
+        ("target_profiles", "targetProfiles"),
+        ("curricula", "curriculum"),
+        ("projects", "projects"),
+        ("learning_graphs", "learningGraph"),
+        ("evidence", "evidence"),
+        ("capability_evaluation_runs", "capabilityReview"),
+        ("analysis_v3_signals", "analysisV3"),
+        ("recommendation_v2_runs", "recommendationV2"),
+        ("today_suggestions", "todayV2"),
+        ("learning_control_authority_events", "learningControlAuthority"),
+    ],
+)
+def test_portable_replacement_diff_categorizes_v2_only_changes(
+    table_name: str, category: str
+) -> None:
+    existing = {name: [] for name in PORTABLE_BY_TABLE}
+    incoming = deepcopy(existing)
+    table = PORTABLE_BY_TABLE[table_name].__table__
+    incoming[table_name] = [
+        {column.name: f"{table_name}:{column.name}" for column in table.primary_key.columns}
+    ]
+
+    replacement = build_portable_replacement_diff(existing, incoming, PORTABLE_BY_TABLE)
+
+    assert replacement["categoriesTouched"] == [category]
+    assert replacement["categories"][category]["added"] == 1
+    assert replacement["tables"][table_name]["added"] == 1
+    assert replacement["tables"][table_name]["changed"] is True
+
+
+def test_portable_replacement_diff_taxonomy_is_complete_disjoint_and_deterministic() -> None:
+    assignments = [
+        table_name for table_names in PORTABLE_DOMAIN_TABLES.values() for table_name in table_names
+    ]
+    assert set(assignments) == set(PORTABLE_BY_TABLE)
+    assert len(assignments) == len(set(assignments))
+
+    existing = {name: [] for name in PORTABLE_BY_TABLE}
+    incoming = deepcopy(existing)
+    changed_tables = (
+        "target_profiles",
+        "curricula",
+        "recommendation_v2_runs",
+        "application_settings",
+    )
+    for table_name in changed_tables:
+        table = PORTABLE_BY_TABLE[table_name].__table__
+        incoming[table_name] = [
+            {column.name: f"{table_name}:{column.name}" for column in table.primary_key.columns}
+        ]
+
+    first = build_portable_replacement_diff(existing, incoming, PORTABLE_BY_TABLE)
+    second = build_portable_replacement_diff(existing, incoming, PORTABLE_BY_TABLE)
+
+    assert first == second
+    assert first["categoriesTouched"] == [
+        "targetProfiles",
+        "curriculum",
+        "recommendationV2",
+        "settings",
+    ]
+    assert sum(category["added"] for category in first["categories"].values()) == len(
+        changed_tables
+    )
+    assert sum(table["added"] for table in first["tables"].values()) == len(changed_tables)
 
 
 async def test_analysis_snapshot_includes_filtered_roadmap_and_resolved_scope(
@@ -436,6 +627,69 @@ async def test_roadmap_update_and_replace_are_complete_version_aliases(
         current = await client.get("/api/v1/roadmap/current")
         assert current.json()["roadmap"]["activeVersion"]["version"] == version
         assert current.json()["roadmap"]["title"] == title
+
+
+@pytest.mark.parametrize("package_type", ["roadmap_update", "roadmap_replace"])
+async def test_legacy_roadmap_import_inspection_is_blocked_after_v2_activation(
+    configured_client: tuple[AsyncClient, str, dict[str, object]],
+    roadmap_payload: dict[str, object],
+    db: Session,
+    package_type: str,
+) -> None:
+    client, csrf, _roadmap = configured_client
+    _activate_v2_for_import_test(db, f"activate-before-{package_type}-inspect")
+    incoming = deepcopy(roadmap_payload)
+    incoming["version"] = "2.0.0"
+    package = _package(package_type, f"blocked-{package_type}", {"roadmap": incoming})
+
+    preview = await client.post(
+        "/api/v1/import-export/import/inspect",
+        json={"filename": f"{package_type}.json", "package": package},
+        headers={"X-CSRF-Token": csrf},
+    )
+
+    assert preview.status_code == 409
+    assert preview.json()["error"]["code"] == "LEGACY_AUTHORITY_READ_ONLY"
+    assert "confirmationToken" not in preview.json()
+
+
+async def test_legacy_roadmap_import_apply_rechecks_authority_after_inspection(
+    configured_client: tuple[AsyncClient, str, dict[str, object]],
+    roadmap_payload: dict[str, object],
+    db: Session,
+) -> None:
+    client, csrf, _roadmap = configured_client
+    incoming = deepcopy(roadmap_payload)
+    incoming["version"] = "2.0.0"
+    package = _package("roadmap_update", "authority-changed-after-inspect", {"roadmap": incoming})
+    preview = await client.post(
+        "/api/v1/import-export/import/inspect",
+        json={"filename": "roadmap-update.json", "package": package},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert preview.status_code == 200, preview.text
+
+    _activate_v2_for_import_test(db, "activate-between-import-inspect-and-apply")
+    applied = await client.post(
+        "/api/v1/import-export/import/apply",
+        json={
+            "filename": "roadmap-update.json",
+            "package": package,
+            "confirmation_token": preview.json()["confirmationToken"],
+        },
+        headers={"X-CSRF-Token": csrf},
+    )
+
+    assert applied.status_code == 409
+    assert applied.json()["error"]["code"] == "LEGACY_AUTHORITY_READ_ONLY"
+    assert (
+        db.scalar(
+            select(func.count(ImportRecord.id)).where(
+                ImportRecord.package_id == "authority-changed-after-inspect"
+            )
+        )
+        == 0
+    )
 
 
 async def test_dependency_cycles_are_validated_within_each_retained_version(

@@ -1,28 +1,39 @@
-# Learning-Control-Center V1 Import / Export Format
+# Learning Control Center Import / Export Format
 
 ## Purpose and authority
 
-This is the single user- and AI-facing reference for the current V1 wire format. Exact JSON field names and validation rules come from the running application's Pydantic models, serializers, import validators, and persistence mappings. The application is always the final validator.
+This is the canonical human- and AI-facing reference for the import/export contracts implemented by the current post-Phase-3 application. Exact wire behavior comes from the running Pydantic schemas, serializers, validators, services, persistence mappings, and integrity checks. The application is the final validator when prose and implementation differ.
 
-The import screen accepts JSON packages of type `roadmap_update`, `roadmap_replace`, `verification_update`, `state_update`, `portable_logical_backup`, or `restore`. Analysis Snapshots are JSON export-only artifacts. Human Reports are Markdown export-only artifacts. Operational SQLite backups are internal recovery files, not import packages.
+The application contains four distinct contract families:
 
-All JSON objects described as strict reject unknown fields. Inspect is a non-mutating dry run; apply requires the returned confirmation token, creates a pre-import SQLite backup, runs in a transaction, validates integrity, and either commits completely or rolls back.
+1. **Legacy V1 mutation packages** for legacy Roadmap versions, verification records, and learning-lifecycle status.
+2. **Current export-only artifacts** for selective external analysis or human-readable reporting.
+3. **Portable logical backup/restore packages**, currently exported as schema V9, for application-generated state portability and recovery.
+4. **Operational SQLite backups**, which are server recovery files outside the JSON import contract.
 
-## Artifact matrix
+The modern learning model is V2-oriented. It is not initialized by a legacy Roadmap package. There is currently **no public hand-authored V2 import package** that directly initializes the complete Target Profile + semantic competencies + Curriculum + Projects + Learning Graph system. A separate Master LCC Import contract does not currently exist in this document or application.
 
-| Artifact/type | Format | Importable | Exportable | Selective | Full state | Purpose |
-| --- | --- | --- | --- | --- | --- | --- |
-| `analysis_snapshot` | JSON envelope | no | yes | yes | no | Roadmap-aware data for analysis |
-| Human Report | Markdown | no | yes | yes | no | Readable scoped summary |
-| `portable_logical_backup` | JSON envelope | yes | yes | Project scope | yes | Secret-free portable learning state |
-| `restore` | JSON envelope | yes | no | no | yes | Accepted alias for restoring a portable payload |
-| `roadmap_update` | JSON envelope | yes | no | n/a | complete incoming version | Add and activate a complete roadmap version |
-| `roadmap_replace` | JSON envelope | yes | no | n/a | complete incoming version | V1 alias of `roadmap_update` |
-| `verification_update` | JSON envelope | yes | no | n/a | no | Append verification records and implied statuses |
-| `state_update` | JSON envelope | yes | no | n/a | no | Explicit competency status changes |
-| Operational SQLite backup | SQLite file | internal only | internal only | no | complete database | Pre-mutation and operational recovery |
+## Import/export context in current LCC
 
-`roadmap_update` and `roadmap_replace` intentionally have identical V1 behavior: each payload describes one complete new roadmap version, not a patch. Existing stable identities and their history are preserved; definitions absent from the new active version are no longer active. A `(roadmap stable_key, version)` pair cannot be imported twice.
+Current canonical learning state includes versioned Target Profiles, semantic Competency definitions and criteria, capability scales and dimensions, Evidence, actual Activities and Sessions, SessionContributions, Curriculum, Projects, and the native Learning Graph. Analysis V3 diagnoses that state; Recommendation V2 produces deterministic audited decisions; Today V2 presents advisory suggestions and relates them to actual Activity; learning-control authority records the irreversible V1-to-V2 cutover and presentation history.
+
+Roadmap is now a derived projection over V2 canonical state. Legacy `Roadmap`, `RoadmapVersion`, `Phase`, `Track`, and related definitions remain compatibility and historical data. The legacy `roadmap_update` and `roadmap_replace` packages create only those legacy structures and their stable identities; they do not create a Target Profile, native semantic definitions, capability targets, Curriculum, Projects, a native Learning Graph, Analysis V3 history, Recommendation V2 decisions, or Today V2 history.
+
+## Contract and artifact matrix
+
+| Contract family | Artifact/type | Format | Importable | Exportable | Schema behavior | Hand authoring | Purpose |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Legacy V1 mutation | `roadmap_update` | JSON envelope | yes | no | exactly V1 | supported with caution | Add and activate one complete legacy Roadmap version |
+| Legacy V1 mutation | `roadmap_replace` | JSON envelope | yes | no | exactly V1 | supported with caution | Compatibility alias of `roadmap_update`; not a destructive replacement patch |
+| Legacy V1 mutation | `verification_update` | JSON envelope | yes | no | exactly V1 | supported with existing internal IDs | Append legacy-compatible verification records and implied lifecycle statuses |
+| Legacy V1 mutation | `state_update` | JSON envelope | yes | no | exactly V1 | supported with existing internal IDs | Apply explicit legacy learning-lifecycle status changes |
+| Portable | `portable_logical_backup` | JSON envelope | yes | yes | reads V1–V9; exports V9 | no; application-generated only | Logical portable-state backup and full replacement restore |
+| Portable alias | `restore` | JSON envelope | yes | no | reads V1–V9 | no; application-generated payload only | Import alias for the same portable restore contract |
+| Export-only | `analysis_snapshot` | JSON envelope | no | yes | export envelope V1 | request is hand-authored; content is generated | Selective legacy analytics/legacy Roadmap-context export |
+| Export-only | Human Report / `human_report` | Markdown | no | yes | no JSON package schema | request is hand-authored; content is generated | Human-readable selective summary |
+| Operational | SQLite backup | SQLite file | offline/internal recovery only | internal only | database/Alembic format | no | Full deployed-database disaster recovery and automatic pre-mutation safety backup |
+
+Portable schema V9 is an internal database-row and immutable-history representation with exact manifests and checkpoints. It is **not** the recommended hand-authored Master LCC format.
 
 ## JSON package envelope
 
@@ -37,15 +48,39 @@ All JSON objects described as strict reject unknown fields. Inspect is a non-mut
 }
 ```
 
-## Verification and state updates
+The envelope is strict: unknown envelope fields are rejected. `packageId` is non-empty and at most 255 characters. `appVersion` and `createdAt` are recorded producer metadata; the importer does not select behavior from the filename. Legacy mutation packages require `schemaVersion: 1`. Portable backup/restore accepts schema versions 1 through 9. Exported `analysis_snapshot` envelopes use schema version 1, while exported portable backups use schema version 9.
+
+## Legacy V1 mutation packages
+
+These packages remain supported compatibility contracts. They are not a complete modern LCC initialization mechanism.
+
+### Roadmap update and replace
+
+`roadmap_update` and `roadmap_replace` intentionally have identical behavior: each payload describes one complete new legacy Roadmap version, not a partial patch. Existing matching stable identities and their history are preserved. Definitions absent from the new active version are no longer active in that version. A `(roadmap stable_key, version)` pair cannot be imported twice.
+
+Both package types require `schemaVersion: 1`. Their exact payload schema, validation rules, and tested examples appear later under [Legacy V1 Roadmap examples and schema](#legacy-v1-roadmap-examples-and-schema).
+
+#### Authority boundary for legacy Roadmap imports
+
+Legacy Roadmap package application uses the same learning-control authority guard as normal V1 Roadmap mutation. Before canonical V2 activation, valid `roadmap_update` and `roadmap_replace` packages can be inspected and applied. After activation, inspection of either type fails with HTTP 409 and `LEGACY_AUTHORITY_READ_ONLY` before a confirmation token is issued.
+
+Apply independently reruns inspection and enforces the same domain-level guard inside the mutation path. A token obtained before V2 activation therefore cannot be used to apply a legacy Roadmap package after activation. Compatibility/history reads remain available; only legacy mutation is contracted.
+
+### Verification and state updates
 
 `verification_update` has payload `{"verifications": [verification, ...]}`. A verification requires `competency_identity_id`, `verification_source`, `method`, and `result`. It may contain `confidence` (null or 0..100), `reviewer_label`, `evidence_summary`, `notes`, and `evidence` (default `[]`). Evidence requires `kind` (1..64 characters) and non-empty `reference`; `description` defaults to `""`. The identity is the application's database UUID, not a stable key.
 
 Verification sources are `self`, `automated`, and `external`; results are `passed`, `failed`, and `partial`. Apply records history and implies status `verified`, `needs_review`, or `practicing`, respectively.
 
-`state_update` has payload `{"states": [state, ...]}`. A state requires `competency_identity_id` and `status`; `reason` defaults to `"Imported status update"`. A `verified` state also requires a `verification` object for the same identity with result `passed`. Other statuses must not include `verification`. Both package payloads are strict, validate references during inspect, and are preflighted against current state.
+`state_update` has payload `{"states": [state, ...]}`. A state requires `competency_identity_id` and `status`; `reason` defaults to `"Imported status update"`. A `verified` state also requires a `verification` object for the same identity with result `passed`. Other statuses must not include `verification`. Both package payloads are strict, validate references during inspect, and are preflighted against current state. These imports update legacy-compatible verification/lifecycle records; they do not directly assign V2 capability levels or replace evidence-backed capability evaluation.
 
-## Analysis Snapshot
+## Export-only artifacts
+
+Every successful export creates and commits an `ExportRecord` containing the purpose, format, request scope summary, and creation time. Exporting does not change canonical learning facts, immutable generated reports, or reflections, but it is not database-read-only because it appends this audit metadata.
+
+### Import/export `analysis_snapshot`
+
+The wire type `analysis_snapshot` is the selective export produced by the import/export subsystem. It is **not** the same contract as the canonical persisted Analysis V3 `AnalysisRun`/`AnalysisSnapshot` history. It uses the legacy deterministic analytics builder and optional filtered legacy active-Roadmap context. It neither exports an Analysis V3 snapshot by ID nor represents the Analysis V3 current pointer.
 
 Create this export with purpose `analysis_snapshot`, format `json`, and optional scope fields:
 
@@ -58,7 +93,7 @@ Create this export with purpose `analysis_snapshot`, format `json`, and optional
 
 The envelope payload always contains `scope`. It records the request plus `resolved_start_date`, `resolved_end_date`, `timezone`, `resolved_categories`, and resolved selected track/competency labels and stable keys. Requested selectors are intersected. Unknown selectors are rejected.
 
-Selected category keys are `roadmap` (filtered active roadmap/version/phase/track/competency context), `analytics` (canonical deterministic output), `sessions` (stored rows in range), `verification` (stored records in range), `reports` (overlapping immutable report snapshots), and `safeSettings` (discipline profile or null). Empty or undefined ratios remain null/`N/A` according to their source; omission is not zero. Authentication secrets are never included.
+Selected category keys are `roadmap` (filtered legacy active-roadmap/version/phase/track/competency context), `analytics` (legacy-compatible deterministic analytics output), `sessions` (stored rows in range), `verification` (stored records in range), `reports` (overlapping immutable report snapshots), and `safeSettings` (discipline profile or null). Empty or undefined ratios remain null/`N/A` according to their source; omission is not zero. Authentication secrets are never included.
 
 Representative shape (IDs and metric details vary):
 
@@ -84,9 +119,9 @@ Representative shape (IDs and metric details vary):
 }
 ```
 
-Analysis Snapshots are not accepted by import.
+`analysis_snapshot` artifacts are not accepted by import.
 
-## Human Report
+### Human Report
 
 Create with purpose `human_report`, format `markdown`, and the same selective scope fields as Analysis Snapshot. The Markdown begins with the export instant, requested range preset, resolved local-date period and timezone, included categories, current-phase flag, and resolved track/competency selection, followed by a readable summary. It is not a JSON package and cannot be imported or restored. It does not mutate immutable generated reports or user reflections.
 
@@ -106,25 +141,97 @@ Competencies: Functions (programming.functions)
 - Total learning duration: 3600000 ms
 ```
 
-## Portable Logical Backup and restore
+## Portable logical backup and restore
 
-Portable export uses purpose `portable_logical_backup`, format `json`, and emits the normal envelope with `packageType: "portable_logical_backup"`. An optional `project_ids` list selects Projects. Empty means all Projects. The exporter deterministically adds any Project required by retained shared canonical facts, including Project-generated Evidence, Profile readiness predicates, and the transitive replacement side of cross-Project Activity-link or Session-contribution corrections, and records requested, included, and closure-added IDs in `portableScope`. It never drops retained shared history to satisfy a narrower request. Every table below is required, even when its value is an empty array:
+### Purpose and package types
 
-The required table set includes all application-produced keys in the representative package below. It includes immutable profile, semantic competency, criterion, activation, built-in capability-scale, Activity, SessionContribution, contribution-retraction, Session-correction, Evidence, EvidenceLink, Evidence lifecycle, and redaction facts; `projection_invalidations` remains explicitly omitted because it is rebuildable. SessionContribution rows contain attribution only and never contain duration: the linked LearningSession remains the sole canonical owner of exact elapsed `duration_ms`.
+Portable export uses purpose and package type `portable_logical_backup`, format `json`, and currently emits `schemaVersion: 9`. Import accepts either `portable_logical_backup` or the compatibility alias `restore` with the same payload. Both package types accept supported historical portable schemas V1 through V9.
 
-Every row must contain exactly every database column for that table. Use an application-produced export as the template; portable rows use internal database IDs and are not intended for hand authoring. `users`, `auth_sessions`, and `operational_backups` are excluded, as are password hashes, session/CSRF tokens, and backup filesystem paths.
+Portable data is an application-generated recovery representation. Every included table row must contain exactly the database columns expected for that table, with strict canonical scalar types. The payload also carries a version-exact manifest and integrity/rebuild checkpoints. Internal IDs, immutable lineages, policy versions, hashes, and cross-table references make this unsuitable for ordinary hand authoring.
 
-Restore accepts `portable_logical_backup` or `restore` with the same payload. It is never a merge: an empty learning state may restore directly; non-empty portable state requires explicit full-replacement confirmation. Authentication users and active sessions remain intact. A pristine automatically created discipline profile counts as empty; changed discipline settings and every other populated portable table count as existing portable state.
+### Project-selective production and full-replacement restore
 
-Import inspection validates exact table/column coverage, strict canonical scalar types, foreign keys, structured JSON, IANA timezones, complete competency state/history, current-roadmap pointers, phase/track/parent placement, exit-criterion ownership, verified-event evidence, and version-scoped hierarchy and required-dependency cycles in a disposable database before mutation. The same domain-integrity validation runs inside the restore transaction after insertion. Inspection and failed post-restore validation do not mutate the live portable state.
+An optional `project_ids` export selector chooses Projects; an empty list means all Projects. The exporter adds every Project required by retained shared facts, including Project-generated Evidence, Profile readiness predicates, Analysis/Recommendation frozen inputs, and the transitive replacement side of cross-Project Activity-link or Session-contribution corrections. `portableScope` records requested, included, and closure-added Project IDs. Shared retained history is never discarded merely to satisfy a narrower Project request.
 
-The restore inspection response includes `replacementDiff`, which compares current and incoming portable state by table and by portable domain. It reports existing and incoming row counts plus rows that will be added, modified, or removed, identifies every affected domain, and states that authentication is preserved and merge restore is unsupported.
+Project selection applies only while **producing** the artifact. Restoring any portable artifact is still a full portable-state replacement. Projects omitted from a project-selective artifact are not merged or preserved from the destination.
 
-Current application-produced portable backups use `schemaVersion: 9`. V3 introduced Curriculum, V4 Projects, V5 the native Learning Graph and Roadmap Projection inputs, V6 immutable discipline-configuration and Analysis V3 history, V7 complete immutable Recommendation V2 decision history, and V8 prospective Today V2 history. V9 adds the monotonic learning-control authority state and its append-only event history, verified by `authorityCheckpoint`. Its adapter initializes every pre-V9 package at the legacy-authority baseline and never infers that V2 was activated. V1 through V8 backups remain readable through lossless linear adapters; no adapter reconstructs native graphs, diagnostics, Recommendation decisions, Today interactions, or authority transitions from legacy status or Roadmap structure. Derived capability/review, availability, graph satisfaction, Roadmap Projection cache, Analysis current-pointer state, and Today current status remain rebuildable rather than portable truth.
+An empty learning state may restore directly. Any existing portable state requires `replace_existing: true`; merge restore is unsupported. A pristine automatically created discipline profile counts as empty, while modified discipline settings and every other populated portable table count as existing state. Existing authentication users and active authentication sessions are not part of logical replacement and remain intact.
+
+### Validation and restore integrity
+
+Inspection requires supported table coverage, exact row columns, strict canonical row types, valid structured JSON and IANA timezones, valid foreign keys, complete history/state relationships, versioned ownership, hierarchy and required-dependency acyclicity, immutable-history hashes, registered policy versions, and checkpoint coherence. Portable rows are inserted into a freshly migrated temporary SQLite database, then the same domain-integrity rules and available catalog/projection parity checks run there before a confirmation token is issued.
+
+Apply repeats inspection against current state. Inside the restore transaction it deletes portable and rebuildable state, inserts normalized portable rows, reconstructs declared projections/current state, validates retained immutable lineage, checks exported checkpoints, and runs domain-integrity validation again. Any failure rolls back the live database transaction.
+
+### Authentication, secrets, and host-local metadata
+
+Portable tables exclude `users`, `auth_sessions`, authentication rate-limit/security-audit tables, and `operational_backups`. Consequently password hashes, session lookup hashes, CSRF state, and operational-backup table rows are not portable. Runtime environment secrets such as bootstrap and application security secrets are not database portable state. External Evidence and verification references are filtered or redacted when they contain recognized credential-bearing URL forms.
+
+The current exporter does **not** provide a universal secret scanner for arbitrary free-text or non-secret application-setting values. `import_records` remains portable for audit continuity, and its exact row shape still includes nullable `pre_import_backup_reference`; however, the portable boundary always serializes that column as JSON null. On read, supported historical packages that contain a valid string value are accepted and normalized to null before restore; non-string/non-null values still fail strict scalar-type validation. The destination therefore retains the audit event but does not import another host's backup path or pretend that the referenced backup exists locally.
+
+This correction remains portable schema V9. It changes neither the manifest, table set, exact column set, nor nullable scalar contract, and the field is not part of a portable checkpoint or immutable-history hash. Historical V1–V9 packages remain readable. A live successful import still records its newly created local backup path in the destination database for local recovery, but later portable exports null that host-local value.
+
+### Portable schema history and linear adapters
+
+Portable readers use a linear V1→V2→V3→V4→V5→V6→V7→V8→V9 adapter chain. “Lossless” means available source facts are preserved or deterministically represented with provenance. It does **not** mean ambiguous legacy data is upgraded into invented modern meaning.
+
+| Portable schema | Contract introduced | Historical adapter behavior |
+| --- | --- | --- |
+| V1 | Legacy Roadmap, lifecycle status/history, verification, sessions, reports, recommendation snapshots, settings, and operation history | Deterministically backfills V2-compatible Activities, primary SessionContributions, unified Evidence/links, legacy criterion assertions, built-in scales, and audit lineage. Missing creation/evidence semantics remain unknown or legacy-unspecified. |
+| V2 | Target Profile and semantic-competency foundations; capability scales; canonical Activity/contribution and Evidence domains; immutable capability/review history; the immutable Analysis run/snapshot boundary; projection checkpoints | Does not infer Target Profiles or native semantic definitions from legacy Roadmap meaning. |
+| V3 | Curriculum identities, immutable versions, activity links/history, and Curriculum catalog checkpoint | Initializes absent Curriculum tables as empty; does not infer Curriculum. |
+| V4 | Projects, project versions/history, Activity/Session attribution, criterion evaluation, project-selective scope, and Project catalog checkpoint | Initializes absent Project tables as empty; does not infer Projects. |
+| V5 | Native Learning Graph, activation history, Roadmap Projection manual inputs/preferences, legacy Roadmap compatibility state, and projection checkpoint | Initializes native graph/projection tables; derives only exact legacy Roadmap active-pointer compatibility state and does not infer native graph meaning. |
+| V6 | Immutable discipline-configuration event history and Analysis V3 run/snapshot/fact/gap/signal/Unknown history plus current-pointer checkpoint | Creates an exact discipline-configuration compatibility baseline when possible; initializes Analysis V3 history empty and does not fabricate diagnostics. |
+| V7 | Complete immutable Recommendation V2 runs, candidates, eligibility decisions, rule results, expected values, score components, selections, recommendations, and reasons | Initializes Recommendation V2 history empty; does not reinterpret legacy recommendation snapshots as V2 decisions. |
+| V8 | Today V2 generations, suggestions, interactions/corrections, actual-Activity relations/corrections, and current-state checkpoint | Initializes Today V2 history empty; does not infer interactions from legacy decisions or sessions. |
+| V9 | Monotonic learning-control authority state/history and `authorityCheckpoint`; physical contraction of legacy Roadmap pointer columns | Validates exact V8 Roadmap-pointer parity, preserves it in compatibility state, removes contracted pointer columns, and creates only the legacy-authority bootstrap baseline. It never infers V2 activation. |
+
+Adapters do not fabricate Target Profiles, unavailable native semantic definitions, Curriculum, Projects, native Learning Graph semantics, Analysis V3 history, Recommendation V2 decisions, Today V2 interactions, or V2 authority activation. The deterministic compatibility baselines listed above are the only deliberate additions.
+
+### Canonical and immutable portable state
+
+The V9 manifest includes canonical facts and the immutable history needed to preserve meaning and auditability, including:
+
+- stable and versioned legacy/V2 identities, definitions, targets, criteria, graphs, Curricula, and Projects;
+- activation and scope history;
+- actual Activities, Sessions, SessionContributions, corrections, and retractions;
+- Evidence, EvidenceLinks, provenance, invalidation/retraction/redaction history, verification, and criterion evaluations;
+- capability evaluation runs, criterion results, capability/review events, and their immutable lineage;
+- discipline configuration history;
+- immutable Analysis V3, Recommendation V2, and Today V2 histories;
+- learning-control authority state and append-only authority events;
+- non-authentication application settings and import/export audit history.
+
+Some included Analysis, Recommendation, and Today records are immutable histories of derived computation, not source learning facts. Their inclusion preserves exact decisions and audit lineage; it does not make them inputs for rebuilding Evidence or capability truth.
+
+`SessionContribution` rows contain attribution only and never duration. The linked `LearningSession` remains the sole canonical owner of exact elapsed `duration_ms`.
+
+### Omitted rebuildable state
+
+The exact V9 manifest labels the following projections/current-state material as rebuildable and omits it from portable tables:
+
+- competency capability current state;
+- competency review current state;
+- durable projection-invalidation work rows;
+- Curriculum availability;
+- Project current lifecycle and task availability;
+- Learning Graph edge satisfaction;
+- Roadmap Projection cache and persisted checkpoint rows;
+- Analysis V3 current-pointer rows;
+- Today suggestion current-state rows.
+
+Restore rebuilds or reconstructs these from retained facts/history and verifies parity where the package provides a checkpoint. It does not rerun Analysis V3 merely because a snapshot was restored. The Analysis current pointer is reconstructed from `analysisV3CurrentCheckpoint`: it remains current only when source generation, completed-through date, policy bundle, and deterministic inputs still match the live restored state; otherwise it is marked stale and an Analysis invalidation is queued. Recommendation V2 history is verified, not regenerated. Today current state, capability/review state, catalogs, and Roadmap Projection are rebuilt and checked according to the manifest actions.
+
+### Learning-control authority in V9
+
+Authority history is contiguous, hash-verified, and monotonic. A valid history begins with the system/migration legacy bootstrap. Canonical authority may transition once from `legacy_v1` to `v2`; later surface changes may select `v2` or labeled `v1_read_only` presentation while canonical authority remains V2.
+
+Every pre-V9 portable package is adapted to the legacy-authority baseline. No adapter infers that V2 was activated. When the destination is already V2-authoritative, restore rejects an incoming legacy authority state, a shorter history, or a history that does not contain the destination's existing authority events as an exact prefix. Restore therefore cannot demote V2 authority or silently remove/rewrite protected authority history.
 
 ### Representative empty portable package
 
-This valid package represents an empty portable learning state. Non-empty exports use the same keys with exact database rows.
+The following is an **application-generated representative structure**, retained as a validated recovery-contract example. It is not a hand-authoring template. This valid package represents an empty portable learning state; non-empty exports use the same keys with exact database rows and internally consistent history/checkpoints.
 
 ```json
 {
@@ -292,11 +399,64 @@ This valid package represents an empty portable learning state. Non-empty export
 }
 ```
 
+## Inspect and apply protocol
+
+All mutating JSON imports use the two-step `/import/inspect` then `/import/apply` protocol.
+
+### Inspect
+
+Inspection is a non-mutating dry run against live state plus isolated temporary databases where required. It performs, as applicable:
+
+1. strict envelope and package-specific payload parsing;
+2. configured maximum-package-size enforcement;
+3. package-type/schema-version compatibility checks;
+4. duplicate applied `packageId` lookup;
+5. reference, scalar-type, structured-JSON, timezone, ownership, history, integrity, hierarchy, and cycle validation;
+6. a migrated temporary-SQLite portable restore validation or a preflight mutation against a temporary copy of current portable state;
+7. a package-specific summary and diff;
+8. generation of a confirmation token.
+
+Inspection does not insert an `ImportRecord` and does not mutate live portable learning state. The confirmation token is held only in process memory, keyed by `packageId`, and expires after 900,000 ms (15 minutes). It is bound to the SHA-256 digest of the exact normalized package object, not merely to the filename or package ID. Restarting the backend loses outstanding previews. A later inspection of the same package ID replaces its cached preview.
+
+### Apply
+
+Apply first requires a present, unexpired token whose cached digest matches the submitted package exactly. It rechecks whether the package ID has already been applied and reruns the complete inspection against current state, preventing a stale preview from bypassing changed-state validation.
+
+The mutation then runs inside a database transaction:
+
+1. create and integrity-check a SQLite-safe `pre-import` operational backup;
+2. apply the package-specific mutation or full portable replacement;
+3. insert an `ImportRecord` containing package metadata, the inspected summary, applied time, and the local pre-import backup path reference (the path is nulled at the portable boundary);
+4. run post-apply domain-integrity validation;
+5. commit only if all steps succeed.
+
+An application or integrity failure rolls back the live database transaction. Projection work triggered by verification/state imports is drained after the source transaction commits. A successful apply removes the cached preview token. Because apply-time reinspection refreshes the process-local preview and failures may invalidate practical token reuse, clients should perform a new inspection after any failed apply rather than assuming the old token remains usable.
+
+Successful exports append an `ExportRecord` after generating the artifact. Successful imports append an `ImportRecord` in the mutation transaction. Applied package IDs are therefore protected against duplicate effects on later inspect and apply requests.
+
+## Portable replacement diff
+
+Portable inspection returns `replacementDiff` with `operation: "fullReplacement"`, `mergeSupported: false`, and `authenticationPreserved: true`. It provides complete per-table counts for every current portable table: existing rows, incoming rows, and rows added, modified, or removed. Primary-key equality determines row identity; any differing stored row is modified.
+
+The category taxonomy partitions every portable table exactly once:
+
+- modern canonical and history domains: `targetProfiles`, `semanticCompetencies`, `capabilityReview`, `sessions`, `evidence`, `curriculum`, `projects`, `learningGraph`, `roadmapProjection`, `discipline`, `analysisV3`, `recommendationV2`, `todayV2`, and `learningControlAuthority`;
+- legacy compatibility/history domains: `roadmap`, `competencyProgress`, `verification`, `recommendations`, and `legacyCompatibility`;
+- supporting and operational domains: `reflections`, `reports`, `settings`, and `operationHistory`.
+
+`sessions` owns Activities, Learning Sessions, SessionContributions, and their correction/retraction history. Curriculum-owned Activity links roll up under `curriculum`; Project-owned Activity links, Session attribution, and Project criterion evaluation roll up under `projects`. The shared `competency_identities` anchor rolls up under `semanticCompetencies`. Discipline configuration is separate from general `settings`. These ownership rules keep cross-domain tables deterministic and prevent category totals from double counting the same table row.
+
+For each table and category, `existing` and `incoming` are row counts on the two sides of replacement. `added` and `removed` use table primary keys; `modified` means the primary key exists on both sides but at least one stored column differs. A category's numbers are sums across its disjoint tables, so they are row-change counts rather than counts of conceptual learning entities. `categoriesTouched` is the deterministic taxonomy-ordered list of categories whose added, modified, or removed total is nonzero. Aggregate flags `willAddRows`, `willModifyRows`, and `willDeleteRows` are computed from the complete per-table diff.
+
+## Operational SQLite backups
+
+Operational backups are separate from portable logical backups. They are SQLite files created with SQLite's backup API and checked with `PRAGMA integrity_check` and `PRAGMA foreign_key_check`. Manual operational backup and automatic pre-import/pre-authority backup records contain a checksum, size, purpose, path, and creation time. Operational files may contain users, password hashes, authentication sessions, security history, and all other deployed database state. They require protected server storage and the separate offline recovery workflow; they are never accepted as a JSON import package.
+
 ## Time, duration, and enum reference
 
 - Envelope `createdAt` is a string; application exports produce RFC 3339 UTC.
 - Roadmap packages contain no timestamps or durations.
-- Portable and Analysis Snapshot stored-row timestamps are integer UTC epoch milliseconds. Nullable instants are JSON null.
+- Portable and import/export `analysis_snapshot` stored-row timestamps are integer UTC epoch milliseconds. Nullable instants are JSON null.
 - Canonical elapsed duration is integer `duration_ms`; never convert it to floating-point minutes in machine-readable data.
 - Local period dates are `YYYY-MM-DD`, resolved using the stored IANA timezone. Safe settings may contain that timezone.
 - Competency status: `not_started`, `learning`, `practicing`, `ready_for_verification`, `verified`, `needs_review`.
@@ -308,7 +468,11 @@ This valid package represents an empty portable learning state. Non-empty export
 - Assistance mode: `none`, `docs_only`, `ai_hint`, `ai_assisted`, `agent_led`.
 - Completed session outcome: `completed`, `partial`, `blocked`; portable cancelled timers can contain `cancelled`.
 
-## Actual invalid cases
+## Legacy V1 Roadmap validation examples
+
+The remaining schemas and examples in this section describe only the legacy V1 Roadmap mutation contract. They are retained because they are valid, tested compatibility inputs. They do not describe modern V2 initialization.
+
+### Actual invalid cases
 
 Each fragment below is invalid in its containing object:
 
@@ -334,20 +498,27 @@ A package where `a` requires `b` and `b` requires `a` creates a rejected require
 
 When generating data for Learning-Control-Center:
 
-1. Emit valid JSON without comments, ellipses, or extra prose when JSON is requested.
-2. Copy exact snake_case roadmap field names; do not translate them to camelCase.
-3. Treat each roadmap import as one complete version, never a partial patch.
-4. Preserve roadmap, competency, and exit-criterion stable identities across revisions.
-5. Use only documented enum strings and integer millisecond durations.
-6. Resolve every parent and prerequisite key to a supplied competency and avoid required/hierarchy cycles.
-7. Do not add database IDs, statuses, timestamps, archived flags, or exit states to roadmap payloads.
-8. Never include credentials, cookies, tokens, password hashes, or other secrets.
-9. Distinguish absent/null/undefined data from numeric zero and respect the requested export scope.
-10. Require application inspect/dry-run and human review before apply.
+1. Do not use `roadmap_update` or `roadmap_replace` as a substitute for complete modern LCC initialization. They create legacy Roadmap compatibility state only.
+2. Do not hand-author portable V9 as though it were a convenient semantic import schema. It contains internal database rows, IDs, versioned immutable history, exact manifests, policy references, hashes, and rebuild checkpoints.
+3. A separate Master LCC Import contract does not currently exist. Do not invent one or encode an undocumented package type.
+4. Emit only a documented package type and supported schema version. Emit valid JSON without comments, ellipses, or surrounding prose when JSON is requested.
+5. For a requested legacy Roadmap package, copy exact snake_case field names, treat the Roadmap as one complete version rather than a patch, and preserve roadmap, competency, and exit-criterion stable identities across genuine revisions.
+6. Resolve every parent and prerequisite key to a supplied legacy Roadmap competency and avoid hierarchy and required-dependency cycles.
+7. Do not add internal database IDs, lifecycle statuses, timestamps, archived flags, or exit states to a legacy Roadmap payload. Conversely, do not guess the internal competency UUIDs required by verification/state packages.
+8. Never fabricate portable rows, immutable events, activation history, internal IDs, hashes, manifests, checkpoints, policy versions, or compatibility baselines.
+9. Preserve Unknown, absent, and null semantics. Never translate them to zero, false, failure, `not_started`, `unexposed`, or another asserted value without an authoritative contract.
+10. Use only documented enum strings and integer millisecond durations. Never convert canonical duration to floating-point minutes.
+11. Never invent or embed credentials, cookies, session material, password hashes, API keys, tokens, bootstrap secrets, application secrets, or credential-bearing URLs.
+12. Treat import/export `analysis_snapshot` as the selective legacy analytics export contract, not as Analysis V3 history.
+13. Always require application inspection/dry-run, review the exact diff—especially per-table portable replacement changes—and obtain human approval before apply.
 
-## Realistic disposable roadmap package
+## Legacy V1 Roadmap examples and schema
 
-This synthetic package is for demonstrations and populated-state testing, not a personal learning roadmap.
+The examples in this section are executable compatibility examples. Their continued validity does not make legacy Roadmap the canonical V2 learning model.
+
+### Realistic disposable roadmap package
+
+This synthetic **legacy V1 Roadmap** package is for demonstrations and populated-state testing. It is not a personal learning roadmap and does not initialize the modern V2 learning system.
 
 ```json
 {
@@ -411,7 +582,7 @@ This synthetic package is for demonstrations and populated-state testing, not a 
 
 | Name | JSON type | Required | Allowed value/semantics | Example |
 | --- | --- | --- | --- | --- |
-| `schemaVersion` | integer | yes | `1` for V1 packages; portable backup/restore accepts `1` through `9` and exports `9` | `9` |
+| `schemaVersion` | integer | yes | `1` for legacy mutation and `analysis_snapshot` packages; portable backup/restore accepts `1` through `9` and exports `9` | `9` |
 | `packageType` | string | yes | One accepted import type listed above; exports use `analysis_snapshot` or `portable_logical_backup` | `roadmap_update` |
 | `packageId` | string | yes | Non-empty, at most 255 characters; must not have been applied before | `example-package-001` |
 | `appVersion` | string | yes | Producer application version; recorded, not semantically compared | `1.0.0` |
@@ -422,7 +593,7 @@ Unknown envelope fields are rejected. A successfully applied `packageId` is reco
 
 Roadmap inspection compares the active definition with the incoming definition by stable key. Its diff includes roadmap metadata, version transition, current phase, phase and track additions/removals/changes, competency additions/archival, phase and track movement, parent hierarchy, required and recommended prerequisites, learning objectives, layout positions, and exit-criterion additions/removals/changes. Existing competency state and learning logs remain outside a roadmap-definition mutation and are reported as preserved.
 
-## Roadmap package schema
+### Roadmap package schema
 
 A roadmap package has exactly one payload field, `roadmap`.
 
@@ -477,9 +648,9 @@ An exit criterion is identified by `(competency stable_key, exit criterion stabl
 
 The application rejects duplicate phase, track, or competency keys; duplicate persisted phase ordering; duplicate roadmap versions; missing current phase; missing parent or prerequisite references; required-prerequisite cycles; hierarchy cycles; invalid enum values; out-of-range weights/order indexes; and unknown fields. Inspect runs the actual apply logic against an isolated copy of current state, so predictable persistence conflicts are reported before confirmation. Transactional apply and post-apply integrity checks remain defense in depth.
 
-## Minimal valid roadmap package
+### Minimal valid roadmap package
 
-This disposable example is a complete version and can be copied as valid JSON.
+This disposable example is a complete legacy V1 Roadmap version and can be copied as valid JSON when that compatibility format is specifically required. It does not initialize V2 Target Profile, Curriculum, Projects, native Learning Graph, or other modern domains.
 
 ```json
 {

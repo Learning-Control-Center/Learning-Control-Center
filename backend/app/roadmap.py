@@ -299,6 +299,7 @@ def apply_roadmap_payload(
     *,
     scope_event_source: str = "roadmap_apply",
 ) -> Roadmap:
+    require_legacy_roadmap_writable(db)
     validate_roadmap_payload(payload)
 
     existing_current = current_legacy_roadmap(db)

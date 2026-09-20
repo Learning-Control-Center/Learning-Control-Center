@@ -22,29 +22,204 @@ from app.models import (
 )
 from app.schemas import RoadmapCreate
 
-PORTABLE_DOMAIN_TABLES = {
-    "roadmap": {
-        "roadmaps",
-        "roadmap_versions",
-        "phases",
-        "tracks",
-        "roadmap_scope_events",
-        "competency_identities",
-        "competency_definitions",
-        "competency_prerequisites",
-        "competency_understanding_items",
-        "competency_ability_items",
-        "exit_criterion_identities",
-        "exit_criterion_definitions",
-    },
-    "competencyProgress": {"competency_states", "competency_status_events"},
-    "verification": {"verification_records", "verification_evidence"},
-    "sessions": {"learning_sessions"},
-    "reflections": {"daily_reflections"},
-    "reports": {"generated_reports"},
-    "recommendations": {"recommendation_snapshots"},
-    "settings": {"discipline_profiles", "application_settings"},
-    "operationHistory": {"import_records", "export_records"},
+PORTABLE_DOMAIN_TABLES: dict[str, frozenset[str]] = {
+    # Shared identity anchors belong to their modern canonical owner. Tables that
+    # connect domains belong to the domain that owns the relationship. Each
+    # portable table is intentionally assigned exactly once so category totals do
+    # not double count rows.
+    "targetProfiles": frozenset(
+        {
+            "target_profiles",
+            "target_profile_versions",
+            "profile_domains",
+            "profile_target_identities",
+            "profile_targets",
+            "milestone_identities",
+            "profile_milestones",
+            "profile_milestone_targets",
+            "readiness_gate_identities",
+            "readiness_gates",
+            "readiness_gate_predicates",
+            "readiness_gate_targets",
+            "active_target_profile_state",
+            "target_profile_activation_events",
+        }
+    ),
+    "semanticCompetencies": frozenset(
+        {
+            "competency_identities",
+            "capability_scale_versions",
+            "capability_scale_dimensions",
+            "capability_scale_levels",
+            "semantic_competency_definitions",
+            "semantic_definition_dimensions",
+            "criterion_identities",
+            "criterion_definitions",
+            "active_competency_definition_states",
+            "competency_definition_activation_events",
+        }
+    ),
+    "capabilityReview": frozenset(
+        {
+            "capability_evaluation_runs",
+            "criterion_evaluation_results",
+            "capability_state_events",
+            "review_events",
+        }
+    ),
+    "sessions": frozenset(
+        {
+            "activity_category_versions",
+            "activities",
+            "learning_sessions",
+            "session_contributions",
+            "contribution_retractions",
+            "session_corrections",
+        }
+    ),
+    "evidence": frozenset(
+        {
+            "evidence",
+            "evidence_links",
+            "evidence_retractions",
+            "evidence_invalidations",
+            "evidence_link_retractions",
+            "evidence_redactions",
+        }
+    ),
+    "curriculum": frozenset(
+        {
+            "curricula",
+            "curriculum_versions",
+            "curriculum_objective_identities",
+            "curriculum_objective_definitions",
+            "learning_unit_identities",
+            "learning_unit_definitions",
+            "learning_unit_targets",
+            "learning_unit_requirements",
+            "curriculum_evidence_opportunities",
+            "assessment_rubric_identities",
+            "assessment_rubric_definitions",
+            "active_curriculum_version_states",
+            "curriculum_activation_events",
+            "activity_curriculum_unit_links",
+            "activity_curriculum_link_corrections",
+        }
+    ),
+    "projects": frozenset(
+        {
+            "projects",
+            "project_versions",
+            "project_milestone_identities",
+            "project_milestone_definitions",
+            "project_goal_identities",
+            "project_goal_definitions",
+            "project_task_identities",
+            "project_task_definitions",
+            "project_criterion_identities",
+            "project_criterion_definitions",
+            "project_targets",
+            "project_requirements",
+            "project_task_dependencies",
+            "project_evidence_opportunities",
+            "active_project_version_states",
+            "project_version_activation_events",
+            "project_events",
+            "activity_project_task_links",
+            "activity_project_task_link_corrections",
+            "session_project_contributions",
+            "session_project_contribution_retractions",
+            "project_criterion_evaluations",
+            "project_criterion_evaluation_evidence",
+        }
+    ),
+    "learningGraph": frozenset(
+        {
+            "learning_graphs",
+            "learning_graph_versions",
+            "competency_edge_identities",
+            "competency_edge_definitions",
+            "active_learning_graph_states",
+            "learning_graph_activation_events",
+        }
+    ),
+    "roadmapProjection": frozenset(
+        {
+            "legacy_roadmap_active_states",
+            "roadmap_node_position_overrides",
+            "roadmap_projection_preferences",
+        }
+    ),
+    "discipline": frozenset(
+        {
+            "discipline_profiles",
+            "discipline_configuration_events",
+        }
+    ),
+    "analysisV3": frozenset(
+        {
+            "analysis_runs",
+            "analysis_snapshots",
+            "analysis_v3_run_lineages",
+            "analysis_v3_snapshot_details",
+            "analysis_v3_normalized_facts",
+            "analysis_v3_competency_gaps",
+            "analysis_v3_signals",
+            "analysis_v3_unknown_markers",
+        }
+    ),
+    "recommendationV2": frozenset(
+        {
+            "recommendation_v2_runs",
+            "recommendation_v2_candidates",
+            "recommendation_v2_eligibility_decisions",
+            "recommendation_v2_eligibility_rule_results",
+            "recommendation_v2_expected_values",
+            "recommendation_v2_score_components",
+            "recommendation_v2_selection_decisions",
+            "recommendation_v2_recommendations",
+            "recommendation_v2_reasons",
+        }
+    ),
+    "todayV2": frozenset(
+        {
+            "today_generations",
+            "today_suggestions",
+            "today_interactions",
+            "today_interaction_corrections",
+            "suggestion_activity_relations",
+            "suggestion_activity_relation_corrections",
+        }
+    ),
+    "learningControlAuthority": frozenset(
+        {
+            "learning_control_authority_events",
+            "learning_control_authority_state",
+        }
+    ),
+    "roadmap": frozenset(
+        {
+            "roadmaps",
+            "roadmap_versions",
+            "phases",
+            "tracks",
+            "roadmap_scope_events",
+            "competency_definitions",
+            "competency_prerequisites",
+            "competency_understanding_items",
+            "competency_ability_items",
+            "exit_criterion_identities",
+            "exit_criterion_definitions",
+        }
+    ),
+    "competencyProgress": frozenset({"competency_states", "competency_status_events"}),
+    "verification": frozenset({"verification_records", "verification_evidence"}),
+    "recommendations": frozenset({"recommendation_snapshots"}),
+    "legacyCompatibility": frozenset({"legacy_criterion_assertions", "migration_backfill_runs"}),
+    "reflections": frozenset({"daily_reflections"}),
+    "reports": frozenset({"generated_reports"}),
+    "settings": frozenset({"application_settings"}),
+    "operationHistory": frozenset({"import_records", "export_records"}),
 }
 
 
@@ -390,6 +565,21 @@ def build_portable_replacement_diff(
     incoming_tables: dict[str, list[dict[str, Any]]],
     models_by_table: dict[str, Any],
 ) -> dict[str, Any]:
+    assignments = [
+        table_name for table_names in PORTABLE_DOMAIN_TABLES.values() for table_name in table_names
+    ]
+    classified_tables = set(assignments)
+    portable_tables = set(models_by_table)
+    duplicate_tables = sorted(
+        table_name for table_name in classified_tables if assignments.count(table_name) > 1
+    )
+    if classified_tables != portable_tables or duplicate_tables:
+        raise ValueError(
+            "Portable diff taxonomy must classify every portable table exactly once: "
+            f"missing={sorted(portable_tables - classified_tables)}, "
+            f"unknown={sorted(classified_tables - portable_tables)}, "
+            f"duplicates={duplicate_tables}"
+        )
     table_changes: dict[str, dict[str, int | bool]] = {}
     for table_name, model in sorted(models_by_table.items()):
         table = cast(Table, model.__table__)
