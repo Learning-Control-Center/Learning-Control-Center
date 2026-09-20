@@ -1,10 +1,29 @@
 [Unit]
 Description=Create a Learning Control Center operational backup
+After=local-fs.target
+ConditionPathExists=/var/lib/learning-control-center/lcc.sqlite3
 
 [Service]
 Type=oneshot
 User=lcc
 Group=lcc
-WorkingDirectory=/opt/learning-control-center
+WorkingDirectory=/opt/learning-control-center/current
 EnvironmentFile=/etc/learning-control-center.env
-ExecStart=/opt/learning-control-center/scripts/operational-backup.sh
+ExecStart=/opt/learning-control-center/current/scripts/operational-backup.sh
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+NoNewPrivileges=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictNamespaces=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadWritePaths=/var/lib/learning-control-center /var/backups/learning-control-center

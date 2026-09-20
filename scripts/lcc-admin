@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+SCRIPT_DIRECTORY="$(CDPATH='' cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
+# shellcheck source=scripts/deploy-common.sh
+source "$SCRIPT_DIRECTORY/deploy-common.sh"
+
+usage() {
+    cat <<'EOF'
+Usage: sudo lcc-admin COMMAND [arguments]
+
+Process lifecycle (delegates to systemd):
+  start | stop | restart | status
+
+Operations:
+  health                         Check the public HTTPS health endpoint
+  logs [LINES]                   Show recent application journal entries
+  backup                         Run one SQLite-safe operational backup
+  backup-status                  Show timer state, schedule, retention, and recent files
+  verify                         Verify the offline database and single-user invariant
+  restore /absolute/backup       Restore offline and restart LCC
+  recover-password               Reset the password offline from an interactive TTY
+  repair-projections [--full]    Drain capability work offline; optionally enqueue all
+  finalize-bootstrap             Remove bootstrap token after first-user creation
+EOF
+}
+
+test "$(id -u)" -eq 0 || lcc_die "lcc-admin must run as root."
+test -r "$LCC_ENVIRONMENT_FILE" || lcc_die "Missing $LCC_ENVIRONMENT_FILE."
+test -L "$LCC_CURRENT_RELEASE" || lcc_die "Missing active release symlink."
+release_root="$(readlink -f "$LCC_CURRENT_RELEASE")"
+test -x "$release_root/.venv/bin/python" || lcc_die "Active production runtime is incomplete."
+lcc_load_environment "$LCC_ENVIRONMENT_FILE"
+lcc_validate_environment "$LCC_CURRENT_RELEASE"
+
+command_name="${1:-}"
+test -n "$command_name" || { usage; exit 2; }
+shift
+
+case "$command_name" in
+    status|health|logs|backup-status|-h|--help|help) ;;
+    *) lcc_acquire_deployment_lock ;;
+esac
+
+timer_was_active=0
+pause_backup_timer() {
+    if systemctl is-active --quiet "$LCC_BACKUP_TIMER_NAME"; then
+        timer_was_active=1
+        systemctl stop "$LCC_BACKUP_TIMER_NAME"
+    fi
+    if systemctl is-active --quiet "$LCC_BACKUP_SERVICE_NAME"; then
+        lcc_die "A backup is currently running; wait for it to finish."
+    fi
+    # Cancel a queued timer activation and wait until the oneshot is definitely
+    # inactive before an exclusive database operation begins.
+    systemctl stop "$LCC_BACKUP_SERVICE_NAME"
+}
+
+resume_backup_timer() {
+    if test "$timer_was_active" -eq 1; then
+        systemctl start "$LCC_BACKUP_TIMER_NAME"
+    fi
+}
+
+run_offline() {
+    lcc_require_inactive_service
+    trap resume_backup_timer EXIT
+    pause_backup_timer
+    lcc_run_as_service_user "$release_root" "$@"
+    resume_backup_timer
+    trap - EXIT
+}
+
+case "$command_name" in
+    start|stop|restart)
+        test "$#" -eq 0 || lcc_die "$command_name accepts no arguments."
+        systemctl "$command_name" "$LCC_SERVICE_NAME"
+        ;;
+    status)
+        test "$#" -eq 0 || lcc_die "status accepts no arguments."
+        systemctl status "$LCC_SERVICE_NAME" --no-pager
+        ;;
+    health)
+        test "$#" -eq 0 || lcc_die "health accepts no arguments."
+        curl --fail --silent --show-error --max-time 10 \
+            "$LCC_PUBLIC_ORIGIN/api/v1/health"
+        printf '\n'
+        ;;
+    logs)
+        lines="${1:-100}"
+        [[ "$lines" =~ ^[1-9][0-9]*$ ]] || lcc_die "logs line count must be positive."
+        journalctl -u "$LCC_SERVICE_NAME" -n "$lines" --no-pager
+        ;;
+    backup)
+        test "$#" -eq 0 || lcc_die "backup accepts no arguments."
+        backup_marker="$(mktemp /run/learning-control-center-backup.XXXXXX)"
+        trap 'rm -f -- "$backup_marker"' EXIT
+        systemctl start --wait "$LCC_BACKUP_SERVICE_NAME"
+        latest="$(find "$LCC_BACKUP_DIRECTORY" -maxdepth 1 -type f \
+            -name 'lcc-scheduled-*.sqlite3' -newer "$backup_marker" \
+            -printf '%T@ %p\n' | sort -nr | sed -n '1s/^[^ ]* //p')"
+        test -n "$latest" || lcc_die "Backup service completed without a scheduled backup file."
+        rm -f -- "$backup_marker"
+        trap - EXIT
+        echo "$latest"
+        ;;
+    backup-status)
+        test "$#" -eq 0 || lcc_die "backup-status accepts no arguments."
+        echo "Backup directory: $LCC_BACKUP_DIRECTORY"
+        echo "Scheduled retention: ${LCC_BACKUP_RETENTION_COUNT:-14}"
+        systemctl is-enabled "$LCC_BACKUP_TIMER_NAME" || true
+        systemctl list-timers "$LCC_BACKUP_TIMER_NAME" --all --no-pager
+        systemctl status "$LCC_BACKUP_SERVICE_NAME" --no-pager || true
+        find "$LCC_BACKUP_DIRECTORY" -maxdepth 1 -type f -name 'lcc-*.sqlite3' \
+            -printf '%TY-%Tm-%TdT%TH:%TM:%TS %s %p\n' | sort -r | sed -n '1,10p'
+        ;;
+    verify)
+        test "$#" -eq 0 || lcc_die "verify accepts no arguments."
+        run_offline "$release_root/.venv/bin/lcc-ops" verify
+        ;;
+    restore)
+        test "$#" -eq 1 || lcc_die "restore requires one absolute backup path."
+        [[ "$1" = /* ]] || lcc_die "Restore source must be an absolute path."
+        restore_source="$(readlink -f "$1")"
+        test -f "$restore_source" || lcc_die "Restore source does not exist."
+        runuser -u "$LCC_SERVICE_USER" -- test -r "$restore_source" || \
+            lcc_die "The lcc service user cannot read the restore source."
+        run_offline "$release_root/.venv/bin/lcc-ops" restore --from "$restore_source"
+        systemctl start "$LCC_SERVICE_NAME"
+        lcc_wait_for_health || lcc_die "Restore succeeded, but the public health check failed."
+        ;;
+    recover-password)
+        test "$#" -eq 0 || lcc_die "recover-password accepts no arguments."
+        test -t 0 && test -t 2 || lcc_die "Password recovery requires an interactive terminal."
+        run_offline "$release_root/.venv/bin/lcc-ops" recover-password
+        ;;
+    repair-projections)
+        if test "$#" -eq 0; then
+            repair_arguments=()
+        elif test "$#" -eq 1 && test "$1" = "--full"; then
+            repair_arguments=(--enqueue-full-rebuild)
+        else
+            lcc_die "repair-projections accepts only optional --full."
+        fi
+        run_offline "$release_root/.venv/bin/python" -m app.capability_cli \
+            "${repair_arguments[@]}"
+        ;;
+    finalize-bootstrap)
+        test "$#" -eq 0 || lcc_die "finalize-bootstrap accepts no arguments."
+        grep -q '^LCC_BOOTSTRAP_TOKEN=' "$LCC_ENVIRONMENT_FILE" || \
+            lcc_die "Bootstrap token is already absent."
+        systemctl stop "$LCC_SERVICE_NAME"
+        trap resume_backup_timer EXIT
+        pause_backup_timer
+        lcc_run_as_service_user "$release_root" "$release_root/.venv/bin/lcc-ops" verify
+        temporary_environment="$(mktemp "${LCC_ENVIRONMENT_FILE}.XXXXXX")"
+        awk '!/^LCC_BOOTSTRAP_TOKEN=/' "$LCC_ENVIRONMENT_FILE" > "$temporary_environment"
+        chown "root:$LCC_SERVICE_GROUP" "$temporary_environment"
+        chmod 0640 "$temporary_environment"
+        mv -f "$temporary_environment" "$LCC_ENVIRONMENT_FILE"
+        lcc_load_environment "$LCC_ENVIRONMENT_FILE"
+        resume_backup_timer
+        trap - EXIT
+        systemctl start "$LCC_SERVICE_NAME"
+        lcc_wait_for_health || lcc_die "Bootstrap was finalized, but the public health check failed."
+        echo "Bootstrap token removed; production restart and HTTPS health check passed."
+        ;;
+    -h|--help|help)
+        usage
+        ;;
+    *)
+        usage >&2
+        lcc_die "Unknown command: $command_name"
+        ;;
+esac

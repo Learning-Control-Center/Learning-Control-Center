@@ -30,6 +30,7 @@ export PYTHONPATH="$repository_root/backend"
 export LCC_ENVIRONMENT=production
 export LCC_DATABASE_URL="sqlite:///$run_directory/data/lcc.sqlite3"
 export LCC_BACKUP_DIRECTORY="$run_directory/backups"
+export LCC_RELEASE_ROOT="$run_directory/release"
 export LCC_BOOTSTRAP_TOKEN=production-bootstrap-token-for-browser-test
 export LCC_SECURITY_SECRET=Q7vN2xK9mR4pT8wY3cF6hJ1sD5gL0bZa
 export LCC_PUBLIC_ORIGIN=https://localhost:8443
@@ -45,6 +46,11 @@ export XDG_CONFIG_HOME="$run_directory/caddy-config"
 
 cd "$repository_root"
 mkdir -p -- "$run_directory/data"
+mkdir -p -- "$LCC_RELEASE_ROOT"
+ln -s "$repository_root/.venv" "$LCC_RELEASE_ROOT/.venv"
+ln -s "$repository_root/backend" "$LCC_RELEASE_ROOT/backend"
+printf 'production-e2e\n' > "$LCC_RELEASE_ROOT/RELEASE_ID"
+printf '%s\n' "$(git rev-parse HEAD)" > "$LCC_RELEASE_ROOT/SOURCE_REVISION"
 caddy validate --config "$repository_root/deploy/Caddyfile" --adapter caddyfile
 "$repository_root/.venv/bin/uvicorn" app.main:app --host 127.0.0.1 --port 8000 --workers 1 --no-proxy-headers >"$run_directory/backend.log" 2>&1 &
 backend_pid=$!

@@ -6,8 +6,10 @@ import json
 from sqlalchemy import select
 
 from app.capability import drain_projection_invalidations, enqueue_full_capability_rebuild
+from app.config import get_settings
 from app.database import SessionLocal, initialize_database, run_migrations
 from app.models import ProjectionInvalidation
+from app.operation_lock import exclusive_operation_lock
 
 
 def main() -> None:
@@ -18,19 +20,20 @@ def main() -> None:
         help="Queue every active competency before draining pending capability work.",
     )
     arguments = parser.parse_args()
-    run_migrations()
-    initialize_database()
-    with SessionLocal() as db:
-        queued = 0
-        if arguments.enqueue_full_rebuild:
-            queued = enqueue_full_capability_rebuild(db, source_fact_id="operator:full-rebuild")
-            db.commit()
-        processed = drain_projection_invalidations(db, recover_running=True)
-        failures = db.scalars(
-            select(ProjectionInvalidation).where(
-                ProjectionInvalidation.status == "permanent_failure"
-            )
-        ).all()
+    with exclusive_operation_lock(get_settings().database_url):
+        run_migrations()
+        initialize_database()
+        with SessionLocal() as db:
+            queued = 0
+            if arguments.enqueue_full_rebuild:
+                queued = enqueue_full_capability_rebuild(db, source_fact_id="operator:full-rebuild")
+                db.commit()
+            processed = drain_projection_invalidations(db, recover_running=True)
+            failures = db.scalars(
+                select(ProjectionInvalidation).where(
+                    ProjectionInvalidation.status == "permanent_failure"
+                )
+            ).all()
     print(
         json.dumps(
             {

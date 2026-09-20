@@ -21,7 +21,7 @@ from app.security import hash_password
 from app.time_utils import utc_now_ms
 
 
-def _expected_revision() -> str:
+def expected_revision() -> str:
     root = Path(__file__).resolve().parents[2]
     config = Config(str(root / "alembic.ini"))
     config.set_main_option("script_location", str(root / "backend" / "alembic"))
@@ -51,7 +51,7 @@ def _validate_database(connection: sqlite3.Connection, *, require_current: bool 
     supported = _supported_restore_revisions()
     if revision is None or revision[0] not in supported:
         raise RuntimeError("Database schema revision is not supported by this application.")
-    if require_current and revision != (_expected_revision(),):
+    if require_current and revision != (expected_revision(),):
         raise RuntimeError("Database schema is not at the current application revision.")
     tables = {
         row[0]
@@ -119,7 +119,7 @@ def restore_database(source_path: Path) -> int:
             source_revision = staging.execute("SELECT version_num FROM alembic_version").fetchone()
         finally:
             staging.close()
-        if source_revision != (_expected_revision(),):
+        if source_revision != (expected_revision(),):
             root = Path(__file__).resolve().parents[2]
             config = Config(str(root / "alembic.ini"))
             config.set_main_option("script_location", str(root / "backend" / "alembic"))
@@ -187,7 +187,7 @@ def recover_password() -> int:
         try:
             connection.execute("PRAGMA foreign_keys=ON")
             revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
-            if revision != (_expected_revision(),):
+            if revision != (expected_revision(),):
                 raise RuntimeError("Database schema is not at the current application revision.")
             users = connection.execute("SELECT id FROM users").fetchall()
             if len(users) != 1:
@@ -259,15 +259,35 @@ def recover_password() -> int:
     return 0
 
 
+def verify_installation() -> int:
+    """Verify the configured production database without changing it."""
+    settings = get_settings()
+    database_file = database_path(settings.database_url)
+    with exclusive_operation_lock(settings.database_url):
+        connection = sqlite3.connect(f"file:{database_file}?mode=ro", uri=True)
+        try:
+            user_id = _validate_database(connection)
+        finally:
+            connection.close()
+    print(
+        f"Installation database is current and has one configured user ({user_id}).",
+        file=sys.stderr,
+    )
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="lcc-ops")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("recover-password", help="Reset the single user's password offline")
+    commands.add_parser("verify", help="Verify the offline production database and user invariant")
     restore = commands.add_parser("restore", help="Restore a validated operational SQLite backup")
     restore.add_argument("--from", dest="source", type=Path, required=True)
     args = parser.parse_args()
     if args.command == "recover-password":
         return recover_password()
+    if args.command == "verify":
+        return verify_installation()
     if args.command == "restore":
         return restore_database(args.source)
     return 2

@@ -51,6 +51,8 @@ def test_capability_repair_cli_reports_rebuild_and_permanent_failures(
             return ScalarResult()
 
     session = FakeSession()
+    monkeypatch.setattr(capability_cli, "get_settings", lambda: SimpleNamespace(database_url="x"))
+    monkeypatch.setattr(capability_cli, "exclusive_operation_lock", lambda _url: nullcontext())
     monkeypatch.setattr(capability_cli, "run_migrations", lambda: None)
     monkeypatch.setattr(capability_cli, "initialize_database", lambda: None)
     monkeypatch.setattr(capability_cli, "SessionLocal", lambda: nullcontext(session))
