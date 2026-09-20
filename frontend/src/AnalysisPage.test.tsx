@@ -81,6 +81,12 @@ const snapshot = {
       subjectId: 'predicate-1',
       reasonCode: 'FUTURE_REASON_CODE',
     },
+    ...Array.from({ length: 4 }, (_, index) => ({
+      fieldPath: `futureInput${index + 2}`,
+      subjectType: 'readiness_predicate',
+      subjectId: `predicate-${index + 2}`,
+      reasonCode: 'FUTURE_REASON_CODE',
+    })),
   ],
 }
 
@@ -148,6 +154,7 @@ describe('Analysis V3 diagnostic surface', () => {
     expect(screen.getByText('Production readiness')).toBeInTheDocument()
     expect(screen.getByText('Production readiness requirement')).toBeInTheDocument()
     expect(screen.getByText('Normalized diagnostic facts')).toBeInTheDocument()
+    expect(screen.getByText('Show 2 more Unknown inputs')).toBeInTheDocument()
     expect(screen.getByText(/target state · deterministic delivery target/i)).toBeInTheDocument()
     expect(screen.getByText(/allocation state · systems engineering/i)).toBeInTheDocument()
     expect(screen.getByText(/curriculum state · policy practice/i)).toBeInTheDocument()

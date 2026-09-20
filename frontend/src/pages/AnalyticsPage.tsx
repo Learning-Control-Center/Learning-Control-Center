@@ -60,6 +60,13 @@ type Analytics = {
 }
 
 const palette = ['#326653', '#74a88c', '#c47745', '#5f7990', '#8271a6', '#b7a463']
+const durationAxisLabel = (value: number) => value >= 3_600_000
+  ? `${Math.round(value / 360_000) / 10}h`
+  : value >= 60_000
+    ? `${Math.round(value / 60_000)}m`
+    : value >= 1_000
+      ? `${Math.round(value / 1_000)}s`
+      : `${Math.round(value)}ms`
 
 export function AnalyticsPage() {
   const [range, setRange] = useState('30d')
@@ -164,7 +171,7 @@ export function AnalyticsPage() {
                 />
                 <YAxis
                   tick={{ fontSize: 11 }}
-                  tickFormatter={(value) => `${Math.round(value / 3_600_000)}h`}
+                  tickFormatter={durationAxisLabel}
                 />
                 <Tooltip formatter={(value) => formatDuration(Number(value))} />
                 <Bar dataKey="durationMs" fill="#326653" radius={[6, 6, 0, 0]} />

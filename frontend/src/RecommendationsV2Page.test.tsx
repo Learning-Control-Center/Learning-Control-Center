@@ -94,6 +94,8 @@ describe('Recommendation V2 minimum surface', () => {
 
     expect(await screen.findByRole('heading', { name: 'Recommendations' })).toBeInTheDocument()
     expect((await screen.findAllByText('Practice deterministic policies')).length).toBeGreaterThan(0)
+    expect(screen.getByText(/This is the primary option in this run/)).toBeInTheDocument()
+    expect(screen.getByText('Selection reasons and scoring audit')).toBeInTheDocument()
     expect(screen.getByText('Unknown — unconstrained total window')).toBeInTheDocument()
     expect(screen.getByText(/recommendation-score-policy\/v1/)).toBeInTheDocument()
     expect(screen.getByText('DEADLINE_PRESSURE: +0')).toBeInTheDocument()
