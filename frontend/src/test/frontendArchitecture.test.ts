@@ -13,6 +13,26 @@ const v2Pages = [
   '../pages/TodayV2Page.tsx',
 ]
 
+const appFeatureEntries = new Set([
+  'features/activity/index.ts',
+  'features/data-transfer/index.ts',
+  'features/insights/analysis.ts',
+  'features/insights/landing.ts',
+  'features/insights/recommendations.ts',
+  'features/learn/index.ts',
+  'features/legacy-history/analytics.ts',
+  'features/legacy-history/reports.ts',
+  'features/legacy-history/roadmap.ts',
+  'features/legacy-history/today.ts',
+  'features/profile/index.ts',
+  'features/projects/index.ts',
+  'features/roadmap/legacy.ts',
+  'features/roadmap/v2.ts',
+  'features/settings/index.ts',
+  'features/today/legacy.ts',
+  'features/today/v2.ts',
+])
+
 describe('Checkpoint 1 frontend architecture contracts', () => {
   it.each(v2Pages)('%s does not use the removed panel styling contract', (relativePath) => {
     const source = readFileSync(fileURLToPath(new URL(relativePath, import.meta.url)), 'utf8')
@@ -48,11 +68,12 @@ describe('Checkpoint 1 frontend architecture contracts', () => {
         }
         if (sourceArea === 'features') {
           const sourceFeature = sourceRelative.split('/')[1]
-          if (targetArea === 'app' || (targetArea === 'features' && targetParts[1] !== sourceFeature)) {
+          const publicFeatureEntry = targetArea === 'features' && targetParts.length === 3 && targetParts[2] === 'index.ts'
+          if (targetArea === 'app' || (targetArea === 'features' && targetParts[1] !== sourceFeature && !publicFeatureEntry)) {
             violations.push(`${sourceRelative} -> ${targetRelative}`)
           }
         }
-        if (sourceArea === 'app' && targetArea === 'features' && targetParts.length > 3) {
+        if (sourceArea === 'app' && targetArea === 'features' && !appFeatureEntries.has(targetRelative)) {
           violations.push(`${sourceRelative} -> ${targetRelative} (feature internals)`)
         }
       }

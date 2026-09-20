@@ -108,7 +108,7 @@ describe('compatibility aliases', () => {
       await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent(
         `${destination}?target=backend%20engineer#evidence`,
       ))
-      expect(fetchMock).not.toHaveBeenCalled()
+      expect(fetchMock.mock.calls.every(([input, init]) => String(input) === '/api/v1/sessions/active' && !init?.method)).toBe(true)
     },
   )
 

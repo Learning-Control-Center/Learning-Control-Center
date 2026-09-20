@@ -51,7 +51,7 @@ describe('learning-control authority routing', () => {
       </MemoryRouter>,
     )
 
-    expect(await screen.findByRole('heading', { name: 'Today V2' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Today' })).toBeInTheDocument()
     await userEvent.click(screen.getByRole('link', { name: 'Insights' }))
     expect(await screen.findByRole('heading', { name: 'Insights' })).toBeInTheDocument()
     expect(screen.getAllByRole('link', { name: 'Legacy V1 history' })).not.toHaveLength(0)

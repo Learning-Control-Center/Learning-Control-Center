@@ -369,11 +369,11 @@ test('production V2 authority cutover routes the default learning surfaces', asy
   expect(portableInspection.summary.replacementRequired).toBe(true)
 
   await page.goto('/')
-  await expect(page.getByRole('heading', { name: 'Today V2' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible()
   await page.getByRole('link', { name: 'Roadmap', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'Roadmap Projection' })).toBeVisible()
   await page.goto('/insights/recommendations')
-  await expect(page.getByRole('heading', { name: 'Recommendation V2' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Recommendations' })).toBeVisible()
   await page.getByRole('link', { name: 'Profile', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'Profile & Capability' })).toBeVisible()
   await page.goto('/insights/legacy/roadmap')

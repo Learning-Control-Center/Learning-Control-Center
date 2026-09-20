@@ -1,7 +1,7 @@
 import type { RoadmapProfileTarget, RoadmapProjectionNode } from '../../shared/contracts/roadmapProjection'
 
 export type ProfileTarget = { id: string; stableKey: string; competencyIdentityId: string; dimensionKey: string | null; domainStableKey: string; targetLevelStableKey: string; priority: string; targetDate?: string | null; targetMonth?: string | null }
-export type ProfileDomain = { stableKey: string; title: string; description: string; orderIndex: number; minimumPercent?: number | null; maximumPercent?: number | null }
+export type ProfileDomain = { id?: string; stableKey: string; title: string; description: string; orderIndex: number; minimumPercent?: number | null; maximumPercent?: number | null }
 export type Milestone = { id: string; stableKey: string; title: string; description: string; targetDate: string | null; orderIndex: number; targetStableKeys: string[] }
 export type ReadinessGate = { id: string; stableKey: string; title: string; effect: string; orderIndex: number; milestoneStableKey: string | null; targetStableKeys: string[] }
 export type ProfileVersion = { versionId: string; version: number; title: string; description: string; targetHorizon?: string | null; targets: ProfileTarget[]; domains?: ProfileDomain[]; milestones?: Milestone[]; readinessGates?: ReadinessGate[] }

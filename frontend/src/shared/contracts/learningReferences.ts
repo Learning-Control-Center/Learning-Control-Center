@@ -26,10 +26,13 @@ export type ProjectTaskReference = {
   title: string
 }
 
+export type UnlinkedReference = { kind: 'unlinked'; title: string }
+
 export type ActualWorkReference =
   | CompetencyReference
   | CurriculumUnitReference
   | ProjectTaskReference
+  | UnlinkedReference
 
 export type ActualWorkHandoff = {
   origin: HandoffOrigin
@@ -55,7 +58,7 @@ export function activityHandoffPath(handoff: ActualWorkHandoff) {
     kind: handoff.reference.kind,
     title: handoff.reference.title,
   })
-  if (handoff.reference.semanticDefinitionId) {
+  if ('semanticDefinitionId' in handoff.reference && handoff.reference.semanticDefinitionId) {
     query.set('semanticDefinitionId', handoff.reference.semanticDefinitionId)
   }
   if (handoff.reference.kind === 'competency') {
@@ -63,7 +66,7 @@ export function activityHandoffPath(handoff: ActualWorkHandoff) {
   } else if (handoff.reference.kind === 'curriculum_unit') {
     query.set('curriculumId', handoff.reference.curriculumId)
     query.set('unitDefinitionId', handoff.reference.unitDefinitionId)
-  } else {
+  } else if (handoff.reference.kind === 'project_task') {
     query.set('projectId', handoff.reference.projectId)
     query.set('taskDefinitionId', handoff.reference.taskDefinitionId)
     if (handoff.reference.projectVersionId) {
@@ -135,5 +138,6 @@ export function parseActivityHandoff(query: URLSearchParams): ActualWorkHandoff 
       },
     }
   }
+  if (kind === 'unlinked') return { origin, returnTo, reference: { kind, title } }
   return null
 }

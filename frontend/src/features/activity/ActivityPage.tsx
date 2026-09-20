@@ -10,12 +10,14 @@ import type { RoadmapProjection } from '../../shared/contracts/roadmapProjection
 import type { Session } from '../../types'
 import type { Activity } from './model'
 import { referenceOptions } from './model'
+import { sessionElapsedDuration, useActiveSession } from '../../shared/session/ActiveSessionProvider'
+import { DailyReflectionEditor } from '../reflection'
 
 const categories = ['learning', 'reading', 'practice', 'coding', 'debugging', 'project', 'review', 'verification', 'research']
 const assistance = ['none', 'docs_only', 'ai_hint', 'ai_assisted', 'agent_led']
 
 function contributionFor(reference: ActualWorkReference | null) {
-  if (!reference || reference.kind === 'curriculum_unit') return []
+  if (!reference || reference.kind === 'curriculum_unit' || reference.kind === 'unlinked') return []
   if (reference.kind === 'competency') return [{ target_type: 'competency', competency_identity_id: reference.competencyIdentityId, relevance: 'primary', provenance: 'user_selected' }]
   return [{ target_type: 'project', project_id: reference.projectId, project_version_id: reference.projectVersionId, project_task_definition_id: reference.taskDefinitionId, relevance: 'primary', provenance: 'user_selected' }]
 }
@@ -25,12 +27,12 @@ export function SessionsPage() {
   const handoff = useMemo(() => parseActivityHandoff(searchParams), [searchParams])
   const handoffIdentity = useMemo(() => handoff ? JSON.stringify(handoff) : '', [handoff])
   const currentHandoffIdentity = useRef(handoffIdentity)
+  const { active, status: activeSessionStatus, error: activeSessionError, refresh: refreshActiveSession } = useActiveSession()
   const [activities, setActivities] = useState<Activity[]>([])
   const [projection, setProjection] = useState<RoadmapProjection | null>(null)
   const [curriculumUnits, setCurriculumUnits] = useState<CurriculumCatalogUnit[]>([])
   const [projectTasks, setProjectTasks] = useState<ProjectCatalogCandidateApi[]>([])
   const [referenceError, setReferenceError] = useState('')
-  const [active, setActive] = useState<Session | null>(null)
   const [sessions, setSessions] = useState<Session[]>([])
   const [selectedActivityId, setSelectedActivityId] = useState('')
   const [selectedReferenceKey, setSelectedReferenceKey] = useState('unlinked')
@@ -39,18 +41,18 @@ export function SessionsPage() {
   const [timerBusy, setTimerBusy] = useState('')
   const [notice, setNotice] = useState('')
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
+  const [loadError, setLoadError] = useState('')
+  const [mutationError, setMutationError] = useState('')
   const [tick, setTick] = useState(Date.now())
 
   const load = useCallback(async (signal?: AbortSignal) => {
-    setLoading(true); setError(''); setReferenceError('')
+    setLoading(true); setLoadError(''); setReferenceError('')
     try {
-      const [activityItems, activeResponse, listResponse] = await Promise.all([
+      const [activityItems, listResponse] = await Promise.all([
         apiV2<Activity[]>('/activities', { signal }),
-        api<{ active: boolean; session: Session | null }>('/sessions/active', { signal }),
         api<{ items: Session[] }>('/sessions?limit=30', { signal }),
       ])
-      setActivities(activityItems); setActive(activeResponse.session); setSessions(listResponse.items)
+      setActivities(activityItems); setSessions(listResponse.items)
       setSelectedActivityId((current) => activityItems.some((item) => item.id === current) ? current : (activityItems[0]?.id ?? ''))
       void Promise.allSettled([
         apiV2<RoadmapProjection>('/roadmap-projection/current', { signal }),
@@ -64,7 +66,7 @@ export function SessionsPage() {
         const failed = [roadmap, curricula, projects].filter((item) => item.status === 'rejected').length
         setReferenceError(failed ? `${failed} optional canonical reference source${failed === 1 ? '' : 's'} could not be loaded. Unlinked Activity and Session history remain available.` : '')
       })
-    } catch (caught) { if ((caught as Error).name !== 'AbortError') setError(caught instanceof ApiError ? caught.message : 'Activity and Session state could not be loaded.') }
+    } catch (caught) { if ((caught as Error).name !== 'AbortError') setLoadError(caught instanceof ApiError ? caught.message : 'Activity and Session state could not be loaded.') }
     finally { if (!signal?.aborted) setLoading(false) }
   }, [])
   useEffect(() => { const controller = new AbortController(); void load(controller.signal); return () => controller.abort() }, [load])
@@ -74,12 +76,13 @@ export function SessionsPage() {
     setLinkedHandoff(false)
     setRelationshipBusy(false)
     setNotice('')
-    setError('')
+    setMutationError('')
   }, [handoffIdentity])
 
   const options = useMemo(() => referenceOptions(projection, curriculumUnits, projectTasks), [curriculumUnits, projectTasks, projection])
   const selectedReference = handoff ? (linkedHandoff ? handoff.reference : null) : options.find((item) => item.key === selectedReferenceKey)?.reference ?? null
-  const currentDuration = useMemo(() => !active ? 0 : active.timedState === 'running' && active.activeSince ? active.accumulatedDurationMs + Math.max(0, tick - Date.parse(active.activeSince)) : active.durationMs ?? active.accumulatedDurationMs, [active, tick])
+  const authoritativeActive = activeSessionStatus === 'ready' ? active : null
+  const currentDuration = useMemo(() => !authoritativeActive ? 0 : sessionElapsedDuration(authoritativeActive, tick), [authoritativeActive, tick])
   const titleByCompetency = useMemo(() => new Map((projection?.nodes ?? []).map((node) => [node.id, node.title])), [projection])
 
   const relateActivity = async (activityId: string, context: ActualWorkHandoff) => {
@@ -89,41 +92,42 @@ export function SessionsPage() {
   const confirmHandoff = async (activityId = selectedActivityId) => {
     if (!handoff || !activityId || relationshipBusy) return false
     const confirmingIdentity = handoffIdentity
-    setRelationshipBusy(true); setError(''); setNotice('')
+    setRelationshipBusy(true); setMutationError(''); setNotice('')
     try {
       await relateActivity(activityId, handoff)
       if (currentHandoffIdentity.current !== confirmingIdentity) return false
       setLinkedHandoff(true); setSelectedActivityId(activityId)
-      setNotice(handoff.reference.kind === 'competency' ? 'Activity selected. The competency contribution will be recorded only when a Session is started or logged.' : `Activity related to ${handoff.reference.title}.`)
+      setNotice(handoff.reference.kind === 'competency' ? 'Activity selected. The competency contribution will be recorded only when a Session is started or logged.' : handoff.reference.kind === 'unlinked' ? 'Activity selected. No Today suggestion or relation has changed.' : `Activity related to ${handoff.reference.title}.`)
       return true
     } catch (caught) {
       if (currentHandoffIdentity.current !== confirmingIdentity) return false
-      setError(caught instanceof ApiError ? `The Activity remains created, but the relationship failed: ${caught.message} Select it and retry the relationship.` : 'The Activity remains created, but the relationship failed. Select it and retry the relationship.')
+      setMutationError(caught instanceof ApiError ? `The Activity remains created, but the relationship failed: ${caught.message} Select it and retry the relationship.` : 'The Activity remains created, but the relationship failed. Select it and retry the relationship.')
       return false
     } finally { if (currentHandoffIdentity.current === confirmingIdentity) setRelationshipBusy(false) }
   }
   const mutateTimer = async (action: 'pause' | 'resume' | 'cancel' | 'complete') => {
-    if (!active || timerBusy) return
-    setTimerBusy(action); setError(''); setNotice('')
-    try { await apiV2(`/sessions/${active.id}/${action}`, { method: 'POST', body: action === 'complete' ? JSON.stringify({ outcome: 'completed', notes: active.notes }) : undefined }); setNotice(`Timer ${action === 'complete' ? 'completed' : `${action}d`}.`); await load() }
-    catch (caught) { setError(caught instanceof ApiError ? caught.message : 'The timer could not be updated.') }
+    if (!authoritativeActive || activeSessionStatus !== 'ready' || timerBusy) return
+    setTimerBusy(action); setMutationError(''); setNotice('')
+    try { await apiV2(`/sessions/${authoritativeActive.id}/${action}`, { method: 'POST', body: action === 'complete' ? JSON.stringify({ outcome: 'completed', notes: authoritativeActive.notes }) : undefined }); setNotice(action === 'complete' ? 'Timer completed.' : action === 'cancel' ? 'Timer cancelled.' : ''); await Promise.all([load(), refreshActiveSession()]) }
+    catch (caught) { setMutationError(caught instanceof ApiError ? caught.message : 'The timer could not be updated.') }
     finally { setTimerBusy('') }
   }
 
   if (loading) return <LoadingState label="Loading actual work and Session state" />
-  if (error && !activities.length && !active && !sessions.length) return <div className="space-y-6"><PageHeader eyebrow="Actual work record" title="Activity" description="Create or select an Activity, then time or log a Session." /><ErrorState message={error} retry={() => void load()} /></div>
+  if (loadError && !activities.length && !active && !sessions.length) return <div className="space-y-6"><PageHeader eyebrow="Actual work record" title="Activity" description="Create or select an Activity, then time or log a Session." /><ErrorState message={loadError} retry={() => void load()} /></div>
 
   return <div className="mx-auto w-full max-w-[90rem] space-y-6">
     <LiveNotice>{notice}</LiveNotice>
     <PageHeader eyebrow="Actual work record" title="Activity" description="Create or select a human-named Activity, then time or log a Session against explicit canonical references. The server remains timer authority." />
-    {error ? <MutationError>{error}</MutationError> : null}{referenceError ? <SectionError message={referenceError} /> : null}
-    {handoff ? <Surface className="border-moss/25 bg-moss/5 p-5"><SectionHeader title={`Continue: ${handoff.reference.title}`} description={`This ${handoff.reference.kind.replaceAll('_', ' ')} reference came from ${handoff.origin}. Nothing changes until you confirm below.`} /><div className="mt-4 grid gap-4 md:grid-cols-[minmax(0,1fr)_auto]"><SelectField id="handoff-activity" label="Use an existing Activity" value={selectedActivityId} onChange={(event) => { setSelectedActivityId(event.target.value); setLinkedHandoff(false) }}><option value="">Select an Activity</option>{activities.map((item) => <option value={item.id} key={item.id}>{item.title} · {item.categoryStableKey}</option>)}</SelectField><div className="flex items-end gap-2"><Button aria-busy={relationshipBusy} disabled={!selectedActivityId || linkedHandoff || relationshipBusy} onClick={() => void confirmHandoff()}><Link2 className="size-4" />{relationshipBusy ? 'Confirming…' : linkedHandoff ? 'Confirmed' : handoff.reference.kind === 'competency' ? 'Use Activity' : 'Confirm relationship'}</Button><Link className="button-secondary" to={handoff.returnTo}>Cancel</Link></div></div>{linkedHandoff ? <p className="mt-4 flex flex-wrap items-center gap-2 text-sm font-medium text-status-success" role="status"><Check className="size-4" />{handoff.reference.kind === 'competency' ? 'Activity selected. The competency contribution is recorded only with a Session.' : 'Relationship recorded. You may log a Session below.'}<Link className="button-quiet" to={activityResultPath(handoff, selectedActivityId)}>Return selected Activity</Link></p> : null}</Surface> : null}
-    <CreateActivityForm key={handoffIdentity || 'unlinked'} handoff={handoff} onCreated={async (activity) => { setActivities((current) => [activity, ...current]); setSelectedActivityId(activity.id); setNotice(`${activity.title} created.`); if (handoff) await confirmHandoff(activity.id) }} onError={setError} />
+    {mutationError ? <MutationError>{mutationError}</MutationError> : null}{loadError ? <SectionError message={loadError} retry={() => void load()} /> : null}{referenceError ? <SectionError message={referenceError} /> : null}
+    {handoff ? <Surface className="border-moss/25 bg-moss/5 p-5"><SectionHeader title={`Continue: ${handoff.reference.title}`} description={handoff.reference.kind === 'unlinked' ? 'Choose or create the actual Activity. It remains unlinked until the originating Today suggestion explicitly confirms a replacement.' : `This ${handoff.reference.kind.replaceAll('_', ' ')} reference came from ${handoff.origin}. Nothing changes until you confirm below.`} /><div className="mt-4 grid gap-4 md:grid-cols-[minmax(0,1fr)_auto]"><SelectField id="handoff-activity" label="Use an existing Activity" value={selectedActivityId} onChange={(event) => { setSelectedActivityId(event.target.value); setLinkedHandoff(false) }}><option value="">Select an Activity</option>{activities.map((item) => <option value={item.id} key={item.id}>{item.title} · {item.categoryStableKey}</option>)}</SelectField><div className="flex items-end gap-2"><Button aria-busy={relationshipBusy} disabled={!selectedActivityId || linkedHandoff || relationshipBusy} onClick={() => void confirmHandoff()}><Link2 className="size-4" />{relationshipBusy ? 'Confirming…' : linkedHandoff ? 'Confirmed' : ['competency', 'unlinked'].includes(handoff.reference.kind) ? 'Use Activity' : 'Confirm relationship'}</Button><Link className="button-secondary" to={handoff.returnTo}>Cancel</Link></div></div>{linkedHandoff ? <p className="mt-4 flex flex-wrap items-center gap-2 text-sm font-medium text-status-success" role="status"><Check className="size-4" />{handoff.reference.kind === 'competency' ? 'Activity selected. The competency contribution is recorded only with a Session.' : handoff.reference.kind === 'unlinked' ? 'Activity selected. No suggestion or canonical reference has been changed yet.' : 'Relationship recorded. You may log a Session below.'}<Link className="button-quiet" to={activityResultPath(handoff, selectedActivityId)}>Return selected Activity</Link></p> : null}</Surface> : null}
+    <CreateActivityForm key={handoffIdentity || 'unlinked'} handoff={handoff} onCreated={async (activity) => { setActivities((current) => [activity, ...current]); setSelectedActivityId(activity.id); setNotice(`${activity.title} created.`); if (handoff) await confirmHandoff(activity.id) }} onError={setMutationError} />
     <div className="grid gap-5 xl:grid-cols-[minmax(20rem,0.75fr)_minmax(0,1.25fr)]">
-      <Surface className="p-5 sm:p-6"><SectionHeader title="Active timer" />{active ? <div className="mt-6"><p className="font-mono text-5xl font-semibold tracking-[-0.06em] sm:text-6xl" aria-live="off">{formatDuration(currentDuration, true)}</p><p className="mt-3 text-sm capitalize text-ink/65">{active.activityType} · {active.assistanceMode.replaceAll('_', ' ')} · {active.timedState}</p><div className="mt-7 flex flex-wrap gap-3">{active.timedState === 'running' ? <Button variant="secondary" disabled={Boolean(timerBusy)} onClick={() => void mutateTimer('pause')}><Pause className="size-4" />{timerBusy === 'pause' ? 'Pausing…' : 'Pause'}</Button> : <Button variant="secondary" disabled={Boolean(timerBusy)} onClick={() => void mutateTimer('resume')}><Play className="size-4" />{timerBusy === 'resume' ? 'Resuming…' : 'Resume'}</Button>}<Button disabled={Boolean(timerBusy)} onClick={() => void mutateTimer('complete')}><Square className="size-4 fill-current" />{timerBusy === 'complete' ? 'Completing…' : 'Complete'}</Button><Button variant="secondary" className="text-rose-700" disabled={Boolean(timerBusy)} onClick={() => void mutateTimer('cancel')}><XCircle className="size-4" />{timerBusy === 'cancel' ? 'Cancelling…' : 'Cancel'}</Button></div><p className="mt-5 text-xs leading-5 text-ink/65">Cancelling preserves measured time in history but excludes it from learning work and Evidence.</p></div> : <TimerStart activities={activities} selectedActivityId={selectedActivityId} reference={selectedReference} disabled={Boolean(handoff && !linkedHandoff)} onDone={async () => { setNotice('Timer started.'); await load() }} onError={setError} />}</Surface>
-      <Surface className="p-5 sm:p-6"><SectionHeader title="Manual Session" /><ManualForm activities={activities} selectedActivityId={selectedActivityId} reference={selectedReference} disabled={Boolean(handoff && !linkedHandoff)} onDone={async () => { setNotice('Manual Session saved.'); await load() }} onError={setError} /></Surface>
+      <Surface className="p-5 sm:p-6"><SectionHeader title="Active timer" />{activeSessionStatus === 'error' ? <div className="mt-4"><SectionError message={`Active Session state is unavailable: ${activeSessionError}`} retry={() => void refreshActiveSession()} /><p className="mt-3 text-sm text-ink/65">Timer commands are withheld until the server-authoritative active Session state is available.</p></div> : activeSessionStatus === 'loading' ? <p className="mt-4 text-sm text-ink/65" role="status">Checking server-authoritative Session state…</p> : authoritativeActive ? <div className="mt-6"><p className="font-mono text-5xl font-semibold tracking-[-0.06em] sm:text-6xl" aria-live="off">{formatDuration(currentDuration, true)}</p><p className="mt-3 text-sm capitalize text-ink/65">{authoritativeActive.activityType} · {authoritativeActive.assistanceMode.replaceAll('_', ' ')} · {authoritativeActive.timedState}</p><div className="mt-7 flex flex-wrap gap-3">{authoritativeActive.timedState === 'running' ? <Button variant="secondary" disabled={Boolean(timerBusy)} onClick={() => void mutateTimer('pause')}><Pause className="size-4" />{timerBusy === 'pause' ? 'Pausing…' : 'Pause'}</Button> : <Button variant="secondary" disabled={Boolean(timerBusy)} onClick={() => void mutateTimer('resume')}><Play className="size-4" />{timerBusy === 'resume' ? 'Resuming…' : 'Resume'}</Button>}<Button disabled={Boolean(timerBusy)} onClick={() => void mutateTimer('complete')}><Square className="size-4 fill-current" />{timerBusy === 'complete' ? 'Completing…' : 'Complete'}</Button><Button variant="secondary" className="text-rose-700" disabled={Boolean(timerBusy)} onClick={() => void mutateTimer('cancel')}><XCircle className="size-4" />{timerBusy === 'cancel' ? 'Cancelling…' : 'Cancel'}</Button></div><p className="mt-5 text-xs leading-5 text-ink/65">Cancelling preserves measured time in history but excludes it from learning work and Evidence.</p></div> : <TimerStart activities={activities} selectedActivityId={selectedActivityId} reference={selectedReference} disabled={Boolean(handoff && !linkedHandoff)} onDone={async () => { setNotice(''); await Promise.all([load(), refreshActiveSession()]) }} onError={setMutationError} />}</Surface>
+      <Surface className="p-5 sm:p-6"><SectionHeader title="Manual Session" /><ManualForm activities={activities} selectedActivityId={selectedActivityId} reference={selectedReference} disabled={Boolean(handoff && !linkedHandoff)} onDone={async () => { setNotice('Manual Session saved.'); await load() }} onError={setMutationError} /></Surface>
     </div>
     {!handoff ? <Surface className="p-5"><SelectField label="Relate new Sessions to" description="Canonical Profile, Curriculum, and Project references replace the legacy Roadmap picker. Unlinked work remains valid." value={selectedReferenceKey} onChange={(event) => setSelectedReferenceKey(event.target.value)}>{options.map((option) => <option value={option.key} key={option.key}>{option.label}</option>)}</SelectField></Surface> : null}
+    <DailyReflectionEditor />
     <Surface className="overflow-hidden"><div className="border-b border-ink/10 p-5 sm:p-6"><SectionHeader title="Recent Session history" description="Older and unlinked Sessions remain readable. Their source is labeled; no Profile domain is inferred from legacy Track data." /></div><div className="divide-y divide-ink/10">{sessions.length ? sessions.map((session) => <article className="flex flex-col gap-3 p-5 sm:flex-row sm:items-center sm:justify-between sm:p-6" key={session.id}><div><p className="font-semibold">{session.competencyIdentityId ? titleByCompetency.get(session.competencyIdentityId) ?? 'Legacy competency reference' : 'Unlinked or legacy Session'}</p><p className="mt-1 text-sm capitalize text-ink/65">{session.activityType} · {session.assistanceMode.replaceAll('_', ' ')} · {session.outcome ?? session.timedState ?? 'recorded'}</p></div><div className="text-left sm:text-right"><p className="font-mono font-semibold">{formatDuration(session.durationMs, true)}</p><p className="mt-1 text-xs text-ink/65">{new Date(session.startedAt).toLocaleString()} · Session history</p></div></article>) : <p className="p-6 text-sm text-ink/65">No Session history yet.</p>}</div></Surface>
   </div>
 }
@@ -134,8 +138,8 @@ function CreateActivityForm({ handoff, onCreated, onError }: { handoff: ActualWo
   const [category, setCategory] = useState(handoff?.reference.kind === 'project_task' ? 'project' : 'practice')
   const [busy, setBusy] = useState(false)
   const submit = async (event: React.FormEvent) => { event.preventDefault(); if (busy) return; setBusy(true); onError(''); try { const activity = await apiV2<Activity>('/activities', { method: 'POST', body: JSON.stringify({ title, description: description || null, category_stable_key: category }) }); await onCreated(activity); setDescription('') } catch (caught) { onError(caught instanceof ApiError ? caught.message : 'The Activity could not be created.') } finally { setBusy(false) } }
-  const handoffDescription = handoff?.reference.kind === 'competency' ? 'Confirming creates this actual record. The competency contribution is recorded only when you start or log a Session; refresh alone does nothing.' : handoff ? 'Confirming creates this actual record and explicitly relates it to the selected source. Refresh alone does nothing.' : 'Activities name actual work. Creating one does not imply completion, Evidence, or capability.'
-  return <Surface className="p-5"><SectionHeader title="Create an Activity" description={handoffDescription} /><form className="mt-4 grid gap-4 md:grid-cols-3" onSubmit={(event) => void submit(event)}><TextField label="Activity title" value={title} onChange={(event) => setTitle(event.target.value)} required /><SelectField label="Category" value={category} onChange={(event) => setCategory(event.target.value)}>{categories.map((item) => <option key={item} value={item}>{item.replaceAll('_', ' ')}</option>)}</SelectField><div className="md:row-span-2"><TextAreaField label="Description · optional" value={description} onChange={(event) => setDescription(event.target.value)} /></div><Button aria-busy={busy} disabled={busy || !title.trim()}>{busy ? 'Creating…' : handoff?.reference.kind === 'competency' ? 'Create and use Activity' : handoff ? 'Create and relate Activity' : 'Create Activity'}</Button></form></Surface>
+  const handoffDescription = handoff?.reference.kind === 'competency' ? 'Confirming creates this actual record. The competency contribution is recorded only when you start or log a Session; refresh alone does nothing.' : handoff?.reference.kind === 'unlinked' ? 'Confirming creates and selects this actual record. Returning does not replace a Today suggestion until you explicitly confirm there.' : handoff ? 'Confirming creates this actual record and explicitly relates it to the selected source. Refresh alone does nothing.' : 'Activities name actual work. Creating one does not imply completion, Evidence, or capability.'
+  return <Surface className="p-5"><SectionHeader title="Create an Activity" description={handoffDescription} /><form className="mt-4 grid gap-4 md:grid-cols-3" onSubmit={(event) => void submit(event)}><TextField label="Activity title" value={title} onChange={(event) => setTitle(event.target.value)} required /><SelectField label="Category" value={category} onChange={(event) => setCategory(event.target.value)}>{categories.map((item) => <option key={item} value={item}>{item.replaceAll('_', ' ')}</option>)}</SelectField><div className="md:row-span-2"><TextAreaField label="Description · optional" value={description} onChange={(event) => setDescription(event.target.value)} /></div><Button aria-busy={busy} disabled={busy || !title.trim()}>{busy ? 'Creating…' : ['competency', 'unlinked'].includes(handoff?.reference.kind ?? '') ? 'Create and use Activity' : handoff ? 'Create and relate Activity' : 'Create Activity'}</Button></form></Surface>
 }
 
 function TimerStart({ activities, selectedActivityId, reference, disabled, onDone, onError }: { activities: Activity[]; selectedActivityId: string; reference: ActualWorkReference | null; disabled: boolean; onDone: () => Promise<void>; onError: (value: string) => void }) {

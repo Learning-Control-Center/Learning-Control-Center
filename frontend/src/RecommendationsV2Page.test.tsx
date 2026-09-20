@@ -1,6 +1,7 @@
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { MemoryRouter } from 'react-router-dom'
 
 import { RecommendationsV2Page } from './pages/RecommendationsV2Page'
 
@@ -30,6 +31,9 @@ const run = {
       candidateType: 'curriculum_unit',
       title: 'Practice deterministic policies',
       description: 'Work through the authored exercise.',
+      eligible: true,
+      eligibilityReason: 'ELIGIBLE',
+      eligibilityRules: [],
       expectedLearningValue: 'very_high',
       expectedLearningValueReasons: ['REQUIRED_GAP_AND_MISSING_EVIDENCE_MODE'],
       score: 72,
@@ -44,6 +48,7 @@ const run = {
         { code: 'CONTEXT_COST', value: -2 },
       ],
       portfolioRole: 'primary',
+      decision: 'selected',
       decisionReason: 'SELECTED_PRIMARY',
       durationRangeMs: [600_000, 1_200_000, 1_800_000],
       advisoryDurationMs: 1_200_000,
@@ -58,6 +63,7 @@ const run = {
       ],
     },
   ],
+  candidateAudit: [],
 }
 
 describe('Recommendation V2 minimum surface', () => {
@@ -67,6 +73,8 @@ describe('Recommendation V2 minimum surface', () => {
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input)
         if (url.endsWith('/api/v2/recommendations/history')) return json([run])
+        if (url.endsWith('/api/v2/recommendations/runs/recommendation-run-1')) return json({ ...run, candidateAudit: [...run.portfolio, { ...run.portfolio[0], candidateId: 'candidate-2', title: 'Deferred alternative', eligible: false, eligibilityReason: 'BLOCKED_BY_PREREQUISITE', decision: 'rejected', decisionReason: 'INELIGIBLE', portfolioRole: null, score: null, rank: null, scoreComponents: [] }] })
+        if (url.endsWith('/api/v2/recommendations/runs/recommendation-run-2')) return json({ ...run, id: 'recommendation-run-2' })
         if (url.endsWith('/api/v2/analysis/current')) {
           return json({ configured: true, status: 'current', snapshot: { id: 'analysis-snapshot-1' } })
         }
@@ -82,19 +90,42 @@ describe('Recommendation V2 minimum surface', () => {
 
   it('shows policy explanations and generates a new unknown-window run explicitly', async () => {
     const user = userEvent.setup()
-    render(<RecommendationsV2Page />)
+    render(<MemoryRouter initialEntries={['/insights/recommendations?run=recommendation-run-1&candidate=candidate-2']}><RecommendationsV2Page /></MemoryRouter>)
 
-    expect(await screen.findByRole('heading', { name: 'Recommendation V2' })).toBeInTheDocument()
-    expect(await screen.findByText('Practice deterministic policies')).toBeInTheDocument()
-    expect(screen.getByText('Unknown — no total-window constraint')).toBeInTheDocument()
-    expect(screen.getByText('recommendation-score-policy/v1')).toBeInTheDocument()
-    expect(screen.getByText('+0')).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Recommendations' })).toBeInTheDocument()
+    expect((await screen.findAllByText('Practice deterministic policies')).length).toBeGreaterThan(0)
+    expect(screen.getByText('Unknown — unconstrained total window')).toBeInTheDocument()
+    expect(screen.getByText(/recommendation-score-policy\/v1/)).toBeInTheDocument()
+    expect(screen.getByText('DEADLINE_PRESSURE: +0')).toBeInTheDocument()
+    expect(screen.getByText('Full candidate audit · 2 considered')).toBeInTheDocument()
+    expect(screen.getByText('Deferred alternative')).toBeInTheDocument()
+    expect(document.getElementById('candidate-candidate-2')).toHaveClass('border-copper')
+    expect(screen.getByText('rejected · BLOCKED BY PREREQUISITE')).toBeInTheDocument()
+    expect(screen.getByText(/Not scored or ranked/)).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'Generate new run' }))
-    expect(await screen.findByText('Practice deterministic policies')).toBeInTheDocument()
+    expect((await screen.findAllByText('Practice deterministic policies')).length).toBeGreaterThan(0)
     expect(fetch).toHaveBeenCalledWith(
       '/api/v2/recommendations/runs',
       expect.objectContaining({ method: 'POST' }),
     )
+  })
+
+  it('preserves empty-state generation input and controls after a command failure', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/api/v2/recommendations/history')) return json([])
+      if (url.endsWith('/api/v2/analysis/current')) return json({ configured: true, status: 'current', snapshot: { id: 'analysis-snapshot-1' } })
+      if (url.endsWith('/api/v2/recommendations/runs') && init?.method === 'POST') return json({ error: { code: 'UNAVAILABLE', message: 'Recommendation generation failed safely.' } }, 503)
+      throw new Error(`Unexpected URL: ${url}`)
+    }))
+    render(<MemoryRouter><RecommendationsV2Page /></MemoryRouter>)
+
+    expect(await screen.findByText('No Recommendation V2 run')).toBeInTheDocument()
+    await userEvent.type(screen.getByLabelText('Available minutes (optional)'), '60')
+    await userEvent.click(screen.getByRole('button', { name: 'Generate new run' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Recommendation generation failed safely.')
+    expect(screen.getByLabelText('Available minutes (optional)')).toHaveValue(60)
+    expect(screen.getByRole('button', { name: 'Generate new run' })).toBeEnabled()
   })
 })

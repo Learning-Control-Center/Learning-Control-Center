@@ -1,1 +1,1 @@
-export { RecommendationsV2Page } from '../../pages/RecommendationsV2Page'
+export { RecommendationsV2Page } from './RecommendationsV2Page'

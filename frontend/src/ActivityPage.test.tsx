@@ -4,6 +4,7 @@ import { MemoryRouter, useNavigate } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { SessionsPage } from './pages/SessionsPage'
+import { ActiveSessionProvider } from './shared/session/ActiveSessionProvider'
 
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } })
 
@@ -120,5 +121,69 @@ describe('V2 Activity handoff', () => {
     expect(screen.getByRole('button', { name: 'Start timer' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Confirm relationship' })).toBeEnabled()
     expect(screen.getByLabelText('Activity title')).toHaveValue('Second learning unit')
+  })
+
+  it('returns an unlinked Today Activity without inferring a relation', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/api/v2/activities')) return json([{ id: 'activity-1', title: 'Investigate production issue', description: null, categoryStableKey: 'debugging', occurredAt: null, createdAt: '2026-01-01T00:00:00Z' }])
+      if (url.endsWith('/api/v2/roadmap-projection/current')) return json({ configured: true, nodes: [], edges: [] })
+      if (url.endsWith('/api/v2/curricula/catalog/active')) return json({ units: [] })
+      if (url.endsWith('/api/v2/projects/catalog/current')) return json({ candidates: [] })
+      if (url.includes('/api/v1/sessions?')) return json({ items: [] })
+      if (url.endsWith('/api/v1/settings/discipline')) return json({ timezone: 'UTC' })
+      if (url.includes('/api/v1/reflections/')) return json({ reflection: null })
+      return json({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<MemoryRouter initialEntries={['/activity?origin=today&returnTo=%2F%3FreplaceSuggestion%3Dsuggestion-1&kind=unlinked&title=Choose+actual+work']}><SessionsPage /></MemoryRouter>)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Use Activity' }))
+    expect(await screen.findByText(/No suggestion or canonical reference has been changed yet/)).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Return selected Activity' })).toHaveAttribute('href', '/?replaceSuggestion=suggestion-1&activityResult=activity-1&activityResultStatus=selected')
+    const calls = fetchMock.mock.calls as unknown as Array<[RequestInfo | URL, RequestInit?]>
+    expect(calls.some(([, init]) => init?.method === 'POST')).toBe(false)
+  })
+
+  it('withholds every timer command while active Session authority is unavailable', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/api/v2/activities')) return json([{ id: 'activity-1', title: 'Practice', description: null, categoryStableKey: 'practice', occurredAt: null, createdAt: '2026-01-01T00:00:00Z' }])
+      if (url.endsWith('/api/v1/sessions/active')) return json({ error: { code: 'UNAVAILABLE', message: 'Session authority could not be reached.' } }, 503)
+      if (url.includes('/api/v1/sessions?')) return json({ items: [] })
+      if (url.endsWith('/api/v2/roadmap-projection/current')) return json({ configured: true, nodes: [], edges: [] })
+      if (url.endsWith('/api/v2/curricula/catalog/active')) return json({ units: [] })
+      if (url.endsWith('/api/v2/projects/catalog/current')) return json({ candidates: [] })
+      return json({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<MemoryRouter><ActiveSessionProvider><SessionsPage /></ActiveSessionProvider></MemoryRouter>)
+
+    expect(await screen.findByText(/Timer commands are withheld/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Retry section' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Start timer' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Pause' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Complete' })).not.toBeInTheDocument()
+  })
+
+  it('preserves empty-state Activity input and controls after a create failure', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/api/v2/activities') && init?.method === 'POST') return json({ error: { code: 'UNAVAILABLE', message: 'Create failed safely.' } }, 503)
+      if (url.endsWith('/api/v2/activities')) return json([])
+      if (url.includes('/api/v1/sessions?')) return json({ items: [] })
+      if (url.endsWith('/api/v2/roadmap-projection/current')) return json({ configured: true, nodes: [], edges: [] })
+      if (url.endsWith('/api/v2/curricula/catalog/active')) return json({ units: [] })
+      if (url.endsWith('/api/v2/projects/catalog/current')) return json({ candidates: [] })
+      return json({})
+    }))
+    render(<MemoryRouter><SessionsPage /></MemoryRouter>)
+
+    const title = await screen.findByLabelText('Activity title')
+    await userEvent.type(title, 'Keep this draft')
+    await userEvent.click(screen.getByRole('button', { name: 'Create Activity' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Create failed safely.')
+    expect(screen.getByLabelText('Activity title')).toHaveValue('Keep this draft')
+    expect(screen.getByRole('button', { name: 'Create Activity' })).toBeEnabled()
   })
 })

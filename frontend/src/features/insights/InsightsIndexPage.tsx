@@ -4,9 +4,9 @@ import { PageHeader, Surface } from '../../shared/components'
 import { paths } from '../../shared/navigation/paths'
 
 const destinations = [
-  { to: paths.analysis, title: 'Current analysis', detail: 'Evidence-backed diagnosis, gaps, blockers, and Unknown state.' },
-  { to: paths.recommendations, title: 'Recommendation history', detail: 'Deterministic choices, reasons, and audit lineage.' },
-  { to: paths.legacy, title: 'Legacy V1 history', detail: 'Clearly labeled compatibility analytics, reports, and historical views.' },
+  { to: paths.analysis, title: 'Analysis V3', detail: 'Current and historical Evidence-backed diagnosis: gaps, signals, completeness, and Unknown state. It describes what has happened.' },
+  { to: paths.recommendations, title: 'Recommendation V2', detail: 'Deterministic advisory choices, human-readable reasons, and audit lineage. It chooses what may make sense next.' },
+  { to: paths.legacy, title: 'Legacy V1 history', detail: 'Read-only V1 Today/Roadmap records, recalculated compatibility Analytics, and immutable generated Reports.' },
 ]
 
 export function InsightsIndexPage() {
@@ -14,5 +14,7 @@ export function InsightsIndexPage() {
 }
 
 export function LegacyIndexPage() {
-  return <div className="page-stack"><PageHeader eyebrow="Read-only compatibility" title="Legacy V1 history" description="These records preserve V1 meaning. They are not current V2 capability, eligibility, or Profile truth." /><div className="responsive-card-grid"><Surface className="p-5"><h2 className="font-display text-xl font-semibold"><Link to={paths.legacyToday}>Today and recommendation history</Link></h2></Surface><Surface className="p-5"><h2 className="font-display text-xl font-semibold"><Link to={paths.legacyRoadmap}>Roadmap history</Link></h2></Surface><Surface className="p-5"><h2 className="font-display text-xl font-semibold"><Link to={paths.legacyAnalytics}>V1 compatibility analytics</Link></h2></Surface><Surface className="p-5"><h2 className="font-display text-xl font-semibold"><Link to={paths.legacyReports}>Generated reports</Link></h2></Surface></div></div>
+  return <div className="page-stack"><PageHeader eyebrow="Read-only compatibility" title="Legacy V1 history" description="These preserved records remain readable under their original meaning. They are not current V2 capability, eligibility, Profile, Analysis, or Recommendation truth." /><div className="responsive-card-grid"><LegacyCard to={paths.legacyToday} title="Today and recommendation history" detail="Immutable V1 daily recommendations and interactions." /><LegacyCard to={paths.legacyRoadmap} title="Roadmap history" detail="Preserved V1 phase and Track interpretation." /><LegacyCard to={paths.legacyAnalytics} title="V1 compatibility analytics" detail="A recalculated range/as-of view, not an immutable snapshot." /><LegacyCard to={paths.legacyReports} title="Generated V1 reports" detail="Immutable report documents; current reflection is edited on Today or Activity." /></div></div>
 }
+
+function LegacyCard({ to, title, detail }: { to: string; title: string; detail: string }) { return <Surface className="p-5"><p className="eyebrow">Read-only V1</p><h2 className="mt-2 font-display text-xl font-semibold"><Link className="focus-link" to={to}>{title}</Link></h2><p className="mt-2 text-sm leading-6 text-ink/65">{detail}</p></Surface> }

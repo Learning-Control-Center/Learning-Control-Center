@@ -1,8 +1,11 @@
 import { ChevronRight, FileText } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 
 import { ApiError, api, formatDuration } from '../api'
 import { EmptyState, ErrorState, LoadingState } from '../components/PageState'
+import { PageHeader, ProvenanceNotice } from '../shared/components'
+import { paths } from '../shared/navigation/paths'
 
 type Report = {
   id: string
@@ -23,17 +26,6 @@ type MarkdownBlock =
   | { kind: 'heading'; level: 2 | 3; text: string }
   | { kind: 'paragraph'; text: string }
   | { kind: 'list'; items: string[] }
-
-function localDateInTimezone(timezone: string) {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: timezone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).formatToParts(new Date())
-  const value = Object.fromEntries(parts.map((part) => [part.type, part.value]))
-  return `${value.year}-${value.month}-${value.day}`
-}
 
 function parseReportMarkdown(markdown: string): MarkdownBlock[] {
   const lines = markdown.replaceAll('\r\n', '\n').split('\n')
@@ -123,25 +115,16 @@ export function ReportDocument({ markdown }: { markdown: string }) {
 export function ReportsPage() {
   const [reports, setReports] = useState<Report[]>([])
   const [selected, setSelected] = useState<Report | null>(null)
-  const [reflection, setReflection] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [today, setToday] = useState('')
 
   const load = useCallback(async () => {
     setLoading(true)
     setError('')
     try {
-      const settings = await api<{ timezone: string }>('/settings/discipline')
-      const localDate = localDateInTimezone(settings.timezone)
-      const [reportResponse, reflectionResponse] = await Promise.all([
-        api<{ items: Report[] }>('/reports?limit=100'),
-        api<{ reflection: { text: string } | null }>(`/reflections/${localDate}`),
-      ])
-      setToday(localDate)
+      const reportResponse = await api<{ items: Report[] }>('/reports?limit=100')
       setReports(reportResponse.items)
       setSelected((current) => current ?? reportResponse.items[0] ?? null)
-      setReflection(reflectionResponse.reflection?.text ?? '')
     } catch (caught) {
       setError(caught instanceof ApiError ? caught.message : 'Reports could not be loaded.')
     } finally {
@@ -154,17 +137,18 @@ export function ReportsPage() {
   }, [load])
 
   if (loading) return <LoadingState label="Loading immutable report snapshots" />
-  if (error) return <ErrorState message={error} retry={() => void load()} />
+  if (error) return <div className="space-y-6"><PageHeader eyebrow="Read-only V1 compatibility" title="Generated V1 Reports" description="Immutable report snapshots preserved with their original Analytics version." /><ErrorState message={error} retry={() => void load()} /></div>
 
   return (
     <div className="mx-auto w-full max-w-[78rem]">
       <header className="mb-7">
-        <p className="eyebrow mb-2">Deterministic snapshots</p>
-        <h1 className="page-title">Reports</h1>
-        <p className="mt-2 text-sm text-ink/60">
-          Generated history stays immutable. Your reflection remains editable.
-        </p>
+          <p className="eyebrow mb-2">Read-only V1 compatibility</p>
+          <h1 className="page-title">Generated V1 Reports</h1>
+          <p className="mt-2 text-sm text-ink/65">
+          Immutable snapshots retain their original V1 Analytics meaning. Current reflection is edited from Today or Activity, outside this archive.
+          </p>
       </header>
+      <div className="mb-5"><ProvenanceNotice title="Immutable generated history"><p>Changing range filters elsewhere cannot rewrite these documents. Reflection editing remains outside this read-only archive.</p></ProvenanceNotice></div>
       <div className="grid gap-5 xl:grid-cols-[20rem_minmax(0,1fr)]">
         <aside className="surface overflow-hidden">
           <div className="border-b border-ink/10 p-5">
@@ -175,6 +159,7 @@ export function ReportsPage() {
               reports.map((report) => (
                 <button
                   key={report.id}
+                  aria-pressed={selected?.id === report.id}
                   className={`flex w-full items-center justify-between gap-3 border-b border-ink/10 p-4 text-left transition ${selected?.id === report.id ? 'bg-moss/10' : 'hover:bg-white/60'}`}
                   onClick={() => setSelected(report)}
                 >
@@ -206,6 +191,8 @@ export function ReportsPage() {
                   <p className="mt-2 text-sm text-ink/55">
                     {selected.periodStart} to {selected.periodEnd}
                   </p>
+                  <p className="mt-1 text-sm text-ink/55">Generated {new Date(selected.generatedAt).toLocaleString()}</p>
+                  {selected.type === 'daily' ? <Link className="mt-3 inline-flex text-sm font-medium underline" to={`${paths.today}?reflectionDate=${encodeURIComponent(selected.periodEnd)}#daily-reflection`}>Open reflection for {selected.periodEnd} on Today</Link> : null}
                 </div>
                 <FileText className="size-6 text-moss" />
               </div>
@@ -228,28 +215,6 @@ export function ReportsPage() {
           ) : (
             <EmptyState title="No report selected" detail="Choose a generated snapshot from the archive." />
           )}
-          <section className="surface p-5 sm:p-6">
-            <p className="eyebrow">Today’s reflection</p>
-            <textarea
-              className="field mt-4 min-h-36 resize-y"
-              value={reflection}
-              onChange={(event) => setReflection(event.target.value)}
-              placeholder="What changed in your understanding? What should tomorrow preserve?"
-            />
-            <div className="mt-3 flex justify-end">
-              <button
-                className="button-primary"
-                onClick={() =>
-                  void api(`/reflections/${today}`, {
-                    method: 'PUT',
-                    body: JSON.stringify({ text: reflection }),
-                  })
-                }
-              >
-                Save reflection
-              </button>
-            </div>
-          </section>
         </div>
       </div>
     </div>

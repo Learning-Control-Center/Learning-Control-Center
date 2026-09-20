@@ -776,6 +776,14 @@ def _seed_roadmap_scale(client: PublicApiClient, run: FixtureRun, size: int) -> 
                 "dimension_keys": ["speaking", "reading"] if is_dimension_node else [],
                 "effective_at": effective_at,
                 "creation_source": "roadmap_fixture",
+                **(
+                    {
+                        "freshness_current_through_days": 0,
+                        "freshness_stale_after_days": 0,
+                    }
+                    if index == foundation_count
+                    else {}
+                ),
                 "criteria": criteria,
             },
             expected=201,
@@ -855,7 +863,15 @@ def _seed_roadmap_scale(client: PublicApiClient, run: FixtureRun, size: int) -> 
                 "scale_stable_key": "technical",
                 "scale_version": "v1",
                 "target_level_stable_key": "independent",
-                "priority": "critical" if index % 17 == 0 else "core",
+                "priority": (
+                    "critical"
+                    if index % 17 == 0
+                    or (
+                        index > foundation_count
+                        and domain_index_for(index) != domain_index_for(index - 1)
+                    )
+                    else "core"
+                ),
             }
         )
     profile = client.request(
@@ -1055,7 +1071,7 @@ def _seed_roadmap_scale(client: PublicApiClient, run: FixtureRun, size: int) -> 
                 "status": "active",
                 "provenance": "roadmap_fixture",
                 "order_index": 0,
-                "minimum_useful_duration_ms": 900000,
+                "minimum_useful_duration_ms": 1800000,
                 "preferred_duration_ms": 1800000,
                 "maximum_useful_duration_ms": 2700000,
                 "targets": [
@@ -1074,7 +1090,73 @@ def _seed_roadmap_scale(client: PublicApiClient, run: FixtureRun, size: int) -> 
                 ],
                 "requirements": [],
                 "evidence_opportunities": [],
-            }
+            },
+            {
+                "stable_key": "journey-review",
+                "objective_stable_key": "journey",
+                "kind": "practice_task",
+                "title": "Review the next Roadmap capability",
+                "description": "Representative review work for a second portfolio slot.",
+                "action": {
+                    "kind": "practice_task",
+                    "instructions": "Review the capability and record the remaining uncertainty.",
+                },
+                "status": "active",
+                "provenance": "roadmap_fixture",
+                "order_index": 1,
+                "minimum_useful_duration_ms": 1800000,
+                "preferred_duration_ms": 1800000,
+                "maximum_useful_duration_ms": 2700000,
+                "targets": [
+                    {
+                        "semantic_definition_id": definition_ids[branches[1][0]],
+                        "criterion_definition_id": criterion_ids[branches[1][0]],
+                        "scale_version_id": technical["id"],
+                        "dimension_id": None,
+                        "intended_learning_outcome": "Reinforce the next target capability.",
+                        "minimum_level_id": familiar["id"],
+                        "maximum_level_id": independent["id"],
+                        "supports_unassessed": True,
+                        "role": "primary",
+                        "order_index": 0,
+                    }
+                ],
+                "requirements": [],
+                "evidence_opportunities": [],
+            },
+            {
+                "stable_key": "journey-assessment",
+                "objective_stable_key": "journey",
+                "kind": "practice_task",
+                "title": "Check the next Roadmap capability",
+                "description": "Representative assessment work for a third portfolio slot.",
+                "action": {
+                    "kind": "practice_task",
+                    "instructions": "Complete a short capability check and record the result.",
+                },
+                "status": "active",
+                "provenance": "roadmap_fixture",
+                "order_index": 2,
+                "minimum_useful_duration_ms": 1800000,
+                "preferred_duration_ms": 1800000,
+                "maximum_useful_duration_ms": 2700000,
+                "targets": [
+                    {
+                        "semantic_definition_id": definition_ids[branches[2][0]],
+                        "criterion_definition_id": criterion_ids[branches[2][0]],
+                        "scale_version_id": technical["id"],
+                        "dimension_id": None,
+                        "intended_learning_outcome": "Assess the next target capability.",
+                        "minimum_level_id": familiar["id"],
+                        "maximum_level_id": independent["id"],
+                        "supports_unassessed": True,
+                        "role": "primary",
+                        "order_index": 0,
+                    }
+                ],
+                "requirements": [],
+                "evidence_opportunities": [],
+            },
         ],
         "assessment_rubrics": [],
     }
@@ -1182,6 +1264,17 @@ def _seed_roadmap_scale(client: PublicApiClient, run: FixtureRun, size: int) -> 
                     "role": "primary",
                     "project_criterion_stable_key": "artifact-passes",
                     "order_index": 1,
+                },
+                {
+                    "semantic_definition_id": definition_ids[foundation_count],
+                    "criterion_definition_id": criterion_ids[foundation_count],
+                    "scale_version_id": technical["id"],
+                    "dimension_id": None,
+                    "level_id": independent["id"],
+                    "intended_outcome": "Establish a due-review target for portfolio coverage.",
+                    "role": "secondary",
+                    "project_criterion_stable_key": "artifact-passes",
+                    "order_index": 2,
                 },
             ],
             "requirements": [],
@@ -1307,23 +1400,111 @@ def _seed_roadmap_scale(client: PublicApiClient, run: FixtureRun, size: int) -> 
         },
         expected=201,
     )
+    stale_activity = client.request(
+        "POST",
+        "/api/v2/activities",
+        {
+            "title": "Historical Roadmap review evidence",
+            "category_stable_key": "project",
+            "occurred_at": effective_at,
+            "outcome_classification": "completed",
+        },
+        expected=201,
+    )
+    stale_activity_link = client.request(
+        "POST",
+        "/api/v2/projects/activity-links",
+        {
+            "activity_id": stale_activity["id"],
+            "task_definition_id": evidence_task["id"],
+            "provenance": "user_confirmed",
+            "idempotency_key": f"roadmap-fixture-stale-activity-link-{size}",
+        },
+        expected=201,
+    )
+    stale_session_started_at = str(stale_activity_link["createdAt"])
+    stale_evidence_occurred_at = (
+        (
+            datetime.fromisoformat(stale_session_started_at.replace("Z", "+00:00"))
+            + timedelta(milliseconds=2)
+        )
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+    client.request(
+        "POST",
+        "/api/v2/sessions/manual",
+        {
+            "activity_id": stale_activity["id"],
+            "assistance_mode": "none",
+            "started_at": stale_session_started_at,
+            "duration_ms": 1,
+            "outcome": "completed",
+            "contributions": [
+                {
+                    "target_type": "competency",
+                    "competency_identity_id": competency_ids[evidence_source_index],
+                    "relevance": "primary",
+                },
+                {
+                    "target_type": "project",
+                    "project_id": evidence_project["id"],
+                    "project_version_id": evidence_project_version["id"],
+                    "project_task_definition_id": evidence_task["id"],
+                    "relevance": "primary",
+                },
+            ],
+        },
+        expected=201,
+    )
+    if run.clock_at is not None:
+        report_clock = datetime.fromisoformat(run.clock_at.replace("Z", "+00:00")) + timedelta(days=1)
+        restarted = run.restart_backend(report_clock.isoformat().replace("+00:00", "Z"))
+        restarted.calls = client.calls
+        restarted.login()
+        client = restarted
+        stale_evidence = client.request(
+            "POST",
+            f"/api/v2/projects/{evidence_project['id']}/evidence",
+            {
+                "activity_project_task_link_id": stale_activity_link["id"],
+                "opportunity_id": evidence_opportunity["id"],
+                "title": "Historical Roadmap prerequisite confirmation",
+                "description": "Old-dated evidence re-evaluated at the advanced fixture clock.",
+                "occurred_at": stale_evidence_occurred_at,
+                "artifact_hash": "b" * 64,
+                "rubric_result": "passed",
+                "idempotency_key": f"roadmap-fixture-stale-project-evidence-{size}",
+            },
+            expected=201,
+        )
+        client.request(
+            "POST",
+            f"/api/v2/projects/criteria/{evidence_criterion['id']}/evaluations",
+            {
+                "evidence_ids": [submitted_evidence["id"], stale_evidence["id"]],
+                "idempotency_key": f"roadmap-fixture-stale-project-evaluation-{size}",
+            },
+            expected=201,
+        )
     analysis = client.request(
         "POST",
         "/api/v2/analysis/runs",
         {"idempotency_key": f"roadmap-fixture-analysis-{size}", "purpose": "learning_control"},
         expected=201,
     )
-    client.request(
+    initial_today = client.request(
         "POST",
         "/api/v2/today/generations",
         {
             "idempotency_key": f"roadmap-fixture-today-{size}",
             "analysis_snapshot_id": analysis["id"],
-            "available_time_ms": 3600000,
+            "available_time_ms": 1800000,
             "context_costs": [],
         },
         expected=201,
     )
+    _verify_checkpoint5_state_matrix(client, size, analysis, initial_today, competency_ids[0])
     projection = client.request("POST", "/api/v2/roadmap-projection/rebuild")
     if not isinstance(projection, dict):
         raise RuntimeError("Roadmap fixture projection was not an object.")
@@ -1388,6 +1569,250 @@ def _seed_roadmap_scale(client: PublicApiClient, run: FixtureRun, size: int) -> 
                     f"{left['stableKey']} and {right['stableKey']}."
                 )
     return repeated
+
+
+def _verify_checkpoint5_state_matrix(
+    client: PublicApiClient,
+    size: int,
+    initial_analysis: JsonObject,
+    initial_today: JsonObject,
+    competency_id: str,
+) -> None:
+    """Leave fresh current advice while preserving representative read-only history."""
+    initial_suggestions = initial_today.get("suggestions", [])
+    if not isinstance(initial_suggestions, list) or not initial_suggestions:
+        raise RuntimeError("Checkpoint 5 fixture did not produce an initial Today portfolio.")
+
+    suggestion = initial_suggestions[0]
+    client.request(
+        "POST",
+        f"/api/v2/today/suggestions/{suggestion['id']}/viewed",
+        {"idempotency_key": f"checkpoint5-fixture-viewed-{size}"},
+        expected=201,
+    )
+    client.request(
+        "POST",
+        f"/api/v2/today/suggestions/{suggestion['id']}/accepted",
+        {"idempotency_key": f"checkpoint5-fixture-accepted-{size}"},
+        expected=201,
+    )
+    skipped_for_correction = client.request(
+        "POST",
+        f"/api/v2/today/suggestions/{suggestion['id']}/skipped",
+        {
+            "idempotency_key": f"checkpoint5-fixture-correctable-skip-{size}",
+            "reason_code": "fixture_correction_validation",
+        },
+        expected=201,
+    )
+    skip_interaction = next(
+        item for item in reversed(skipped_for_correction["interactions"]) if item["type"] == "skipped"
+    )
+    client.request(
+        "POST",
+        f"/api/v2/today/interactions/{skip_interaction['id']}/corrections",
+        {
+            "idempotency_key": f"checkpoint5-fixture-correct-skip-{size}",
+            "reason": "Fixture correction preserves append-only interaction history.",
+        },
+        expected=201,
+    )
+    started = client.request(
+        "POST",
+        f"/api/v2/today/suggestions/{suggestion['id']}/start",
+        {
+            "idempotency_key": f"checkpoint5-fixture-start-{size}",
+            "assistance_mode": "none",
+            "contributions": [],
+        },
+        expected=201,
+    )
+    started_interaction = next(
+        item for item in reversed(started["interactions"]) if item["type"] == "started"
+    )
+    session_id = started_interaction["sessionId"]
+
+    followup_analysis = client.request(
+        "POST",
+        "/api/v2/analysis/runs",
+        {
+            "idempotency_key": f"checkpoint5-fixture-analysis-{size}",
+            "purpose": "learning_control",
+        },
+        expected=201,
+    )
+    historical_regeneration = client.request(
+        "POST",
+        "/api/v2/today/regenerations",
+        {
+            "idempotency_key": f"checkpoint5-fixture-regeneration-{size}",
+            "analysis_snapshot_id": followup_analysis["id"],
+            "available_time_ms": 3600000,
+            "context_costs": [],
+        },
+        expected=201,
+    )
+    if not historical_regeneration.get("regeneration") or not historical_regeneration.get("suggestions"):
+        raise RuntimeError("Checkpoint 5 fixture did not create regenerated history.")
+    continuing = client.request("GET", "/api/v2/today/current")["continuingStartedSuggestions"]
+    if not any(item["id"] == suggestion["id"] for item in continuing):
+        raise RuntimeError("Checkpoint 5 fixture did not expose continuing started work.")
+    client.request(
+        "POST",
+        f"/api/v2/sessions/{session_id}/complete",
+        {"outcome": "partial", "notes": "Fixture partial Session outcome."},
+    )
+    client.request(
+        "POST",
+        f"/api/v2/today/suggestions/{suggestion['id']}/partially-completed",
+        {
+            "idempotency_key": f"checkpoint5-fixture-partial-{size}",
+            "session_id": session_id,
+        },
+        expected=201,
+    )
+    post_session_analysis = client.request(
+        "POST",
+        "/api/v2/analysis/runs",
+        {
+            "idempotency_key": f"checkpoint5-fixture-post-session-analysis-{size}",
+            "purpose": "learning_control",
+        },
+        expected=201,
+    )
+
+    no_debt_before_skip = _checkpoint5_actuality_snapshot(client, competency_id)
+    current_suggestion = historical_regeneration["suggestions"][0]
+    client.request(
+        "POST",
+        f"/api/v2/today/suggestions/{current_suggestion['id']}/skipped",
+        {
+            "idempotency_key": f"checkpoint5-fixture-skip-{size}",
+            "reason_code": "fixture_no_debt_validation",
+        },
+        expected=201,
+    )
+    if _checkpoint5_actuality_snapshot(client, competency_id) != no_debt_before_skip:
+        raise RuntimeError("Checkpoint 5 skipped work changed actuality, Evidence, or debt.")
+
+    empty_generation = client.request(
+        "POST",
+        "/api/v2/today/regenerations",
+        {
+            "idempotency_key": f"checkpoint5-fixture-empty-regeneration-{size}",
+            "analysis_snapshot_id": post_session_analysis["id"],
+            "available_time_ms": 0,
+            "context_costs": [],
+        },
+        expected=201,
+    )
+    if empty_generation.get("suggestions"):
+        raise RuntimeError("Checkpoint 5 zero-window fixture manufactured useful work.")
+
+    expiry_candidate_generation = client.request(
+        "POST",
+        "/api/v2/today/regenerations",
+        {
+            "idempotency_key": f"checkpoint5-fixture-expiry-candidate-{size}",
+            "analysis_snapshot_id": post_session_analysis["id"],
+            "available_time_ms": None,
+            "context_costs": [],
+        },
+        expected=201,
+    )
+    if not expiry_candidate_generation.get("suggestions"):
+        raise RuntimeError("Checkpoint 5 fixture did not create an expiry candidate.")
+    no_debt_before_expiry = _checkpoint5_actuality_snapshot(client, competency_id)
+    regenerated = client.request(
+        "POST",
+        "/api/v2/today/regenerations",
+        {
+            "idempotency_key": f"checkpoint5-fixture-current-regeneration-{size}",
+            "analysis_snapshot_id": post_session_analysis["id"],
+            "available_time_ms": None,
+            "context_costs": [],
+        },
+        expected=201,
+    )
+    if not regenerated.get("regeneration") or not regenerated.get("suggestions"):
+        raise RuntimeError("Checkpoint 5 fixture did not leave a fresh regenerated portfolio.")
+    if _checkpoint5_actuality_snapshot(client, competency_id) != no_debt_before_expiry:
+        raise RuntimeError("Checkpoint 5 expiry changed actuality, Evidence, or debt.")
+    portfolio_sizes = {
+        len(initial_today.get("suggestions", [])),
+        len(historical_regeneration.get("suggestions", [])),
+        len(empty_generation.get("suggestions", [])),
+        len(regenerated.get("suggestions", [])),
+    }
+    if not {0, 1, 2, 3} <= portfolio_sizes:
+        raise RuntimeError(
+            f"Checkpoint 5 fixture did not cover 0/1/2/3-item portfolios: {portfolio_sizes!r}."
+        )
+
+    current_before = client.request("GET", "/api/v2/today/current")
+    current_after = client.request("GET", "/api/v2/today/current")
+    if current_before != current_after:
+        raise RuntimeError("Checkpoint 5 Today GET changed current state.")
+    if current_before["generation"]["id"] != regenerated["id"]:
+        raise RuntimeError("Checkpoint 5 current Today generation is not the regeneration.")
+
+    today_history = client.request("GET", "/api/v2/today/history")
+    if len(today_history) < 2:
+        raise RuntimeError("Checkpoint 5 fixture did not retain Today generation history.")
+    historical_statuses = {
+        item.get("status")
+        for generation in today_history
+        for item in generation.get("suggestions", [])
+    }
+    if not {"partially_completed", "skipped", "expired"} <= historical_statuses:
+        raise RuntimeError("Checkpoint 5 fixture lost partial/skipped/expired history.")
+    if not any(
+        interaction.get("correction")
+        for generation in today_history
+        for item in generation.get("suggestions", [])
+        for interaction in item.get("interactions", [])
+    ):
+        raise RuntimeError("Checkpoint 5 fixture lost corrected interaction history.")
+
+    analysis_history = client.request("GET", "/api/v2/analysis/history")
+    analysis_ids = {item["id"] for item in analysis_history}
+    if not {
+        initial_analysis["id"],
+        followup_analysis["id"],
+        post_session_analysis["id"],
+    } <= analysis_ids:
+        raise RuntimeError("Checkpoint 5 fixture did not retain Analysis snapshot history.")
+
+    recommendation_history = client.request("GET", "/api/v2/recommendations/history")
+    if len(recommendation_history) < 2:
+        raise RuntimeError("Checkpoint 5 fixture did not retain Recommendation run history.")
+    recommendation = client.request(
+        "GET",
+        f"/api/v2/recommendations/runs/{regenerated['recommendationRunId']}",
+    )
+    candidate_audit = recommendation.get("candidateAudit", [])
+    if not candidate_audit or not any(not item.get("eligible", False) for item in candidate_audit):
+        raise RuntimeError("Checkpoint 5 fixture did not expose a rejected Recommendation audit row.")
+
+    sessions = client.request("GET", "/api/v1/sessions?limit=100")
+    if not sessions.get("items"):
+        raise RuntimeError("Checkpoint 5 fixture did not retain Activity/Session history.")
+    client.request("GET", "/api/v1/analytics?range=30d")
+    reports = client.request("GET", "/api/v1/reports")
+    if not reports.get("items") or not reports["items"][0].get("markdown"):
+        raise RuntimeError("Checkpoint 5 fixture did not preserve a populated immutable Report.")
+
+
+def _checkpoint5_actuality_snapshot(client: PublicApiClient, competency_id: str) -> JsonObject:
+    analytics = client.request("GET", "/api/v1/analytics?range=30d")
+    analytics.pop("generatedAt", None)
+    return {
+        "activities": client.request("GET", "/api/v2/activities"),
+        "sessions": client.request("GET", "/api/v1/sessions?limit=100"),
+        "evidence": client.request("GET", "/api/v2/evidence?limit=200"),
+        "capability": client.request("GET", f"/api/v2/capabilities/{competency_id}"),
+        "analytics": analytics,
+    }
 
 
 def _verify_authority_read_parity(
@@ -1613,6 +2038,12 @@ def main() -> int:
     )
     checkpoint_four_browser.add_argument("--timezone", default=DEFAULT_TIMEZONE)
     checkpoint_four_browser.add_argument("--clock", default=DEFAULT_CLOCK)
+    checkpoint_five_browser = subparsers.add_parser(
+        "checkpoint5-playwright",
+        help="Run Today, Activity, Analysis, Recommendation, and legacy Insights browser checks.",
+    )
+    checkpoint_five_browser.add_argument("--timezone", default=DEFAULT_TIMEZONE)
+    checkpoint_five_browser.add_argument("--clock", default=DEFAULT_CLOCK)
     arguments = parser.parse_args()
     if arguments.command == "smoke":
         result = run_smoke(arguments.scenario, arguments.timezone, arguments.clock)
@@ -1658,6 +2089,25 @@ def main() -> int:
             arguments.timezone,
             arguments.clock,
             grep_pattern="Checkpoint 4",
+        )
+        print(
+            json.dumps(
+                {
+                    "scenarioId": result["scenarioId"],
+                    "fixtureHash": result["fixtureHash"],
+                    "productionBuildHash": result["productionBuildHash"],
+                    "roadmapProjection": result["roadmapProjection"],
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+    if arguments.command == "checkpoint5-playwright":
+        result = run_roadmap_playwright(
+            25,
+            arguments.timezone,
+            arguments.clock,
+            grep_pattern="Checkpoint 5",
         )
         print(
             json.dumps(

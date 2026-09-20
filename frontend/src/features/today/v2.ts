@@ -1,1 +1,1 @@
-export { TodayV2Page } from '../../pages/TodayV2Page'
+export { TodayV2Page } from './TodayV2Page'

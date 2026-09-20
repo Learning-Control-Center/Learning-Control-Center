@@ -15,10 +15,14 @@ import {
 
 import { ApiError, api, formatDuration, formatRatio } from '../api'
 import { ErrorState, LoadingState } from '../components/PageState'
+import { PageHeader, ProvenanceNotice, SectionError, Surface } from '../shared/components'
 
 type Distribution = { key: string; label?: string; durationMs: number; ratio: number | null }
 type Analytics = {
   analyticsVersion: number
+  generatedAt: number
+  timezone: string
+  historicalContext: { exclusiveCutoffMs: number; completedThrough: string; scope: { phaseTitle?: string | null; roadmapStableKey?: string | null; scopeSource?: string | null } | null } | null
   range: { name: string; startDate: string; endDate: string }
   totalDurationMs: number
   activeDays: number
@@ -63,41 +67,43 @@ export function AnalyticsPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (signal?: AbortSignal) => {
     setLoading(true)
     setError('')
     try {
-      setData(await api<Analytics>(`/analytics?range=${range}`))
+      const response = await api<Analytics>(`/analytics?range=${range}`, { signal })
+      if (!signal?.aborted) setData(response)
     } catch (caught) {
-      setError(caught instanceof ApiError ? caught.message : 'Analytics could not be loaded.')
+      if ((caught as Error).name !== 'AbortError') setError(caught instanceof ApiError ? caught.message : 'Analytics could not be loaded.')
     } finally {
-      setLoading(false)
+      if (!signal?.aborted) setLoading(false)
     }
   }, [range])
 
   useEffect(() => {
-    void load()
+    const controller = new AbortController()
+    void load(controller.signal)
+    return () => controller.abort()
   }, [load])
 
-  if (loading) return <LoadingState label="Calculating deterministic metrics" />
-  if (error || !data) {
-    return <ErrorState message={error || 'Analytics are unavailable.'} retry={() => void load()} />
-  }
+  if (loading && !data) return <LoadingState label="Calculating deterministic metrics" />
+  if (!data) return <div className="space-y-6"><PageHeader eyebrow="Read-only V1 compatibility" title="V1 Compatibility Analytics" description="A recalculated range view over preserved V1 contracts." /><ErrorState message={error || 'Analytics are unavailable.'} retry={() => void load()} /></div>
 
   return (
     <div className="mx-auto w-full max-w-[112rem]">
       <header className="mb-7 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <p className="eyebrow mb-2">What has happened?</p>
-          <h1 className="page-title">Analytics</h1>
-          <p className="mt-2 text-sm text-ink/60">
-            Exact, explainable measurements. Undefined ratios remain N/A.
+          <p className="eyebrow mb-2">Read-only V1 compatibility</p>
+          <h1 className="page-title">V1 Compatibility Analytics</h1>
+          <p className="mt-2 max-w-3xl text-sm text-ink/65">
+            Recalculated on request for the selected V1 range. This is not Analysis V3, current capability truth, or a generated report snapshot. Undefined ratios remain N/A.
           </p>
         </div>
         <div className="flex rounded-xl border border-ink/10 bg-white/60 p-1" aria-label="Analytics range">
           {['7d', '30d', '90d', 'all'].map((item) => (
             <button
               key={item}
+              aria-pressed={range === item}
               className={`min-h-11 rounded-lg px-3 text-sm font-medium ${range === item ? 'bg-ink text-white' : 'text-ink/65 hover:bg-white'}`}
               onClick={() => setRange(item)}
             >
@@ -106,6 +112,8 @@ export function AnalyticsPage() {
           ))}
         </div>
       </header>
+      {error ? <div className="mb-5"><SectionError message={error} retry={() => void load()} /></div> : null}
+      <ProvenanceNotice title="Recalculated range view"><p>Range: {data.range.startDate} through {data.range.endDate}. Recalculated {new Date(data.generatedAt).toLocaleString(undefined, { timeZone: data.timezone })} in {data.timezone}. Values and charts below share the same Analytics v{data.analyticsVersion} response.</p>{data.historicalContext ? <p className="mt-2">Historical cutoff: before {new Date(data.historicalContext.exclusiveCutoffMs).toLocaleString(undefined, { timeZone: data.timezone })}; completed through {data.historicalContext.completedThrough}. Scope: {data.historicalContext.scope?.phaseTitle ?? data.historicalContext.scope?.roadmapStableKey ?? 'historical baseline'}.</p> : <p className="mt-2">Current compatibility calculation; no historical cutoff was applied.</p>}</ProvenanceNotice>
       <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
         <Metric
           icon={Clock3}
@@ -145,8 +153,9 @@ export function AnalyticsPage() {
       <div className="mt-5 grid gap-5 xl:grid-cols-2">
         <ChartCard title="Daily duration" description="Exact qualifying learning time by local day.">
           {data.durationAdherence.length ? (
-            <ResponsiveContainer width="100%" height={280}>
-              <BarChart data={data.durationAdherence}>
+            <div aria-hidden="true">
+              <ResponsiveContainer width="100%" height={280}>
+                <BarChart data={data.durationAdherence} accessibilityLayer={false}>
                 <CartesianGrid stroke="#dfe5dd" vertical={false} />
                 <XAxis
                   dataKey="localDate"
@@ -159,8 +168,9 @@ export function AnalyticsPage() {
                 />
                 <Tooltip formatter={(value) => formatDuration(Number(value))} />
                 <Bar dataKey="durationMs" fill="#326653" radius={[6, 6, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
           ) : (
             <ChartEmpty message="No qualifying learning sessions in this period." />
           )}
@@ -168,12 +178,14 @@ export function AnalyticsPage() {
         <ChartCard title="Activity mix" description="Time-bearing sessions by concrete logged activity.">
           {data.distributions.activity.length ? (
             <div className="grid items-center gap-4 sm:grid-cols-[minmax(0,1fr)_12rem]">
-              <ResponsiveContainer width="100%" height={280}>
-                <PieChart>
+              <div aria-hidden="true">
+                <ResponsiveContainer width="100%" height={280}>
+                  <PieChart accessibilityLayer={false}>
                   <Pie
                     data={data.distributions.activity}
                     dataKey="durationMs"
                     nameKey="key"
+                    rootTabIndex={-1}
                     innerRadius={70}
                     outerRadius={108}
                     paddingAngle={2}
@@ -183,8 +195,9 @@ export function AnalyticsPage() {
                     ))}
                   </Pie>
                   <Tooltip formatter={(value) => formatDuration(Number(value))} />
-                </PieChart>
-              </ResponsiveContainer>
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
               <AccessibleLegend items={data.distributions.activity} />
             </div>
           ) : (
@@ -222,6 +235,7 @@ export function AnalyticsPage() {
           </ul>
         </ChartCard>
       </div>
+      <Surface className="mt-5 overflow-x-auto p-5"><details><summary className="min-h-11 cursor-pointer py-2 font-semibold focus-visible:outline focus-visible:outline-2 focus-visible:outline-moss">Exact values table</summary><p className="mt-2 text-sm text-ink/65">Accessible exact values from the same view model used by the charts. Range {data.range.startDate} through {data.range.endDate}; generated in {data.timezone}. Undefined ratios are shown as N/A.</p><dl className="mt-3 grid gap-2 text-sm sm:grid-cols-2"><div><dt className="font-medium">Weighted verification denominator</dt><dd>{data.coverage.applicableCore} core + {data.coverage.applicableImportant} important</dd></div><div><dt className="font-medium">Independent-practice denominator</dt><dd>{formatDuration(data.independentCoding.practicalDurationMs)} practical work</dd></div></dl><table className="mt-4 w-full min-w-[34rem] text-left text-sm"><caption className="sr-only">Exact V1 compatibility Analytics values for the selected range</caption><thead><tr className="border-b border-ink/15"><th className="p-2">Measure</th><th className="p-2">Date or category</th><th className="p-2">Duration</th><th className="p-2">Ratio</th></tr></thead><tbody>{data.durationAdherence.map((item) => <tr className="border-b border-ink/10" key={`day:${item.localDate}`}><th className="p-2 font-medium">Daily duration</th><td className="p-2">{item.localDate}</td><td className="p-2">{formatDuration(item.durationMs)}</td><td className="p-2">{formatRatio(item.adherence)}</td></tr>)}{data.distributions.activity.map((item) => <tr className="border-b border-ink/10" key={`activity:${item.key}`}><th className="p-2 font-medium">Activity mix</th><td className="p-2 capitalize">{item.key.replaceAll('_', ' ')}</td><td className="p-2">{formatDuration(item.durationMs)}</td><td className="p-2">{formatRatio(item.ratio)}</td></tr>)}{data.distributions.assistance.map((item) => <tr className="border-b border-ink/10" key={`assistance:${item.key}`}><th className="p-2 font-medium">Assistance</th><td className="p-2 capitalize">{item.key.replaceAll('_', ' ')}</td><td className="p-2">{formatDuration(item.durationMs)}</td><td className="p-2">{formatRatio(item.ratio)}</td></tr>)}</tbody></table>{!data.durationAdherence.length && !data.distributions.activity.length && !data.distributions.assistance.length ? <p className="mt-4 text-sm text-ink/65">No exact range rows are available.</p> : null}</details></Surface>
     </div>
   )
 }
@@ -240,11 +254,11 @@ function Metric({
   return (
     <article className="surface p-5">
       <div className="flex items-center justify-between">
-        <p className="text-xs font-medium text-ink/55">{label}</p>
+        <p className="text-xs font-medium text-ink/65">{label}</p>
         <Icon className="size-4 text-moss" />
       </div>
       <p className="mt-4 font-display text-2xl font-semibold capitalize">{value}</p>
-      <p className="mt-1 truncate text-xs text-ink/55">{detail}</p>
+      <p className="mt-1 truncate text-xs text-ink/65">{detail}</p>
     </article>
   )
 }

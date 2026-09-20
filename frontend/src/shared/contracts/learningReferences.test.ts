@@ -34,4 +34,11 @@ describe('actual-work handoff contract', () => {
     expect(handoff).not.toBeNull()
     expect(activityResultPath(handoff!, 'activity-1')).toBe('/roadmap?focus=c1&activityResult=activity-1&activityResultStatus=selected')
   })
+
+  it('supports a Today unlinked selection without inventing a canonical relation', () => {
+    const path = activityHandoffPath({ origin: 'today', returnTo: '/?replaceSuggestion=suggestion-1', reference: { kind: 'unlinked', title: 'Choose actual work' } })
+    const parsed = parseActivityHandoff(new URLSearchParams(path.split('?')[1]))
+    expect(parsed).toEqual({ origin: 'today', returnTo: '/?replaceSuggestion=suggestion-1', reference: { kind: 'unlinked', title: 'Choose actual work' } })
+    expect(activityResultPath(parsed!, 'activity-1')).toBe('/?replaceSuggestion=suggestion-1&activityResult=activity-1&activityResultStatus=selected')
+  })
 })

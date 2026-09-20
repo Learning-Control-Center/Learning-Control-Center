@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { SessionsPage } from './pages/SessionsPage'
 import { TodayPage } from './pages/TodayPage'
+import { ActiveSessionProvider } from './shared/session/ActiveSessionProvider'
 
 function json(value: unknown, status = 200) {
   return new Response(JSON.stringify(value), {
@@ -86,21 +87,22 @@ describe('critical learning workflows', () => {
       outcome: null,
       notes: null,
     }
+    let timedState = 'running'
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
       if (url.includes('/api/v2/activities')) return json([])
       if (url.includes('/api/v2/roadmap-projection/current')) return json({ configured: false, nodes: [], edges: [] })
       if (url.includes('/api/v2/curricula/catalog/active')) return json({ units: [] })
       if (url.includes('/api/v2/projects/catalog/current')) return json({ candidates: [] })
-      if (url.includes('/sessions/active')) return json({ active: true, session: activeSession })
+      if (url.includes('/sessions/active')) return json({ active: true, session: { ...activeSession, timedState, activeSince: timedState === 'paused' ? null : activeSession.activeSince } })
       if (url.includes('/sessions?')) return json({ items: [] })
-      if (url.includes('/api/v2/sessions/session-1/pause') && init?.method === 'POST') return json(activeSession)
+      if (url.includes('/api/v2/sessions/session-1/pause') && init?.method === 'POST') { timedState = 'paused'; return json({ ...activeSession, timedState, activeSince: null }) }
       return json({})
     })
     vi.stubGlobal('fetch', fetchMock)
     render(
       <MemoryRouter>
-        <SessionsPage />
+        <ActiveSessionProvider><SessionsPage /></ActiveSessionProvider>
       </MemoryRouter>,
     )
     expect(await screen.findByText(/1:1\d/)).toBeInTheDocument()
@@ -111,5 +113,6 @@ describe('critical learning workflows', () => {
         expect.objectContaining({ method: 'POST' }),
       ),
     )
+    expect(await screen.findByRole('button', { name: 'Resume' })).toBeInTheDocument()
   })
 })
