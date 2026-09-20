@@ -114,11 +114,15 @@ rm -rf -- \
     "$staging_root/frontend/performance" \
     "$staging_root/frontend/qa"
 
+find "$staging_root" -depth -type d \
+    \( -name .aws -o -name .ssh -o -name .docker \) \
+    -exec rm -rf -- {} +
+
 while IFS= read -r -d '' candidate; do
     basename="${candidate##*/}"
     case "$basename" in
         .env.example|learning-control-center.env.example) continue ;;
-        .env|.env.*|*.env|*.pem|*.key|*.p12|*.pfx|*.db|*.db-*|*.sqlite|*.sqlite-*|*.sqlite3|*.sqlite3-*)
+        .env|.env.*|*.env|.npmrc|.pypirc|.netrc|.git-credentials|pip.conf|*.pem|*.key|*.p12|*.pfx|*.db|*.db-*|*.sqlite|*.sqlite-*|*.sqlite3|*.sqlite3-*)
             rm -f -- "$candidate"
             ;;
     esac
@@ -161,6 +165,9 @@ fi
 if find "$staging_root" \( -path "$staging_root/memory-bank/*" -o \
     -path "$staging_root/.git/*" -o -path "$staging_root/data/*" -o \
     -path "$staging_root/backups/*" -o -path "$staging_root/tmp/*" -o \
+    -name .aws -o -name .ssh -o -name .docker -o \
+    -name .npmrc -o -name .pypirc -o -name .netrc -o \
+    -name .git-credentials -o -name pip.conf -o \
     -name '*.db' -o -name '*.db-*' -o -name '*.sqlite' -o -name '*.sqlite-*' -o \
     -name '*.sqlite3' -o -name '*.sqlite3-*' -o -name '*.pem' -o -name '*.key' \) \
     -print -quit | grep -q .; then

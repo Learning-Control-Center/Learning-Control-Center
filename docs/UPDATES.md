@@ -6,8 +6,8 @@ Obtain the deliberate tagged release archive and companion checksum from the can
 release. Review its release notes and migration implications. For example:
 
 ```bash
-mkdir -p /srv/releases/v1.1.0
-cd /srv/releases/v1.1.0
+mkdir -p "$HOME/lcc-releases/v1.1.0"
+cd "$HOME/lcc-releases/v1.1.0"
 curl -fLO https://github.com/Learning-Control-Center/Learning-Control-Center/releases/download/v1.1.0/learning-control-center-v1.1.0.tar.gz
 curl -fLO https://github.com/Learning-Control-Center/Learning-Control-Center/releases/download/v1.1.0/learning-control-center-v1.1.0.tar.gz.sha256
 sha256sum --check learning-control-center-v1.1.0.tar.gz.sha256
@@ -22,9 +22,12 @@ Run the updater from the currently installed release or the reviewed candidate s
 
 ```bash
 sudo /opt/learning-control-center/current/scripts/update-ubuntu.sh apply \
-  --source /srv/releases/v1.1.0/Learning-Control-Center-v1.1.0 \
+  --source "$HOME/lcc-releases/v1.1.0/Learning-Control-Center-v1.1.0" \
   --release-id v1.1.0
 ```
+
+After a successful update and any desired inspection, remove the user-owned staging directory with
+`rm -rf -- "$HOME/lcc-releases/v1.1.0"`.
 
 The updater stages the candidate in a new immutable release directory, creates its constrained
 Python environment, runs `pip check`, performs `npm ci` and a production build, and determines the

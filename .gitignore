@@ -6,6 +6,14 @@
 /deploy/learning-control-center.env
 *.pem
 *.key
+.npmrc
+.pypirc
+.netrc
+.git-credentials
+pip.conf
+.aws/
+.ssh/
+.docker/
 
 # Python
 __pycache__/

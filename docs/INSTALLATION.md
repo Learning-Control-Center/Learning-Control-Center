@@ -79,7 +79,7 @@ Obtain a deliberate LCC source release or clean Git checkout. Do not deploy a wo
 unreviewed changes. From that source directory:
 
 ```bash
-cp deploy/learning-control-center.env.example /root/learning-control-center.env
+sudo cp deploy/learning-control-center.env.example /root/learning-control-center.env
 sudo chmod 0600 /root/learning-control-center.env
 ```
 

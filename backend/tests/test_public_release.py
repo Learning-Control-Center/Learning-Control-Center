@@ -62,6 +62,14 @@ def _release_repository(tmp_path: Path) -> Path:
         "data/lcc.db": b"private database",
         "backups/lcc.sqlite3": b"private backup",
         ".env": "PRIVATE=secret\n",
+        ".npmrc": "synthetic npm credential fixture\n",
+        ".pypirc": "synthetic package credential fixture\n",
+        ".netrc": "synthetic network credential fixture\n",
+        ".git-credentials": "synthetic Git credential fixture\n",
+        "pip.conf": "synthetic pip credential fixture\n",
+        ".aws/credentials": "synthetic AWS credential fixture\n",
+        ".ssh/id_ed25519": "synthetic SSH credential fixture\n",
+        ".docker/config.json": "synthetic Docker credential fixture\n",
         "deploy/learning-control-center.env": "PRIVATE=secret\n",
         ".abacusai/cache.txt": "private tool state\n",
         "backend/tests/fixtures/private.sqlite3": b"private fixture",
@@ -79,6 +87,10 @@ printf 'fake installer invoked\\n'
         0o755,
     )
     subprocess.run(["git", "-C", repository, "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", repository, "add", "--force", "--", *files],
+        check=True,
+    )
     subprocess.run(
         ["git", "-C", repository, "commit", "--quiet", "-m", "release fixture"],
         check=True,
@@ -175,11 +187,26 @@ def test_release_packaging_is_deterministic_bounded_and_mode_preserving(
         "/data/",
         "/backups/",
         "/.abacusai/",
+        "/.aws/",
+        "/.ssh/",
+        "/.docker/",
         "/backend/tests/",
     )
     assert not any(fragment in name for name in members for fragment in forbidden_fragments)
     assert not any(
-        name.endswith(("/.env", "/learning-control-center.env", ".db", ".sqlite3"))
+        name.endswith(
+            (
+                "/.env",
+                "/learning-control-center.env",
+                "/.npmrc",
+                "/.pypirc",
+                "/.netrc",
+                "/.git-credentials",
+                "/pip.conf",
+                ".db",
+                ".sqlite3",
+            )
+        )
         for name in members
     )
 
@@ -332,6 +359,19 @@ def test_public_repository_assets_and_metadata_are_consistent() -> None:
     project = tomllib.loads((REPOSITORY_ROOT / "pyproject.toml").read_text())
     assert project["project"]["license"] == "GPL-3.0-only"
     assert "contact@waqsea.com" in (REPOSITORY_ROOT / "SECURITY.md").read_text()
+
+    ignored_credentials = {
+        ".npmrc",
+        ".pypirc",
+        ".netrc",
+        ".git-credentials",
+        "pip.conf",
+        ".aws/",
+        ".ssh/",
+        ".docker/",
+    }
+    ignore_lines = set((REPOSITORY_ROOT / ".gitignore").read_text().splitlines())
+    assert ignored_credentials <= ignore_lines
 
     required_public_files = [
         "README.md",
