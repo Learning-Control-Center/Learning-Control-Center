@@ -10,7 +10,7 @@ The Phase 3 frontend organizes the product around Today, Activity, Profile, Road
 
 ## Local development
 
-Prerequisites: Python 3.12 or newer and Node.js 20 or newer.
+Prerequisites: Python 3.12 or newer and Node.js 22 LTS or 24 LTS.
 
 1. Create a Python virtual environment and install the project with development dependencies:
 
@@ -75,7 +75,7 @@ The isolated product fixture runs against disposable temporary databases. Its ag
   --clock 2026-09-19T10:00:00Z
 ```
 
-See `docs/phase3-product-qa.md` for the reproducible fixture-inspection command and real-platform browser/screen-reader checklist. Automated WebKit is not Safari certification, Chromium emulation is not Android certification, and unavailable real OS/device/assistive-technology checks remain explicitly `Not executed`.
+See [`docs/PRODUCT_QA.md`](docs/PRODUCT_QA.md) for the reproducible fixture-inspection command and real-platform browser/screen-reader checklist. Automated WebKit is not Safari certification, Chromium emulation is not Android certification, and unavailable real OS/device/assistive-technology checks remain explicitly `Not executed`.
 
 With Caddy and Chrome installed, run the production-like TLS, authentication, timer, backup, and restore flow from the repository root:
 
@@ -88,5 +88,13 @@ With Caddy and Chrome installed, run the production-like TLS, authentication, ti
 Canonical application data lives in the configured SQLite database; operational backups are written outside the public frontend. Portable logical backups intentionally exclude passwords and live authentication sessions, while replacement restore preserves the existing local authentication state.
 
 Production deployment must provide HTTPS/TLS, a strong bootstrap secret, restricted filesystem permissions, a persistent database volume, and a persistent backup directory. Complete a deployment-specific security review before exposing the application to the public internet.
+
+The supported self-hosting baseline is Ubuntu Server 24.04 LTS. Begin with the
+[production installation guide](docs/INSTALLATION.md), then use the
+[operations runbook](docs/PRODUCTION_OPERATIONS.md) and
+[update/rollback/uninstall guide](docs/UPDATES.md). The production installer creates versioned
+releases, a non-login service account, hardened systemd services, a host-specific Caddy site,
+scheduled backups, and the canonical `lcc-admin` operator command. Root `start.sh` and `stop.sh`
+remain development-only.
 
 The canonical product and engineering specifications are maintained under `memory-bank/`.
