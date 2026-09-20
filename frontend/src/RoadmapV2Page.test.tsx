@@ -16,7 +16,7 @@ const projection = {
       layoutLane: { id: 'engineering', title: 'Engineering', orderIndex: 1 }, capability: { scopes: [] }, canonicalPosition: { x: 320, y: 0 }, position: { x: 320, y: 0 }, positionSource: 'roadmap-layout/v3.0', presentationParentId: 'semantic-0', isCurrent: true, isTargeted: true, isToday: true,
     },
     {
-      id: 'semantic-0', nodeKey: 'semantic-0', semanticDefinitionId: 'definition-0', stableKey: 'python.foundation', title: 'Graph prerequisite', profileDomain: null, profileTarget: null, profileTargets: [], layoutLane: { id: 'foundations', title: 'Foundations', orderIndex: 0 }, capability: { scopes: [] }, canonicalPosition: { x: 0, y: 0 }, position: { x: 0, y: 0 }, positionSource: 'roadmap-layout/v3.0', presentationParentId: null, isCurrent: false, isTargeted: false, isToday: false,
+      id: 'semantic-0', nodeKey: 'semantic-0', semanticDefinitionId: 'definition-0', stableKey: 'python.foundation', title: 'Graph prerequisite', profileDomain: null, profileTarget: null, profileTargets: [], layoutLane: { id: 'foundations', title: 'Foundations', orderIndex: 99 }, capability: { scopes: [] }, canonicalPosition: { x: 0, y: 0 }, position: { x: 0, y: 0 }, positionSource: 'roadmap-layout/v3.0', presentationParentId: null, isCurrent: false, isTargeted: false, isToday: false,
     },
   ],
   edges: [{ id: 'edge-1', edgeType: 'prerequisite', source: 'semantic-0', target: 'semantic-1', visibleByDefault: false, eligibilityAuthority: true, satisfaction: { aggregate_state: 'unknown', unknown_reasons: ['CAPABILITY_UNKNOWN'] } }],
@@ -49,11 +49,15 @@ describe('Roadmap learning journey', () => {
     }))
   })
 
-  function renderPage(path = '/roadmap?view=outline') { return render(<MemoryRouter initialEntries={[path]}><RoadmapV2Page /></MemoryRouter>) }
+  function renderPage(path = '/roadmap') { return render(<MemoryRouter initialEntries={[path]}><RoadmapV2Page /></MemoryRouter>) }
 
   it('presents synchronized human-readable journey facts and complete focused prerequisites', async () => {
     const user = userEvent.setup(); renderPage()
     expect(await screen.findByRole('heading', { name: 'Roadmap' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Outline' })).toHaveAttribute('aria-pressed', 'true')
+    const journey = screen.getByRole('region', { name: 'Roadmap journey view' })
+    const stageLabels = within(journey).getAllByText(/^\d ·/).map((label) => label.textContent)
+    expect(stageLabels).toEqual(['1 · Start here · Shared foundation', '2 · Build capability · Domain branch'])
     expect(screen.getByRole('button', { name: /Python delivery/ })).toHaveTextContent('Independent')
     await user.click(screen.getByRole('button', { name: /Python delivery/ }))
     const details = screen.getByRole('complementary', { name: 'Roadmap item details' })

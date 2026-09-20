@@ -4,7 +4,8 @@ import { expect, test } from '@playwright/test'
 test.skip(!process.env.LCC_PRODUCT_SCENARIO?.startsWith('roadmap-'), 'Roadmap scale fixture required.')
 
 async function login(page: import('@playwright/test').Page, geometryAll = false) {
-  await page.goto(geometryAll ? '/roadmap?__geometry=all' : '/roadmap')
+  const geometryQuery = geometryAll ? `${isCompact(page) ? '' : 'view=map&'}__geometry=all` : ''
+  await page.goto(`/roadmap${geometryQuery ? `?${geometryQuery}` : ''}`)
   await page.getByLabel('Username').fill('fixture-learner')
   await page.getByLabel('Password').fill('fixture-password-with-enough-entropy')
   await page.getByRole('button', { name: 'Sign in' }).click()
@@ -35,12 +36,17 @@ test('Roadmap communicates the journey with Outline/Map parity and accessible in
   await login(page, true)
   const compact = isCompact(page)
   await expect(page.getByRole('heading', { name: 'Roadmap', exact: true })).toBeVisible()
-  await expect(page.getByRole('navigation', { name: 'Roadmap domain branches' })).toBeVisible()
-  await expect(page.getByText(/Read left to right from shared foundations/)).toBeVisible()
-  expect(await page.getByRole('navigation', { name: 'Roadmap domain branches' }).getByRole('button').count()).toBeGreaterThanOrEqual(4)
+  const branchNavigation = page.getByRole('navigation', { name: 'Roadmap domain branches' })
+  if (compact) await expect(branchNavigation).toBeHidden()
+  else await expect(branchNavigation).toBeVisible()
+  await expect(page.getByText(/Start with shared foundations/)).toBeVisible()
+  const branchCount = compact
+    ? await page.getByRole('region', { name: 'Roadmap journey view' }).getByRole('button', { name: /shown/ }).count()
+    : await branchNavigation.getByRole('button').count()
+  expect(branchCount).toBeGreaterThanOrEqual(4)
 
   const comprehension = { direction: false, branch: false, currentTarget: false, today: false, blockedOrUnknown: false }
-  comprehension.branch = (await page.getByRole('navigation', { name: 'Roadmap domain branches' }).getByRole('button').count()) >= 4
+  comprehension.branch = branchCount >= 4
 
   if (compact) {
     await expect(page.getByRole('button', { name: 'Outline' })).toHaveAttribute('aria-pressed', 'true')
@@ -74,6 +80,7 @@ test('Roadmap communicates the journey with Outline/Map parity and accessible in
     await page.keyboard.press('Escape')
     await expect(page.getByRole('button', { name: 'Interact with map' })).toBeFocused()
     await page.getByRole('button', { name: 'Outline' }).click()
+    await page.getByText('More Roadmap controls').click()
     await page.getByRole('button', { name: 'Return to overview' }).click()
   } else {
     await page.getByRole('button', { name: 'Fit all' }).click()
@@ -147,11 +154,11 @@ test('Roadmap communicates the journey with Outline/Map parity and accessible in
   const legend = page.getByLabel('Status and relationship legend')
   await expect(legend.getByText('Today', { exact: true })).toBeVisible()
   await expect(legend.getByText('Unknown', { exact: true })).toBeVisible()
-  await expect(page.getByText(/Read left to right from shared foundations/)).toBeVisible()
+  await expect(page.getByText(/Start with shared foundations/)).toBeVisible()
   comprehension.today = await page.locator('[data-roadmap-node-id][data-today="true"]').count() > 0
   comprehension.blockedOrUnknown = await page.locator('[data-roadmap-node-id]').filter({ hasText: /Blocked by prerequisites|Prerequisite status unknown|Unknown/ }).count() > 0
   if (compact) {
-    comprehension.direction = (await page.getByText(/Read left to right from shared foundations/).count()) > 0
+    comprehension.direction = (await page.getByText(/Start with shared foundations/).count()) > 0
   }
   await test.info().attach('roadmap-first-use-comprehension.json', { body: JSON.stringify(comprehension, null, 2), contentType: 'application/json' })
   expect(Object.values(comprehension).every(Boolean)).toBe(true)
@@ -161,10 +168,13 @@ test('Roadmap communicates the journey with Outline/Map parity and accessible in
 
 test('Roadmap URL state, prerequisite reveal, edit mode, and Reset Layout are operable', async ({ page }) => {
   await login(page)
+  if (isCompact(page)) await page.getByText('More Roadmap controls').click()
   const outline = page.getByRole('button', { name: 'Outline' })
   await outline.click()
   await expect(outline).toHaveAttribute('aria-pressed', 'true')
-  const domainBranch = page.getByRole('navigation', { name: 'Roadmap domain branches' }).getByRole('button', { name: /Learning domain 1/ })
+  const domainBranch = isCompact(page)
+    ? page.getByRole('region', { name: 'Roadmap journey view' }).getByRole('button', { name: /Learning domain 1.*shown/ })
+    : page.getByRole('navigation', { name: 'Roadmap domain branches' }).getByRole('button', { name: /Learning domain 1/ })
   await domainBranch.click()
   await expect(domainBranch).toHaveAttribute('aria-expanded', 'false')
   await page.getByLabel('Search the journey').fill('Roadmap capability 5')
@@ -203,6 +213,7 @@ test('Roadmap URL state, prerequisite reveal, edit mode, and Reset Layout are op
   if (isCompact(page)) await page.getByRole('button', { name: 'Close details' }).click()
   await page.reload()
   await expect(page.locator('[data-roadmap-ready="true"]')).toBeVisible()
+  if (isCompact(page)) await page.getByText('More Roadmap controls').click()
   await expect(page.getByText('Manual position').first()).toBeVisible()
   await domainBranch.click()
   if (!isCompact(page)) await detailRoot.getByRole('heading', { level: 2 }).focus()
@@ -221,6 +232,7 @@ test('Roadmap URL state, prerequisite reveal, edit mode, and Reset Layout are op
 test('Roadmap drag editing persists and remains reversible', async ({ page }) => {
   test.skip(isCompact(page) || expectedSize !== 25, 'Representative desktop drag gate runs on the normal fixture.')
   await login(page)
+  await page.getByRole('button', { name: 'Map', exact: true }).click()
   await page.getByRole('button', { name: 'Edit layout' }).click()
   await axe(page)
   const node = page.locator('.roadmap-node').first()
@@ -267,8 +279,8 @@ test('Roadmap reflows across touch, text-spacing, forced-colors, and small-heigh
   await expectCriticalControlInViewport(page, search)
   await spacingStyle.evaluate((element) => element.remove())
   await page.emulateMedia({ forcedColors: 'active', reducedMotion: 'reduce' })
+  await page.getByRole('button', { name: 'Map', exact: true }).click()
   if (isCompact(page)) {
-    await page.getByRole('button', { name: 'Map', exact: true }).click()
     await expect(page.getByRole('button', { name: 'Interact with map' })).toBeVisible()
   }
   await expect(page.locator('[data-motion-duration-ms="0"]')).toBeAttached()
@@ -277,6 +289,7 @@ test('Roadmap reflows across touch, text-spacing, forced-colors, and small-heigh
   await axe(page)
 
   if (!isCompact(page)) {
+    await page.getByRole('button', { name: 'Outline' }).click()
     await page.setViewportSize({ width: 320, height: 900 })
     await expect(page.getByRole('button', { name: 'Outline' })).toHaveAttribute('aria-pressed', 'true')
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)

@@ -60,6 +60,7 @@ import { paths } from '../../shared/navigation/paths'
 import {
   applyRoadmapVisibility,
   createRoadmapViewModel,
+  type RoadmapLaneView,
   type RoadmapNodeView,
   type RoadmapVisibility,
 } from './viewModel'
@@ -79,6 +80,28 @@ const relationshipOptions = [
   ['supports', 'Supports'],
   ['related', 'Related'],
 ] as const
+
+type RoadmapJourneyStage = 'foundation' | 'domain' | 'destination'
+
+function roadmapJourneyStage(lane: RoadmapLaneView): RoadmapJourneyStage {
+  if (lane.id === 'cross-domain-targets') return 'destination'
+  if (lane.id.startsWith('graph-foundations') || lane.nodes.every((node) => !node.isTargeted)) return 'foundation'
+  return 'domain'
+}
+
+function roadmapJourneyStageMeta(lane: RoadmapLaneView) {
+  const stage = roadmapJourneyStage(lane)
+  if (stage === 'foundation') return { rank: 0, label: '1 · Start here', detail: 'Shared foundation', border: 'border-l-moss' }
+  if (stage === 'domain') return { rank: 1, label: '2 · Build capability', detail: 'Domain branch', border: 'border-l-sky-300' }
+  return { rank: 2, label: '3 · Move toward targets', detail: 'Cross-domain destination', border: 'border-l-amber-300' }
+}
+
+function orderRoadmapLanesForJourney(lanes: RoadmapLaneView[]) {
+  return [...lanes].sort((left, right) => {
+    const rankDifference = roadmapJourneyStageMeta(left).rank - roadmapJourneyStageMeta(right).rank
+    return rankDifference || left.orderIndex - right.orderIndex || left.id.localeCompare(right.id)
+  })
+}
 function toneFor(node: RoadmapNodeView) {
   return node.tone === 'critical' ? 'critical' : node.tone === 'warning' ? 'warning' : node.tone === 'success' ? 'success' : node.tone === 'info' ? 'info' : 'unknown'
 }
@@ -385,12 +408,11 @@ export function RoadmapJourneyPage() {
     finally { setLoading(false) }
   }, [])
   useEffect(() => void load(), [load])
-  useEffect(() => { if (compact && !searchParams.has('view')) updateParam('view', 'outline') }, [compact, searchParams, updateParam])
 
   const model = useMemo(() => projection ? createRoadmapViewModel(projection, levelTitles) : null, [levelTitles, projection])
   const selectedId = searchParams.get('focus')
   const selected = selectedId && model ? model.nodeById.get(selectedId) ?? null : null
-  const view = searchParams.get('view') === 'outline' || (compact && searchParams.get('view') !== 'map') ? 'outline' : 'map'
+  const view = searchParams.get('view') === 'map' ? 'map' : 'outline'
   useEffect(() => {
     if (previousView.current && previousView.current !== view) {
       window.requestAnimationFrame(() => {
@@ -508,6 +530,8 @@ export function RoadmapJourneyPage() {
   if (!projection?.configured) return <EmptyState title="Your learning journey is not configured" detail={projection?.guidance ?? 'Activate a Target Profile and Learning Graph to begin.'} />
   if (!model || !visible) return null
 
+  const journeyLanes = orderRoadmapLanesForJourney(model.lanes)
+
   const laneNodes: Node[] = model.lanes.flatMap((lane) => {
     const nodes = visible.nodes.filter((node) => node.layoutLane.id === lane.id)
     if (!nodes.length) return []
@@ -566,7 +590,7 @@ export function RoadmapJourneyPage() {
 
   return (
     <div className="page-stack" data-roadmap-ready={view === 'outline' || mapReady ? 'true' : undefined}>
-      <PageHeader eyebrow="Canonical V2 journey" title="Roadmap" description="Read left to right from shared foundations through domain branches to your targets. Focus an item to reveal every hard prerequisite that leads to it." actions={<><Button variant="secondary" disabled={working} onClick={() => void rebuild()}><RefreshCw className="size-4" />Rebuild</Button><Button variant="secondary" disabled={working} onClick={() => setResetOpen(true)}><RotateCcw className="size-4" />Reset layout</Button></>} />
+      <PageHeader eyebrow="Canonical V2 journey" title="Roadmap" description="Start with shared foundations, build through domain and specialization branches, then move toward your targets." actions={!compact ? <><Button variant="secondary" disabled={working} onClick={() => void rebuild()}><RefreshCw className="size-4" />Rebuild</Button><Button variant="secondary" disabled={working} onClick={() => setResetOpen(true)}><RotateCcw className="size-4" />Reset layout</Button></> : undefined} />
       <LiveNotice>{notice}</LiveNotice>
       {error ? <MutationError>{error}</MutationError> : null}
 
@@ -577,16 +601,22 @@ export function RoadmapJourneyPage() {
             <button className={`button-quiet ${view === 'map' ? 'bg-ink text-white hover:bg-ink hover:text-white' : ''}`} aria-pressed={view === 'map'} onClick={() => updateParam('view', 'map')}><MapIcon className="size-4" />Map</button>
             <button className={`button-quiet ${view === 'outline' ? 'bg-ink text-white hover:bg-ink hover:text-white' : ''}`} aria-pressed={view === 'outline'} onClick={() => updateParam('view', 'outline')}><List className="size-4" />Outline</button>
           </div>
-          <Button variant={editMode ? 'primary' : 'secondary'} aria-pressed={editMode} onClick={() => setEditMode((current) => !current)}><Move className="size-4" />{editMode ? 'Finish editing' : 'Edit layout'}</Button>
+          {!compact ? <Button variant={editMode ? 'primary' : 'secondary'} aria-pressed={editMode} onClick={() => setEditMode((current) => !current)}><Move className="size-4" />{editMode ? 'Finish editing' : 'Edit layout'}</Button> : null}
         </div>
-        <div className="flex flex-wrap gap-x-5 gap-y-2 text-sm" aria-label="Roadmap filters"><span className="inline-flex items-center gap-2 font-semibold"><SlidersHorizontal className="size-4" />Show</span>{[
-          ['targets', 'Targets only', visibilityState.targetedOnly], ['today', 'Today', visibilityState.todayOnly], ['attention', 'Needs attention', visibilityState.attentionOnly],
-        ].map(([key, label, checked]) => <label key={String(key)} className="flex min-h-11 items-center gap-2"><input type="checkbox" checked={Boolean(checked)} onChange={(event) => updateParam(String(key), event.target.checked ? '1' : undefined)} />{label}</label>)}</div>
-        <fieldset className="border-t border-ink/10 pt-3"><legend className="text-sm font-semibold">Relationships</legend><div className="mt-1 flex flex-wrap gap-x-5 gap-y-1 text-sm">{relationshipOptions.map(([key, label]) => <label key={key} className="flex min-h-11 items-center gap-2"><input type="checkbox" checked={relationshipTypes.has(key)} onChange={() => toggleRelationship(key)} />{label}</label>)}</div></fieldset>
-        <div className="flex flex-wrap items-center gap-2 border-t border-ink/10 pt-3" aria-label="Status and relationship legend"><StatusBadge label="Target" tone="info" /><StatusBadge label="Today" tone="today" /><StatusBadge label="Blocked / Not met" tone="critical" /><StatusBadge label="Unknown" tone="unknown" /><StatusBadge label="Review due" tone="warning" /><span className="text-xs text-ink/55">Solid arrows: prerequisite/specialization · dashed: recommended/related</span>{selectedId || visibilityState.query ? <Button variant="quiet" onClick={returnToOverview}>Return to overview</Button> : null}</div>
+        <details className="rounded-xl border border-ink/10 bg-white/45 p-3 xl:contents" open={!compact ? true : undefined}>
+          <summary className="min-h-11 cursor-pointer py-2 text-sm font-semibold xl:hidden"><span className="inline-flex items-center gap-2"><SlidersHorizontal className="size-4" />More Roadmap controls</span></summary>
+          <div className="mt-3 space-y-3 xl:mt-0 xl:contents">
+            {compact ? <div className="flex flex-wrap gap-2"><Button variant={editMode ? 'primary' : 'secondary'} aria-pressed={editMode} onClick={() => setEditMode((current) => !current)}><Move className="size-4" />{editMode ? 'Finish editing' : 'Edit layout'}</Button><Button variant="secondary" disabled={working} onClick={() => void rebuild()}><RefreshCw className="size-4" />Rebuild</Button><Button variant="secondary" disabled={working} onClick={() => setResetOpen(true)}><RotateCcw className="size-4" />Reset layout</Button></div> : null}
+            <div className="flex flex-wrap gap-x-5 gap-y-2 text-sm" aria-label="Roadmap filters"><span className="inline-flex items-center gap-2 font-semibold"><SlidersHorizontal className="size-4" />Show</span>{[
+              ['targets', 'Targets only', visibilityState.targetedOnly], ['today', 'Today', visibilityState.todayOnly], ['attention', 'Needs attention', visibilityState.attentionOnly],
+            ].map(([key, label, checked]) => <label key={String(key)} className="flex min-h-11 items-center gap-2"><input type="checkbox" checked={Boolean(checked)} onChange={(event) => updateParam(String(key), event.target.checked ? '1' : undefined)} />{label}</label>)}</div>
+            <fieldset className="border-t border-ink/10 pt-3"><legend className="text-sm font-semibold">Relationships</legend><div className="mt-1 flex flex-wrap gap-x-5 gap-y-1 text-sm">{relationshipOptions.map(([key, label]) => <label key={key} className="flex min-h-11 items-center gap-2"><input type="checkbox" checked={relationshipTypes.has(key)} onChange={() => toggleRelationship(key)} />{label}</label>)}</div></fieldset>
+            <div className="flex flex-wrap items-center gap-2 border-t border-ink/10 pt-3" aria-label="Status and relationship legend"><StatusBadge label="Target" tone="info" /><StatusBadge label="Today" tone="today" /><StatusBadge label="Blocked / Not met" tone="critical" /><StatusBadge label="Unknown" tone="unknown" /><StatusBadge label="Review due" tone="warning" /><span className="text-xs text-ink/55">Solid arrows: prerequisite/specialization · dashed: recommended/related</span>{selectedId || visibilityState.query ? <Button variant="quiet" onClick={returnToOverview}>Return to overview</Button> : null}</div>
+          </div>
+        </details>
       </Surface>
 
-      <nav className="flex gap-2 overflow-x-auto pb-1" aria-label="Roadmap domain branches">{model.lanes.map((lane) => {
+      <nav className={`${compact && view === 'outline' ? 'hidden' : 'flex'} gap-2 overflow-x-auto pb-1`} aria-label="Roadmap domain branches">{journeyLanes.map((lane) => {
         const counts = visible.laneCounts.get(lane.id)!
         const collapsed = collapsedLanes.has(lane.id)
         const temporarilyOpen = visible.nodes.some((node) => node.layoutLane.id === lane.id && (visible.temporarilyRevealed.has(node.id) || visible.searchRevealed.has(node.id)))
@@ -596,13 +626,13 @@ export function RoadmapJourneyPage() {
         const unknown = lane.nodes.filter((node) => node.hasUnknown).length
         const blocked = lane.nodes.filter((node) => node.blockedLabel?.startsWith('Blocked')).length
         const hiddenRelationships = model.edges.filter((edge) => (lane.nodes.some((node) => node.id === edge.source) || lane.nodes.some((node) => node.id === edge.target)) && !visible.edges.some((item) => item.id === edge.id)).length
-        return <button key={lane.id} className={`min-h-16 shrink-0 rounded-xl border px-4 py-2 text-left ${expanded ? 'border-moss/25 bg-moss/5' : 'border-ink/15 bg-white/50'}`} onClick={() => toggleSet(setCollapsedLanes, lane.id)} aria-expanded={expanded}><span className="block text-[0.65rem] font-semibold uppercase tracking-wide text-moss">Domain branch</span><span className="font-semibold">{lane.title}</span><span className="ml-2 text-xs text-ink/50">{counts.visible}/{counts.total}</span><span className="mt-1 block text-[0.65rem] text-ink/55">{targets} targets · {today} Today · {blocked} Not met · {unknown} Unknown · {hiddenRelationships} hidden relationships{collapsed && temporarilyOpen ? ' · temporarily open' : ''}</span></button>
+        const stage = roadmapJourneyStageMeta(lane)
+        return <button key={lane.id} className={`min-h-16 shrink-0 rounded-xl border border-l-4 px-4 py-2 text-left ${stage.border} ${expanded ? 'border-moss/25 bg-moss/5' : 'border-ink/15 bg-white/50'}`} onClick={() => toggleSet(setCollapsedLanes, lane.id)} aria-expanded={expanded}><span className="block text-[0.65rem] font-semibold uppercase tracking-wide text-moss">{stage.label} · {stage.detail}</span><span className="font-semibold">{lane.title}</span><span className="ml-2 text-xs text-ink/50">{counts.visible}/{counts.total}</span><span className="mt-1 block text-[0.65rem] text-ink/55">{targets} targets · {today} Today · {blocked} Not met · {unknown} Unknown · {hiddenRelationships} hidden relationships{collapsed && temporarilyOpen ? ' · temporarily open' : ''}</span></button>
       })}</nav>
 
-      {visible.nodes.length === 0 ? <EmptyState title="No journey items match" detail="Clear one or more filters or search terms to show the route again." action={<Button variant="secondary" onClick={() => setSearchParams(view === 'outline' ? { view: 'outline' } : {})}>Clear filters</Button>} /> : <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_23rem]">
+      {visible.nodes.length === 0 ? <EmptyState title="No journey items match" detail="Clear one or more filters or search terms to show the route again." action={<Button variant="secondary" onClick={() => setSearchParams({ view })}>Clear filters</Button>} /> : <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_23rem]">
         <div className="min-w-0" role="region" aria-label="Roadmap journey view">
-          {view === 'map' ? <div className="surface relative h-[min(72vh,48rem)] min-h-[32rem] overflow-hidden" aria-labelledby="roadmap-map-heading" data-roadmap-map-surface>
-            <h2 id="roadmap-map-heading" tabIndex={-1} className="sr-only">Learning journey map</h2>
+          {view === 'map' ? <div className="space-y-3"><Surface className="flex items-start gap-3 border-l-4 border-moss p-4"><MapIcon className="mt-0.5 size-5 shrink-0 text-moss" /><div><h2 id="roadmap-map-heading" tabIndex={-1} className="font-display text-lg font-semibold">Map overview</h2><p className="mt-1 text-sm leading-6 text-ink/65">Use this spatial view to inspect branches and relationships. Outline is the clearest step-by-step reading of the learning journey; focus a target here to isolate its prerequisite path.</p></div></Surface><div className="surface relative h-[min(72vh,48rem)] min-h-[32rem] overflow-hidden" aria-labelledby="roadmap-map-heading" data-roadmap-map-surface>
             {compact && !mapActivated ? <div className="absolute inset-0 z-30 flex items-center justify-center bg-paper/95 p-8 text-center"><div><MapIcon className="mx-auto size-9 text-moss" /><h3 className="mt-3 font-display text-xl font-semibold">Interact with map</h3><p className="mt-2 max-w-sm text-sm text-ink/60">The page scrolls normally until you activate pan and zoom. Outline remains the recommended mobile view.</p><button ref={mapActivateRef} className="button-primary mt-4" onClick={() => setMapActivated(true)}>Interact with map</button></div></div> : null}
             <div className="h-full" ref={(element) => { if (!element) return; if (compact && !mapActivated) { element.setAttribute('inert', ''); element.setAttribute('aria-hidden', 'true') } else { element.removeAttribute('inert'); element.removeAttribute('aria-hidden') } }}>
             <ReactFlow<Node>
@@ -628,7 +658,7 @@ export function RoadmapJourneyPage() {
               proOptions={{ hideAttribution: true }}
             ><Background gap={28} color="#d9d7cf" /><RoadmapCanvasControls selectedIds={closureIds} /></ReactFlow></div>
             {compact && mapActivated ? <button ref={mapExitRef} className="button-secondary absolute right-3 top-3 z-20 bg-white/95" onClick={() => { setMapActivated(false); window.requestAnimationFrame(() => mapActivateRef.current?.focus()) }}>Done interacting</button> : null}
-          </div> : <div className="space-y-4" aria-labelledby="roadmap-outline-heading"><h2 id="roadmap-outline-heading" tabIndex={-1} className="sr-only">Learning journey outline</h2>{model.lanes.map((lane) => { const laneNodes = visible.nodes.filter((node) => node.layoutLane.id === lane.id); const collapsed = collapsedLanes.has(lane.id); const temporarilyOpen = laneNodes.some((node) => visible.temporarilyRevealed.has(node.id) || visible.searchRevealed.has(node.id)); const expanded = !collapsed || temporarilyOpen; return <section key={lane.id} className="surface overflow-hidden"><button className="flex min-h-14 w-full items-center justify-between gap-3 border-b border-ink/10 px-4 py-3 text-left" onClick={() => toggleSet(setCollapsedLanes, lane.id)} aria-expanded={expanded}><span><span className="font-display text-lg font-semibold">{lane.title}</span><span className="ml-2 text-xs text-ink/50">{laneNodes.length} shown{collapsed && temporarilyOpen ? ' · temporarily revealed' : ''}</span></span>{expanded ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}</button>{expanded ? <ol className="divide-y divide-ink/10">{laneNodes.map((node) => { const revealed = visible.temporarilyRevealed.has(node.id) || visible.searchRevealed.has(node.id); return <li key={node.id} className={`${node.presentationParentId ? 'border-l-4 border-moss/25 pl-4 sm:ml-6' : ''}`} data-roadmap-node-id={node.id} data-current-summary={node.currentSummary} data-target-summary={node.targetSummary} data-target-status-summary={node.targetStatusSummary} data-target-rows={JSON.stringify(node.targetRows)} data-today={String(node.isToday)}>{node.presentationParentId ? <p className="px-4 pt-2 text-[0.65rem] font-semibold uppercase tracking-wide text-moss">Specialization branch</p> : null}<button className="grid min-h-20 w-full gap-2 px-4 py-3 text-left sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center" onClick={() => selectNode(node.id)} aria-current={node.id === selectedId ? 'true' : undefined}><span><span className="block font-semibold">{node.title}</span><span className="mt-1 block text-sm text-ink/60">Current: {node.currentSummary} · Target: {node.targetSummary} · {node.targetStatusSummary}</span></span><span className="flex flex-wrap gap-1"><StatusBadge label={node.isTargeted ? 'Target' : 'Path'} tone={node.isTargeted ? 'info' : 'neutral'} />{revealed ? <StatusBadge label="Focused path" tone="info" /> : null}{node.isToday ? <StatusBadge label="Today" tone="today" /> : null}{node.blockedLabel ? <StatusBadge label={node.blockedLabel} tone={toneFor(node)} /> : null}{node.targetRows.some((target) => target.reviewDue) ? <StatusBadge label="Review due" tone="warning" /> : null}{node.positionSource === 'user_override' ? <StatusBadge label="Manual position" tone="warning" /> : null}</span></button></li> })}</ol> : null}</section>})}<Surface className="p-4"><h3 className="font-display text-lg font-semibold">Visible relationships</h3>{visible.edges.length ? <ul className="mt-3 space-y-2 text-sm">{visible.edges.map((edge) => <li key={edge.id} className="rounded-xl border border-ink/10 p-3"><span className="font-semibold">{model.nodeById.get(edge.source)?.title}</span> → <span className="font-semibold">{model.nodeById.get(edge.target)?.title}</span><span className="block text-ink/60">{edge.edgeType.replaceAll('_', ' ')} · {edge.edgeType === 'prerequisite' ? edge.satisfaction.aggregate_state : 'contextual'}{edge.satisfaction.unknown_reasons?.length ? ` · ${edge.satisfaction.unknown_reasons.map((reason) => reason.replaceAll('_', ' ').toLowerCase()).join(', ')}` : ''}</span></li>)}</ul> : <p className="mt-2 text-sm text-ink/60">No relationships are visible under the current filters.</p>}</Surface></div>}
+          </div></div> : <div className="space-y-4" aria-labelledby="roadmap-outline-heading"><h2 id="roadmap-outline-heading" tabIndex={-1} className="sr-only">Learning journey outline</h2>{journeyLanes.map((lane) => { const laneNodes = visible.nodes.filter((node) => node.layoutLane.id === lane.id); const collapsed = collapsedLanes.has(lane.id); const temporarilyOpen = laneNodes.some((node) => visible.temporarilyRevealed.has(node.id) || visible.searchRevealed.has(node.id)); const expanded = !collapsed || temporarilyOpen; const stage = roadmapJourneyStageMeta(lane); return <section key={lane.id} className={`surface overflow-hidden border-l-4 ${stage.border}`}><button className="flex min-h-16 w-full items-center justify-between gap-3 border-b border-ink/10 px-4 py-3 text-left" onClick={() => toggleSet(setCollapsedLanes, lane.id)} aria-expanded={expanded}><span><span className="block text-[0.65rem] font-semibold uppercase tracking-[0.14em] text-moss">{stage.label} · {stage.detail}</span><span className="mt-1 inline-block font-display text-lg font-semibold">{lane.title}</span><span className="ml-2 text-xs text-ink/50">{laneNodes.length} shown{collapsed && temporarilyOpen ? ' · temporarily revealed' : ''}</span></span>{expanded ? <ChevronDown className="size-4 shrink-0" /> : <ChevronRight className="size-4 shrink-0" />}</button>{expanded ? <ol className="divide-y divide-ink/10">{laneNodes.map((node) => { const revealed = visible.temporarilyRevealed.has(node.id) || visible.searchRevealed.has(node.id); return <li key={node.id} className={`${node.presentationParentId ? 'border-l-4 border-moss/25 pl-4 sm:ml-6' : ''}`} data-roadmap-node-id={node.id} data-current-summary={node.currentSummary} data-target-summary={node.targetSummary} data-target-status-summary={node.targetStatusSummary} data-target-rows={JSON.stringify(node.targetRows)} data-today={String(node.isToday)}>{node.presentationParentId ? <p className="px-4 pt-2 text-[0.65rem] font-semibold uppercase tracking-wide text-moss">Specialization branch</p> : null}<button className="grid min-h-20 w-full gap-2 px-4 py-3 text-left sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center" onClick={() => selectNode(node.id)} aria-current={node.id === selectedId ? 'true' : undefined}><span><span className="block font-semibold">{node.title}</span><span className="mt-1 block text-sm text-ink/60">Current: {node.currentSummary} · Target: {node.targetSummary} · {node.targetStatusSummary}</span></span><span className="flex flex-wrap gap-1"><StatusBadge label={node.isTargeted ? 'Target' : 'Path'} tone={node.isTargeted ? 'info' : 'neutral'} />{revealed ? <StatusBadge label="Focused path" tone="info" /> : null}{node.isToday ? <StatusBadge label="Today" tone="today" /> : null}{node.blockedLabel ? <StatusBadge label={node.blockedLabel} tone={toneFor(node)} /> : null}{node.targetRows.some((target) => target.reviewDue) ? <StatusBadge label="Review due" tone="warning" /> : null}{node.positionSource === 'user_override' ? <StatusBadge label="Manual position" tone="warning" /> : null}</span></button></li> })}</ol> : null}</section>})}<Surface className="p-4"><h3 className="font-display text-lg font-semibold">Visible relationships</h3>{visible.edges.length ? <ul className="mt-3 space-y-2 text-sm">{visible.edges.map((edge) => <li key={edge.id} className="rounded-xl border border-ink/10 p-3"><span className="font-semibold">{model.nodeById.get(edge.source)?.title}</span> → <span className="font-semibold">{model.nodeById.get(edge.target)?.title}</span><span className="block text-ink/60">{edge.edgeType.replaceAll('_', ' ')} · {edge.edgeType === 'prerequisite' ? edge.satisfaction.aggregate_state : 'contextual'}{edge.satisfaction.unknown_reasons?.length ? ` · ${edge.satisfaction.unknown_reasons.map((reason) => reason.replaceAll('_', ' ').toLowerCase()).join(', ')}` : ''}</span></li>)}</ul> : <p className="mt-2 text-sm text-ink/60">No relationships are visible under the current filters.</p>}</Surface></div>}
         </div>
         {selected && !compact ? <aside className="surface hidden h-fit max-h-[calc(100vh-3rem)] overflow-y-auto p-5 xl:sticky xl:top-6 xl:block" aria-label="Roadmap item details"><RoadmapDetail node={selected} relationships={selectedRelationships} relatedLearning={selectedLearning} relatedProjects={selectedProjects} editMode={editMode} onClose={closeSelected} onEditPosition={() => setPositionNode(selected)} branchCollapsed={collapsedBranches.has(selected.id)} branchHiddenCount={branchHiddenCount} onToggleBranch={() => toggleSet(setCollapsedBranches, selected.id)} /></aside> : !selected ? <aside className="surface hidden h-fit p-5 text-sm text-ink/60 xl:block"><LockKeyhole className="mb-3 size-5 text-moss" /><h2 className="font-display text-lg font-semibold text-ink">Choose a journey item</h2><p className="mt-2 leading-6">Open any item to compare current capability with its target, inspect prerequisites, and manage presentation position.</p></aside> : null}
       </div>}
