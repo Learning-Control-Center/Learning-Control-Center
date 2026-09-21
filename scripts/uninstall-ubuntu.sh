@@ -103,8 +103,8 @@ fi
 
 if test "$install_root" = "/"; then
     run systemctl daemon-reload
-    if command -v caddy >/dev/null && test -f /etc/caddy/Caddyfile; then
-        run caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    if test -x "$LCC_CADDY_BINARY" && test -f /etc/caddy/Caddyfile; then
+        run "$LCC_CADDY_BINARY" validate --config /etc/caddy/Caddyfile --adapter caddyfile
         run systemctl reload caddy.service
     fi
 fi

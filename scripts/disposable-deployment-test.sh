@@ -7,10 +7,7 @@ test -x "$repository_root/.venv/bin/uvicorn" || {
     echo "Repository .venv is required for the disposable deployment test" >&2
     exit 1
 }
-test -d "$repository_root/frontend/node_modules" || {
-    echo "Frontend node_modules is required for the disposable deployment test" >&2
-    exit 1
-}
+"$repository_root/scripts/frontend-artifact.py" verify --root "$repository_root"
 
 test_root="$(mktemp -d /tmp/lcc-disposable-deployment.XXXXXX)"
 backend_pid=""
@@ -41,11 +38,10 @@ database_path="$data_directory/lcc.sqlite3"
 mkdir -p "$release_one" "$data_directory" "$backup_directory"
 chmod 700 "$data_directory" "$backup_directory"
 rsync -a --delete \
-    --exclude=.git --exclude=.venv --exclude=node_modules --exclude=dist \
+    --exclude=.git --exclude=.venv --exclude=node_modules \
     --exclude=data --exclude=backups --exclude=tmp --exclude=memory-bank \
     "$repository_root/" "$release_one/"
 ln -s "$repository_root/.venv" "$release_one/.venv"
-ln -s "$repository_root/frontend/node_modules" "$release_one/frontend/node_modules"
 printf 'disposable-v1\n' > "$release_one/RELEASE_ID"
 printf 'main\n' > "$release_one/RELEASE_CHANNEL"
 source_revision="$(git -C "$repository_root" rev-parse HEAD)"
@@ -59,7 +55,7 @@ source_ref=refs/heads/main
 source_revision=$source_revision
 source_origin=https://github.com/Learning-Control-Center/Learning-Control-Center.git
 EOF
-npm --prefix "$release_one/frontend" run build
+"$release_one/scripts/frontend-artifact.py" verify --root "$release_one"
 ln -s "$release_one" "$application_root/current"
 
 port="$(python3 - <<'PY'

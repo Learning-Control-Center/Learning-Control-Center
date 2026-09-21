@@ -30,7 +30,11 @@ htmlcov/
 # Node and frontend builds
 node_modules/
 dist/
+!/frontend/dist/
+!/frontend/dist/**
 .vite/
+!/frontend/dist/.vite/
+!/frontend/dist/.vite/**
 coverage/
 test-results/
 playwright-report/

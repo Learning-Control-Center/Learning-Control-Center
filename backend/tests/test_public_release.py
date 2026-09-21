@@ -53,12 +53,15 @@ def _release_repository(tmp_path: Path) -> Path:
         bundle.extractall(repository, filter="data")
 
     for relative_path in (
+        ".gitignore",
+        ".gitattributes",
         "CHANGELOG.md",
         "pyproject.toml",
         "backend/app/main.py",
         "backend/app/analysis/v1_compat.py",
         "frontend/package.json",
         "frontend/package-lock.json",
+        "scripts/frontend-artifact.py",
         "scripts/bootstrap-ubuntu.sh",
         "scripts/deploy-common.sh",
         "scripts/generate-production-env.sh",
@@ -68,6 +71,11 @@ def _release_repository(tmp_path: Path) -> Path:
         "docs/UPDATES.md",
     ):
         _copy_current(repository, relative_path)
+    shutil.copytree(
+        REPOSITORY_ROOT / "frontend" / "dist",
+        repository / "frontend" / "dist",
+        dirs_exist_ok=True,
+    )
 
     subprocess.run(["git", "init", "--quiet", "--initial-branch=main", repository], check=True)
     subprocess.run(["git", "-C", repository, "config", "user.name", "WaqSea"], check=True)
@@ -223,7 +231,10 @@ def test_release_packaging_is_deterministic_bounded_and_mode_preserving(
         f"{prefix}SECURITY.md",
         f"{prefix}logo.png",
         f"{prefix}frontend/public/logo.png",
+        f"{prefix}frontend/dist/index.html",
+        f"{prefix}frontend/dist/LCC_FRONTEND_ARTIFACT.json",
         f"{prefix}scripts/bootstrap-ubuntu.sh",
+        f"{prefix}scripts/frontend-artifact.py",
         f"{prefix}scripts/generate-production-env.sh",
         f"{prefix}scripts/install-ubuntu.sh",
         f"{prefix}RELEASE_ID",
@@ -235,6 +246,7 @@ def test_release_packaging_is_deterministic_bounded_and_mode_preserving(
     assert members[f"{prefix}scripts/bootstrap-ubuntu.sh"].mode & stat.S_IXUSR
     assert members[f"{prefix}scripts/generate-production-env.sh"].mode & stat.S_IXUSR
     assert members[f"{prefix}scripts/install-ubuntu.sh"].mode & stat.S_IXUSR
+    assert members[f"{prefix}scripts/frontend-artifact.py"].mode & stat.S_IXUSR
     forbidden_fragments = (
         "/memory-bank/",
         "/.git/",
@@ -247,6 +259,7 @@ def test_release_packaging_is_deterministic_bounded_and_mode_preserving(
         "/backend/tests/",
     )
     assert not any(fragment in name for name in members for fragment in forbidden_fragments)
+    assert not any("/node_modules/" in name for name in members)
     assert not any(
         name.endswith(
             (
@@ -263,6 +276,333 @@ def test_release_packaging_is_deterministic_bounded_and_mode_preserving(
         )
         for name in members
     )
+    extracted = tmp_path / "extracted-release"
+    with tarfile.open(first_archive, "r:gz") as bundle:
+        bundle.extractall(extracted, filter="data")
+    packaged_root = extracted / f"Learning-Control-Center-{RELEASE_ID}"
+    subprocess.run(
+        [packaged_root / "scripts" / "frontend-artifact.py", "verify", "--root", packaged_root],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_frontend_artifact_is_verified_and_bound_to_source(tmp_path: Path) -> None:
+    verifier = REPOSITORY_ROOT / "scripts" / "frontend-artifact.py"
+    verified = subprocess.run(
+        [verifier, "verify", "--root", REPOSITORY_ROOT],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert verified.returncode == 0
+    manifest = json.loads(
+        (REPOSITORY_ROOT / "frontend" / "dist" / "LCC_FRONTEND_ARTIFACT.json").read_text()
+    )
+    assert manifest["schema_version"] == 1
+    assert re.fullmatch(r"[0-9a-f]{64}", manifest["source_sha256"])
+    assert re.fullmatch(r"[0-9a-f]{64}", manifest["artifact_sha256"])
+    assert manifest["artifact_file_count"] > 1
+
+    copied = tmp_path / "candidate"
+    shutil.copytree(REPOSITORY_ROOT, copied, ignore=shutil.ignore_patterns("node_modules", ".git"))
+    (copied / "frontend" / "dist" / "index.html").write_text("tampered")
+    rejected = subprocess.run(
+        [copied / "scripts" / "frontend-artifact.py", "verify", "--root", copied],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert rejected.returncode != 0
+    assert "stale or modified" in rejected.stderr
+
+    (copied / "frontend" / "dist" / "LCC_FRONTEND_ARTIFACT.json").unlink()
+    missing = subprocess.run(
+        [copied / "scripts" / "frontend-artifact.py", "verify", "--root", copied],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert missing.returncode != 0
+    assert "manifest is missing or unsafe" in missing.stderr
+
+
+def test_prerequisite_provisioning_uses_only_explicit_ubuntu_packages(tmp_path: Path) -> None:
+    repository = _release_repository(tmp_path)
+    asset_root = tmp_path / "assets"
+    _package(repository, asset_root / RELEASE_ID)
+    apt_log = tmp_path / "apt.log"
+    environment = {
+        **_bootstrap_environment(tmp_path, asset_root),
+        "LCC_BOOTSTRAP_TEST_MISSING_PACKAGES": "python3-venv,sqlite3,rsync,caddy,iproute2",
+        "LCC_BOOTSTRAP_APT_LOG": str(apt_log),
+    }
+    result = subprocess.run(
+        _stable_command(),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    commands = apt_log.read_text().splitlines()
+    assert commands[0] == "update"
+    assert commands[1].split() == [
+        "install",
+        "python3-venv",
+        "sqlite3",
+        "rsync",
+        "caddy",
+        "iproute2",
+    ]
+    assert "upgrade" not in apt_log.read_text()
+    assert "full-upgrade" not in apt_log.read_text()
+    assert "Ubuntu 24.04 signed repositories only" in result.stdout
+    assert "Node.js/npm are not installed" in result.stdout
+
+
+def test_prerequisite_dry_run_plans_without_apt_mutation(tmp_path: Path) -> None:
+    repository = _release_repository(tmp_path)
+    asset_root = tmp_path / "assets"
+    _package(repository, asset_root / RELEASE_ID)
+    apt_log = tmp_path / "apt.log"
+    environment = {
+        **_bootstrap_environment(tmp_path, asset_root),
+        "LCC_BOOTSTRAP_TEST_MISSING_PACKAGES": "caddy,sqlite3",
+        "LCC_BOOTSTRAP_APT_LOG": str(apt_log),
+    }
+    result = subprocess.run(
+        _stable_command(dry_run=True),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert not apt_log.exists()
+    assert "DRY-RUN: would run apt-get update and install: sqlite3 caddy" in result.stdout
+
+
+def test_prerequisite_provisioning_refuses_third_party_package_indexes(
+    tmp_path: Path,
+) -> None:
+    apt_log = tmp_path / "apt.log"
+    environment = {
+        **_bootstrap_environment(tmp_path),
+        "LCC_BOOTSTRAP_TEST_MISSING_PACKAGES": "caddy",
+        "LCC_BOOTSTRAP_TEST_APT_INDEX_TARGETS": (
+            "Packages|Ubuntu|Ubuntu|noble|http://archive.ubuntu.com/ubuntu|"
+            "/usr/share/keyrings/ubuntu-archive-keyring.gpg\n"
+            "Packages|Vendor|Vendor|stable|https://packages.example.test/repo|"
+            "/usr/share/keyrings/vendor.gpg"
+        ),
+        "LCC_BOOTSTRAP_APT_LOG": str(apt_log),
+    }
+    result = subprocess.run(
+        _stable_command(),
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert result.returncode != 0
+    assert "Non-Ubuntu APT package index is enabled" in result.stderr
+    assert "packages.example.test" in result.stderr
+    assert apt_log.read_text().splitlines() == ["update"]
+
+
+def test_prerequisite_dry_run_reports_third_party_package_index_blocker(
+    tmp_path: Path,
+) -> None:
+    environment = {
+        **_bootstrap_environment(tmp_path),
+        "LCC_BOOTSTRAP_TEST_MISSING_PACKAGES": "caddy",
+        "LCC_BOOTSTRAP_TEST_APT_INDEX_TARGETS": (
+            "Packages|Third Party|Third Party|noble|https://apt.example.test/repo|"
+            "/usr/share/keyrings/vendor.gpg"
+        ),
+    }
+    result = subprocess.run(
+        _stable_command(dry_run=True),
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert result.returncode != 0
+    assert "Non-Ubuntu APT package index is enabled" in result.stderr
+
+
+def test_prerequisite_provisioning_rejects_spoofed_ubuntu_metadata(
+    tmp_path: Path,
+) -> None:
+    environment = {
+        **_bootstrap_environment(tmp_path),
+        "LCC_BOOTSTRAP_TEST_MISSING_PACKAGES": "caddy",
+        "LCC_BOOTSTRAP_TEST_APT_INDEX_TARGETS": (
+            "Packages|Ubuntu|Ubuntu|noble|https://spoofed.example.test/ubuntu|"
+            "/usr/share/keyrings/vendor.gpg"
+        ),
+    }
+    result = subprocess.run(
+        _stable_command(dry_run=True),
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert result.returncode != 0
+    assert "not bound to Ubuntu's package-owned archive keyring" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("variable", "message"),
+    (
+        ("LCC_BOOTSTRAP_TEST_DPKG_AUDIT_FAILURE", "dpkg reports unfinished"),
+        ("LCC_BOOTSTRAP_TEST_APT_CHECK_FAILURE", "APT dependency state is broken"),
+        ("LCC_BOOTSTRAP_TEST_UBUNTU_KEYRING_FAILURE", "Ubuntu archive keyring"),
+        ("LCC_BOOTSTRAP_TEST_UNMANAGED_CADDY", "unmanaged Caddy"),
+        ("LCC_BOOTSTRAP_TEST_CADDY_PATH", "package-owned /usr/bin/caddy"),
+        ("LCC_BOOTSTRAP_TEST_CADDY_CONFIG_FAILURE", "existing Caddy configuration is invalid"),
+        ("LCC_BOOTSTRAP_TEST_PORT_CONFLICT", "Ports 80 or 443"),
+    ),
+)
+def test_prerequisite_preflight_refuses_unsafe_host_state(
+    tmp_path: Path, variable: str, message: str
+) -> None:
+    environment = _bootstrap_environment(tmp_path)
+    environment[variable] = "/usr/local/bin/caddy" if variable.endswith("CADDY_PATH") else "1"
+    result = subprocess.run(
+        _stable_command(dry_run=True),
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert result.returncode != 0
+    assert message in result.stderr
+
+
+def test_prerequisite_install_failure_is_phased_and_rerunnable(tmp_path: Path) -> None:
+    apt_log = tmp_path / "apt.log"
+    environment = {
+        **_bootstrap_environment(tmp_path),
+        "LCC_BOOTSTRAP_TEST_MISSING_PACKAGES": "caddy",
+        "LCC_BOOTSTRAP_TEST_APT_INSTALL_FAILURE": "1",
+        "LCC_BOOTSTRAP_APT_LOG": str(apt_log),
+    }
+    failed = subprocess.run(
+        _stable_command(),
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert failed.returncode != 0
+    assert "failed during phase: prerequisite install" in failed.stderr
+    assert "correct the error and rerun safely" in failed.stderr
+    assert apt_log.read_text().splitlines() == ["update", "install caddy"]
+
+
+def test_prerequisite_metadata_failure_stops_before_install(tmp_path: Path) -> None:
+    apt_log = tmp_path / "apt.log"
+    environment = {
+        **_bootstrap_environment(tmp_path),
+        "LCC_BOOTSTRAP_TEST_MISSING_PACKAGES": "caddy",
+        "LCC_BOOTSTRAP_TEST_APT_UPDATE_FAILURE": "1",
+        "LCC_BOOTSTRAP_APT_LOG": str(apt_log),
+    }
+    failed = subprocess.run(
+        _stable_command(),
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert failed.returncode != 0
+    assert "failed during phase: package metadata" in failed.stderr
+    assert apt_log.read_text().splitlines() == ["update"]
+
+
+@pytest.mark.parametrize(
+    ("environment_update", "message"),
+    (
+        ({"LCC_BOOTSTRAP_TEST_ARCHITECTURE": "riscv64"}, "Supported architectures"),
+        ({"LCC_BOOTSTRAP_TEST_AVAILABLE_KIB": "1024"}, "At least 1 GiB"),
+    ),
+)
+def test_prerequisite_preflight_rejects_unsupported_host_shape(
+    tmp_path: Path, environment_update: dict[str, str], message: str
+) -> None:
+    environment = {**_bootstrap_environment(tmp_path), **environment_update}
+    result = subprocess.run(
+        _stable_command(dry_run=True),
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert result.returncode != 0
+    assert message in result.stderr
+
+
+def test_prerequisite_preflight_rejects_unsupported_ubuntu(tmp_path: Path) -> None:
+    environment = _bootstrap_environment(tmp_path)
+    os_release = tmp_path / "old-os-release"
+    os_release.write_text('ID=ubuntu\nVERSION_ID="22.04"\n')
+    environment["LCC_BOOTSTRAP_OS_RELEASE"] = str(os_release)
+    result = subprocess.run(
+        _stable_command(dry_run=True),
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert result.returncode != 0
+    assert "Ubuntu Server 24.04 LTS" in result.stderr
+
+
+def test_existing_different_install_is_refused_before_package_changes(tmp_path: Path) -> None:
+    install_root = tmp_path / "installed-root"
+    active = install_root / "opt" / "learning-control-center" / "releases" / "v1.0.0"
+    active.mkdir(parents=True)
+    (active / "RELEASE_ID").write_text("v1.0.0\n")
+    (active / "RELEASE_CHANNEL").write_text("stable\n")
+    (active / "SOURCE_REVISION").write_text("1" * 40 + "\n")
+    (active.parent.parent / "current").symlink_to(active)
+    apt_log = tmp_path / "apt.log"
+    environment = {
+        **_bootstrap_environment(tmp_path),
+        "LCC_BOOTSTRAP_INSTALL_ROOT": str(install_root),
+        "LCC_BOOTSTRAP_TEST_MISSING_PACKAGES": "caddy",
+        "LCC_BOOTSTRAP_APT_LOG": str(apt_log),
+    }
+    result = subprocess.run(
+        _stable_command(dry_run=True),
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert result.returncode != 0
+    assert "controlled update workflow" in result.stderr
+    assert not apt_log.exists()
+
+
+def test_main_and_stable_share_prerequisites_without_server_node() -> None:
+    source = BOOTSTRAP.read_text()
+    provision_start = source.index("provision_prerequisites()")
+    provision_end = source.index("verify_provisioned_commands()")
+    provision = source[provision_start:provision_end]
+    assert "required_packages+=(git)" in provision
+    required_line = provision[provision.index("required_packages=(") : provision.index(")")]
+    assert "nodejs" not in required_line
+    assert " npm" not in required_line
+    assert "apt-key" not in source
+    assert "deb.nodesource" not in source
+    assert "dl.cloudsmith" not in source
+    assert "full-upgrade" not in source
+    assert "npm --prefix" not in (REPOSITORY_ROOT / "scripts" / "install-ubuntu.sh").read_text()
+    assert "npm --prefix" not in (REPOSITORY_ROOT / "scripts" / "update-ubuntu.sh").read_text()
 
 
 def test_stable_is_default_but_requires_an_explicit_release_ref(tmp_path: Path) -> None:
@@ -513,6 +853,8 @@ def test_main_non_interactive_resolves_exact_sha_and_rejects_mismatch(tmp_path: 
     ).stdout.strip()
     environment = _bootstrap_environment(tmp_path)
     environment["LCC_BOOTSTRAP_REPOSITORY_URL"] = str(repository)
+    environment["LCC_BOOTSTRAP_TEST_MISSING_PACKAGES"] = "git"
+    environment["LCC_BOOTSTRAP_APT_LOG"] = str(tmp_path / "main-apt.log")
     command = [
         BOOTSTRAP,
         "--channel",
@@ -540,6 +882,7 @@ def test_main_non_interactive_resolves_exact_sha_and_rejects_mismatch(tmp_path: 
     assert f"main-{revision}" in handoff
     assert revision in handoff
     assert "refs/heads/main" in handoff
+    assert (tmp_path / "main-apt.log").read_text().splitlines() == ["update", "install git"]
 
     mismatch_command = command.copy()
     mismatch_command[mismatch_command.index("--commit") + 1] = "0" * 40

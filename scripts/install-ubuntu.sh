@@ -19,7 +19,7 @@ Options:
   --no-start            Enable units but do not start them
   --dry-run             Print privileged actions without changing the machine
   --root DIR            Install beneath an isolated test root (implies no systemctl/user changes)
-  --skip-build          Copy layout without Python/npm builds (isolated tests only)
+  --skip-build          Copy layout without building the Python environment (isolated tests only)
   --skip-prerequisites  Skip OS/tool checks (isolated tests only)
 EOF
 }
@@ -107,6 +107,7 @@ environment_source="$(readlink -f "$environment_source")"
 test -f "$source_root/pyproject.toml" || lcc_die "Source does not contain pyproject.toml."
 test -f "$source_root/frontend/package-lock.json" || lcc_die "Source lacks frontend lockfile."
 test -f "$source_root/requirements-production.lock" || lcc_die "Source lacks production constraints."
+test -f "$source_root/frontend/dist/index.html" || lcc_die "Source lacks the packaged frontend."
 expected_environment_owner=0
 if test "$install_root" != "/"; then
     expected_environment_owner="$(id -u)"
@@ -178,19 +179,17 @@ run() {
 }
 
 if test "$skip_prerequisites" -eq 0; then
-    # Ubuntu 24.04 LTS provides Python 3.12 directly. Node.js 22+ and Caddy may
-    # come from their official repositories, but must already be installed.
     # shellcheck disable=SC1091
     source /etc/os-release
     test "${ID:-}" = "ubuntu" && test "${VERSION_ID:-}" = "24.04" || \
         lcc_die "The supported production baseline is Ubuntu 24.04 LTS."
-    for command_name in python3 npm node caddy sqlite3 rsync tar curl systemctl runuser flock; do
-        command -v "$command_name" >/dev/null || lcc_die "Missing prerequisite: $command_name"
-    done
-    python3 -c 'import sys; assert sys.version_info >= (3, 12)' || lcc_die "Python 3.12+ is required."
-    node -e 'const major=Number(process.versions.node.split(".")[0]); process.exit([22, 24].includes(major) ? 0 : 1)' || \
-        lcc_die "Node.js 22 LTS or 24 LTS is required to build the frontend."
+    if test "$dry_run" -eq 1; then
+        lcc_note "DRY-RUN: runtime prerequisites were planned by bootstrap and would be verified before installation."
+    else
+        lcc_verify_runtime_prerequisites
+    fi
 fi
+lcc_verify_frontend_artifact "$source_root"
 
 if test "$install_root" = "/"; then
     python3 - "$LCC_SERVICE_USER" "$LCC_SERVICE_GROUP" "$LCC_DATA_DIRECTORY" <<'PY'
@@ -319,12 +318,9 @@ if test "$release_is_complete" -eq 0; then
             --no-build-isolation \
             --editable "$release_directory"
         run "$release_directory/.venv/bin/python" -m pip check
-        run npm --prefix "$release_directory/frontend" ci
-        run npm --prefix "$release_directory/frontend" run build
-        if test "$dry_run" -eq 0; then
-            test -f "$release_directory/frontend/dist/index.html" || \
-                lcc_die "Frontend build did not produce index.html."
-        fi
+    fi
+    if test "$dry_run" -eq 0; then
+        lcc_verify_frontend_artifact "$release_directory"
     fi
     if test "$dry_run" -eq 0; then
         printf '%s\n' "$release_id" > "$release_directory/RELEASE_ID"
@@ -361,7 +357,7 @@ if test "$dry_run" -eq 1; then
     asset_release="$source_root"
 elif test "$skip_build" -eq 0; then
     test -x "$release_directory/.venv/bin/python" || lcc_die "Release Python runtime is missing."
-    test -f "$release_directory/frontend/dist/index.html" || lcc_die "Release frontend build is missing."
+    lcc_verify_frontend_artifact "$release_directory"
 fi
 
 if test -e "$environment_target" && test "$replace_environment" -eq 0; then
@@ -383,7 +379,23 @@ run install -m 0644 "$asset_release/deploy/learning-control-center-backup.timer"
     "$systemd_directory/learning-control-center-backup.timer"
 
 rendered_caddy="$(mktemp)"
-trap 'rm -f -- "$rendered_caddy"' EXIT
+caddy_backup_directory=""
+if test "$install_root" = "/" && test "$dry_run" -eq 0; then
+    caddy_backup_directory="$(mktemp -d)"
+    if test -f "$caddy_site"; then
+        cp -a -- "$caddy_site" "$caddy_backup_directory/site"
+    fi
+    if test -f "$caddy_main"; then
+        cp -a -- "$caddy_main" "$caddy_backup_directory/main"
+    fi
+fi
+cleanup_caddy_temporary_files() {
+    rm -f -- "$rendered_caddy"
+    if test -n "$caddy_backup_directory"; then
+        rm -rf -- "$caddy_backup_directory"
+    fi
+}
+trap cleanup_caddy_temporary_files EXIT
 sed -e "s|@@LCC_PUBLIC_HOST@@|$domain|g" \
     -e "s|@@LCC_FRONTEND_ROOT@@|$current_release/frontend/dist|g" \
     "$asset_release/deploy/Caddyfile.template" > "$rendered_caddy"
@@ -404,14 +416,19 @@ elif ! grep -Fqx "$LCC_CADDY_IMPORT" "$caddy_main"; then
     fi
 fi
 
+if test "$install_root" = "/" && test "$dry_run" -eq 0; then
+    lcc_format_validate_or_restore_caddy "$caddy_site" "$caddy_main" \
+        "$caddy_backup_directory"
+elif test "$install_root" = "/"; then
+    echo "DRY-RUN: caddy fmt/validate before release activation"
+fi
+
 next_link="$application_root/.current.$$.next"
 run ln -s "$release_directory" "$next_link"
 run mv -Tf "$next_link" "$current_release"
 run ln -sfn "$current_release/scripts/lcc-admin" "$admin_link"
 
 if test "$install_root" = "/" && test "$dry_run" -eq 0; then
-    caddy fmt --overwrite "$caddy_site"
-    caddy validate --config "$caddy_main" --adapter caddyfile
     systemctl daemon-reload
     systemctl enable caddy.service "$LCC_SERVICE_NAME" "$LCC_BACKUP_TIMER_NAME"
     if test "$start_services" -eq 1; then
@@ -424,7 +441,7 @@ if test "$install_root" = "/" && test "$dry_run" -eq 0; then
         systemctl start "$LCC_BACKUP_TIMER_NAME"
     fi
 elif test "$install_root" = "/"; then
-    echo "DRY-RUN: caddy fmt/validate, systemctl daemon-reload, enable services"
+    echo "DRY-RUN: systemctl daemon-reload and enable services"
 fi
 
 if test "$dry_run" -eq 0; then

@@ -32,6 +32,7 @@ asset_base_was_set=0
 repository_was_set=0
 non_interactive=0
 dry_run=0
+current_phase="argument validation"
 
 usage() {
     cat <<'EOF'
@@ -68,6 +69,292 @@ die() {
 
 note() {
     printf 'lcc-bootstrap: %s\n' "$*"
+}
+
+package_is_installed() {
+    local package_name="$1"
+    if test "$test_mode" = 1; then
+        case ",${LCC_BOOTSTRAP_TEST_MISSING_PACKAGES:-}," in
+            *",$package_name,"*) return 1 ;;
+            *) return 0 ;;
+        esac
+    fi
+    test "$(dpkg-query -W -f='${Status}' "$package_name" 2>/dev/null || true)" = \
+        "install ok installed"
+}
+
+record_apt_command() {
+    local log_path="${LCC_BOOTSTRAP_APT_LOG:-}"
+    test -n "$log_path" || return 0
+    {
+        printf '%q' "$1"
+        shift
+        if test "$#" -gt 0; then
+            printf ' %q' "$@"
+        fi
+        printf '\n'
+    } >> "$log_path"
+}
+
+run_apt() {
+    record_apt_command "$@"
+    if test "$test_mode" = 1; then
+        case "$1" in
+            update)
+                test "${LCC_BOOTSTRAP_TEST_APT_UPDATE_FAILURE:-0}" != 1 || \
+                    die "Ubuntu package metadata refresh failed (simulated)."
+                ;;
+            install)
+                test "${LCC_BOOTSTRAP_TEST_APT_INSTALL_FAILURE:-0}" != 1 || \
+                    die "Ubuntu prerequisite installation failed (simulated)."
+                ;;
+        esac
+        return 0
+    fi
+    case "$1" in
+        update)
+            apt-get -o DPkg::Lock::Timeout=0 update
+            ;;
+        install)
+            shift
+            DEBIAN_FRONTEND=noninteractive apt-get \
+                -o DPkg::Lock::Timeout=0 \
+                -o Dpkg::Options::=--force-confold \
+                --no-install-recommends --yes install "$@"
+            ;;
+        *) die "Internal package operation is invalid: $1" ;;
+    esac
+}
+
+verify_apt_state() {
+    current_phase="OS package preflight"
+    if test "$test_mode" = 1; then
+        test "${LCC_BOOTSTRAP_TEST_DPKG_AUDIT_FAILURE:-0}" != 1 || \
+            die "dpkg reports unfinished or broken package operations."
+        test "${LCC_BOOTSTRAP_TEST_APT_CHECK_FAILURE:-0}" != 1 || \
+            die "APT dependency state is broken; repair it explicitly before installing LCC."
+        test "${LCC_BOOTSTRAP_TEST_UBUNTU_KEYRING_FAILURE:-0}" != 1 || \
+            die "The package-owned Ubuntu archive keyring is missing or invalid."
+        return
+    fi
+    if test ! -r /usr/share/keyrings/ubuntu-archive-keyring.gpg || \
+        ! dpkg-query -S /usr/share/keyrings/ubuntu-archive-keyring.gpg 2>/dev/null | \
+            grep -Eq '^ubuntu-keyring(:[^:]+)?: /usr/share/keyrings/ubuntu-archive-keyring.gpg$'; then
+        die "The package-owned Ubuntu archive keyring is missing or invalid."
+    fi
+    test -z "$(dpkg --audit 2>&1)" || \
+        die "dpkg reports unfinished or broken package operations; resolve them before installing LCC."
+    apt-get -o DPkg::Lock::Timeout=0 check >/dev/null || \
+        die "APT dependency state is broken or locked; resolve it explicitly before installing LCC."
+}
+
+verify_host_shape() {
+    local architecture available_kib
+    current_phase="OS preflight"
+    architecture="${LCC_BOOTSTRAP_TEST_ARCHITECTURE:-$(uname -m)}"
+    case "$architecture" in
+        x86_64|aarch64) ;;
+        *) die "Supported architectures are amd64 and arm64; found $architecture." ;;
+    esac
+    available_kib="${LCC_BOOTSTRAP_TEST_AVAILABLE_KIB:-$(df -Pk / | awk 'NR == 2 {print $4}')}"
+    [[ "$available_kib" =~ ^[0-9]+$ ]] || die "Unable to determine available disk space."
+    test "$available_kib" -ge 1048576 || \
+        die "At least 1 GiB of free disk space is required before installation."
+}
+
+verify_ubuntu_package_indexes() {
+    local allow_missing="${1:-0}"
+    local targets identifier origin label codename site signed_by
+    local seen_packages=0
+    if test "$test_mode" = 1; then
+        targets="${LCC_BOOTSTRAP_TEST_APT_INDEX_TARGETS:-Packages|Ubuntu|Ubuntu|noble|http://archive.ubuntu.com/ubuntu|/usr/share/keyrings/ubuntu-archive-keyring.gpg}"
+    else
+        # apt-get expands these indextarget placeholders, not the shell.
+        # shellcheck disable=SC2016
+        targets="$(apt-get indextargets \
+            --format '$(IDENTIFIER)|$(ORIGIN)|$(LABEL)|$(CODENAME)|$(SITE)|$(SIGNED_BY)')"
+    fi
+    while IFS='|' read -r identifier origin label codename site signed_by; do
+        test "$identifier" = Packages || continue
+        seen_packages=1
+        if test "$origin" != Ubuntu || test "$label" != Ubuntu; then
+            die "Non-Ubuntu APT package index is enabled (${site:-unknown site}); disable third-party package sources before LCC provisions prerequisites."
+        fi
+        case "$codename" in
+            noble|noble-updates|noble-security|noble-backports) ;;
+            *)
+                die "APT package index ${site:-unknown site} targets unsupported suite ${codename:-unknown}; LCC prerequisite provisioning requires Ubuntu 24.04 (Noble) indexes."
+                ;;
+        esac
+        test "$signed_by" = /usr/share/keyrings/ubuntu-archive-keyring.gpg || \
+            die "APT package index ${site:-unknown site} is not bound to Ubuntu's package-owned archive keyring."
+    done <<< "$targets"
+    if test "$seen_packages" -eq 0 && test "$allow_missing" -ne 1; then
+        die "No Ubuntu 24.04 package index is available; enable the standard signed Ubuntu repositories, including universe."
+    fi
+}
+
+verify_source_url_shape() {
+    local selected_url authority
+    selected_url="$asset_base_url"
+    if test "$channel" = main; then
+        selected_url="$repository_url"
+    fi
+    [[ "$selected_url" =~ ^https://[^/?#]+(/[^?#]*)?$ ]] || \
+        die "Selected source must be a public HTTPS URL without credentials, query, or fragment."
+    authority="${selected_url#https://}"
+    authority="${authority%%/*}"
+    [[ "$authority" != *@* ]] || \
+        die "Selected source must be a public HTTPS URL without credentials, query, or fragment."
+}
+
+verify_existing_lcc_shape() {
+    local current_path active_path active_id active_channel
+    current_path="${install_root%/}/opt/learning-control-center/current"
+    if test -e "$current_path" && test ! -L "$current_path"; then
+        die "Existing LCC current path is not a symbolic link; inspect it before retrying."
+    fi
+    test -L "$current_path" || return 0
+    active_path="$(readlink -f "$current_path")"
+    test -n "$active_path" && test -d "$active_path" && \
+        test -f "$active_path/RELEASE_ID" && test -f "$active_path/SOURCE_REVISION" || \
+        die "Existing LCC installation has incomplete release metadata."
+    active_id="$(tr -d '\r\n' < "$active_path/RELEASE_ID")"
+    active_channel="stable"
+    if test -f "$active_path/RELEASE_CHANNEL"; then
+        active_channel="$(tr -d '\r\n' < "$active_path/RELEASE_CHANNEL")"
+    fi
+    note "Existing LCC installation detected: channel=$active_channel release=$active_id"
+    if test "$channel" = stable && \
+        { test "$active_channel" != stable || test "$active_id" != "$release_ref"; }; then
+        die "A different LCC release is active; use the controlled update workflow."
+    fi
+}
+
+provision_prerequisites() {
+    local package_name candidate
+    local -a required_packages missing_packages
+    required_packages=(
+        ca-certificates curl python3 python3-venv sqlite3 rsync tar gzip caddy iproute2
+    )
+    if test "$channel" = main; then
+        required_packages+=(git)
+    fi
+    missing_packages=()
+    for package_name in "${required_packages[@]}"; do
+        if ! package_is_installed "$package_name"; then
+            missing_packages+=("$package_name")
+        fi
+    done
+
+    note "Production frontend: verified release artifact (Node.js/npm are not installed on the server)."
+    if test "${#missing_packages[@]}" -eq 0; then
+        note "Ubuntu prerequisites are already satisfied."
+        return
+    fi
+    note "Missing Ubuntu packages: ${missing_packages[*]}"
+    note "Package source: Ubuntu 24.04 signed repositories only; enabled third-party package indexes are refused."
+    if test "$dry_run" -eq 1; then
+        verify_ubuntu_package_indexes 1
+        note "DRY-RUN: real installation will refresh and re-verify Ubuntu-only package indexes."
+        note "DRY-RUN: would run apt-get update and install: ${missing_packages[*]}"
+        return
+    fi
+
+    current_phase="package metadata"
+    run_apt update
+    verify_ubuntu_package_indexes
+    if test "$test_mode" != 1; then
+        for package_name in "${missing_packages[@]}"; do
+            candidate="$(apt-cache policy "$package_name" | sed -n 's/^[[:space:]]*Candidate:[[:space:]]*//p')"
+            test -n "$candidate" && test "$candidate" != "(none)" || \
+                die "Ubuntu package $package_name has no installable candidate. Ensure the standard Ubuntu 24.04 repositories, including universe, are enabled."
+        done
+    fi
+    current_phase="prerequisite install"
+    run_apt install "${missing_packages[@]}"
+}
+
+verify_provisioned_commands() {
+    local command_name resolved_caddy
+    test "$test_mode" = 1 && return 0
+    for command_name in curl python3 sha256sum tar gzip mktemp stat sed grep head tr wc; do
+        command -v "$command_name" >/dev/null || \
+            die "Acquisition command is unavailable: $command_name"
+    done
+    if test "$channel" = main; then
+        command -v git >/dev/null || die "Provisioned Git command is unavailable."
+    fi
+    test "$dry_run" -eq 1 && return 0
+    for command_name in sqlite3 rsync systemctl runuser flock ss; do
+        command -v "$command_name" >/dev/null || \
+            die "Provisioned prerequisite command is unavailable: $command_name"
+    done
+    resolved_caddy="$(command -v caddy 2>/dev/null || true)"
+    test "$resolved_caddy" = /usr/bin/caddy || \
+        die "Caddy must resolve to the Ubuntu package-owned /usr/bin/caddy; found ${resolved_caddy:-none}."
+    dpkg-query -S /usr/bin/caddy 2>/dev/null | grep -Eq '^caddy(:[^:]+)?: /usr/bin/caddy$' || \
+        die "/usr/bin/caddy must be owned by the Ubuntu caddy package."
+    python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' || \
+        die "Ubuntu Python 3.12 or newer is required."
+    /usr/bin/caddy version 2>/dev/null | grep -Eq '^v?2\.' || die "Caddy 2 is required."
+    test -f /lib/systemd/system/caddy.service || test -f /usr/lib/systemd/system/caddy.service || \
+        die "The Ubuntu Caddy package did not install its systemd service."
+}
+
+verify_existing_caddy() {
+    local resolved_caddy=""
+    current_phase="Caddy preflight"
+    if test "${LCC_BOOTSTRAP_TEST_UNMANAGED_CADDY:-0}" = 1; then
+        die "An unmanaged Caddy executable conflicts with Ubuntu package ownership."
+    fi
+    if test "$test_mode" = 1; then
+        resolved_caddy="${LCC_BOOTSTRAP_TEST_CADDY_PATH:-/usr/bin/caddy}"
+        if test "$resolved_caddy" != /usr/bin/caddy; then
+            die "Caddy must resolve to the Ubuntu package-owned /usr/bin/caddy; found $resolved_caddy."
+        fi
+    else
+        resolved_caddy="$(command -v caddy 2>/dev/null || true)"
+        if test -n "$resolved_caddy" && test "$resolved_caddy" != /usr/bin/caddy; then
+            die "Caddy must resolve to the Ubuntu package-owned /usr/bin/caddy; found $resolved_caddy."
+        fi
+        if test -n "$resolved_caddy" && ! package_is_installed caddy; then
+            die "An unmanaged Caddy executable is present. Remove it or install the Ubuntu caddy package explicitly before retrying."
+        fi
+        if package_is_installed caddy; then
+            if test ! -x /usr/bin/caddy || \
+                ! dpkg-query -S /usr/bin/caddy 2>/dev/null | \
+                    grep -Eq '^caddy(:[^:]+)?: /usr/bin/caddy$'; then
+                die "/usr/bin/caddy must be owned by the Ubuntu caddy package."
+            fi
+        fi
+    fi
+    if test "${LCC_BOOTSTRAP_TEST_CADDY_CONFIG_FAILURE:-0}" = 1; then
+        die "The existing Caddy configuration is invalid; correct it before installing LCC."
+    fi
+    if test "$test_mode" != 1 && package_is_installed caddy && test -f /etc/caddy/Caddyfile; then
+        /usr/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null || \
+            die "The existing Caddy configuration is invalid; correct it before installing LCC."
+    fi
+}
+
+verify_caddy_and_ports() {
+    current_phase="Caddy and port preflight"
+    if test "${LCC_BOOTSTRAP_TEST_PORT_CONFLICT:-0}" = 1; then
+        die "Ports 80 or 443 are already owned by a service other than Caddy."
+    fi
+    if test "$test_mode" != 1 && command -v ss >/dev/null; then
+        listeners="$(ss -H -ltnp '( sport = :80 or sport = :443 )' 2>/dev/null || true)"
+        if test -n "$listeners"; then
+            if printf '%s\n' "$listeners" | grep -q 'users:'; then
+                if printf '%s\n' "$listeners" | grep -Fv '(("caddy",' | grep -q .; then
+                    die "Ports 80 or 443 are already owned by a service other than Caddy."
+                fi
+            elif ! systemctl is-active --quiet caddy.service; then
+                die "Ports 80 or 443 are already in use while Caddy is inactive; resolve the conflict before installing LCC."
+            fi
+        fi
+    fi
 }
 
 while test "$#" -gt 0; do
@@ -139,9 +426,38 @@ if test "$test_mode" = 1 && test "$repository_was_set" -eq 0 && \
     test -n "${LCC_BOOTSTRAP_REPOSITORY_URL:-}"; then
     repository_url="$LCC_BOOTSTRAP_REPOSITORY_URL"
 fi
+if test "$test_mode" != 1; then
+    verify_source_url_shape
+fi
 if test "$dry_run" -eq 0 && test "$test_mode" != 1 && test "${EUID:-$(id -u)}" -ne 0; then
     die "Run the bootstrap as root, normally through sudo."
 fi
+
+install_root="${LCC_BOOTSTRAP_INSTALL_ROOT:-/}"
+if test "$install_root" != "/"; then
+    test "$test_mode" = 1 || die "Alternate install roots are available only to tests."
+    install_root="$(readlink -m -- "$install_root")"
+    test "$install_root" != "/" && [[ "$install_root" = /tmp/* ]] || \
+        die "Test install root must resolve beneath /tmp."
+fi
+
+acquisition_directory=""
+secret_directory=""
+cleanup() {
+    status=$?
+    if test -n "$acquisition_directory"; then
+        rm -rf -- "$acquisition_directory"
+    fi
+    if test -n "$secret_directory"; then
+        rm -rf -- "$secret_directory"
+    fi
+    if test "$status" -ne 0; then
+        printf 'lcc-bootstrap: failed during phase: %s\n' "$current_phase" >&2
+        printf 'lcc-bootstrap: installed Ubuntu packages are retained; correct the error and rerun safely.\n' >&2
+    fi
+    exit "$status"
+}
+trap cleanup EXIT
 
 os_release_file="/etc/os-release"
 if test "$test_mode" = 1 && test -n "${LCC_BOOTSTRAP_OS_RELEASE:-}"; then
@@ -154,12 +470,16 @@ if test "$os_id" != ubuntu || test "$os_version" != 24.04; then
     die "Supported production baseline is Ubuntu Server 24.04 LTS; found $os_id $os_version."
 fi
 
-for command_name in curl python3 sha256sum tar mktemp stat sed grep head tr wc; do
-    command -v "$command_name" >/dev/null || die "Required acquisition command is unavailable: $command_name"
+for command_name in apt-get apt-cache dpkg dpkg-query uname df awk sed grep; do
+    command -v "$command_name" >/dev/null || die "Ubuntu base command is unavailable: $command_name"
 done
-if test "$channel" = main; then
-    command -v git >/dev/null || die "Git is required for --channel main."
-fi
+verify_host_shape
+verify_apt_state
+verify_existing_lcc_shape
+verify_existing_caddy
+provision_prerequisites
+verify_provisioned_commands
+verify_caddy_and_ports
 
 if test "$test_mode" != 1; then
     python3 - "$asset_base_url" "$repository_url" "$channel" <<'PY'
@@ -184,16 +504,6 @@ PY
 fi
 
 acquisition_directory="$(mktemp -d "${TMPDIR:-/tmp}/lcc-bootstrap.XXXXXXXX")"
-secret_directory=""
-cleanup() {
-    status=$?
-    rm -rf -- "$acquisition_directory"
-    if test -n "$secret_directory"; then
-        rm -rf -- "$secret_directory"
-    fi
-    exit "$status"
-}
-trap cleanup EXIT
 
 source_root=""
 release_id=""
@@ -203,6 +513,7 @@ source_origin=""
 source_repository=""
 
 if test "$channel" = stable; then
+    current_phase="stable release acquisition"
     asset_name="learning-control-center-${release_ref}.tar.gz"
     checksum_name="${asset_name}.sha256"
     release_base_url="${asset_base_url%/}/$release_ref"
@@ -299,6 +610,7 @@ PY
     note "Verified stable release: $release_id"
     note "Exact source revision: $source_revision"
 else
+    current_phase="main source acquisition"
     source_repository="$repository_url"
     source_origin="$repository_url"
     source_ref="refs/heads/main"
@@ -343,13 +655,6 @@ if test "$channel" = main; then
     source_root="$repository_directory"
 fi
 
-install_root="${LCC_BOOTSTRAP_INSTALL_ROOT:-/}"
-if test "$install_root" != "/"; then
-    test "$test_mode" = 1 || die "Alternate install roots are available only to tests."
-    install_root="$(readlink -m -- "$install_root")"
-    test "$install_root" != "/" && [[ "$install_root" = /tmp/* ]] || \
-        die "Test install root must resolve beneath /tmp."
-fi
 current_release="${install_root%/}/opt/learning-control-center/current"
 environment_target="${install_root%/}/etc/learning-control-center.env"
 
@@ -371,6 +676,7 @@ fi
 # Load validation helpers only after the selected source has been verified.
 # shellcheck disable=SC1090
 source "$source_root/scripts/deploy-common.sh"
+lcc_verify_frontend_artifact "$source_root"
 
 if test -z "$environment_file" && test -f "$environment_target"; then
     environment_file="$environment_target"
@@ -412,6 +718,9 @@ else
         die "Non-interactive generated configuration requires --domain."
     fi
     lcc_validate_public_hostname "$domain"
+    if test "$test_mode" != 1 && ! getent ahosts "$domain" >/dev/null 2>&1; then
+        note "WARNING: $domain does not currently resolve in DNS; Caddy cannot issue public HTTPS until DNS is correct."
+    fi
 
     if test -z "$timezone"; then
         timezone="${LCC_BOOTSTRAP_DEFAULT_TIMEZONE:-}"
@@ -479,6 +788,7 @@ if test "$install_root" != "/"; then
 fi
 
 note "Invoking the canonical Ubuntu installer for $release_id."
+current_phase="host installation"
 "${installer_command[@]}"
 note "Installation handoff completed for $release_id ($source_revision)."
 

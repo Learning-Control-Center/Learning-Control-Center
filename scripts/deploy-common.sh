@@ -19,6 +19,7 @@ LCC_DATABASE_FILE="/var/lib/learning-control-center/lcc.sqlite3"
 LCC_BACKUP_DIRECTORY_DEFAULT="/var/backups/learning-control-center"
 LCC_CADDY_SITE="/etc/caddy/Caddyfile.d/learning-control-center.caddy"
 LCC_CADDY_IMPORT="import /etc/caddy/Caddyfile.d/*.caddy"
+LCC_CADDY_BINARY="/usr/bin/caddy"
 
 lcc_die() {
     echo "ERROR: $*" >&2
@@ -461,17 +462,70 @@ lcc_copy_release_source() {
     fi
     rsync -a --delete \
         --include=/.env.example --exclude='.env*' --exclude=.git \
-        --exclude=.venv --exclude=venv --exclude=node_modules --exclude=dist \
+        --exclude=.venv --exclude=venv --exclude=node_modules \
         --exclude=data --exclude=backups --exclude=tmp --exclude=memory-bank \
         --exclude=__pycache__ --exclude='*.py[cod]' --exclude='*.egg-info' \
         --exclude=.mypy_cache --exclude=.pytest_cache --exclude=.ruff_cache \
         --exclude=.coverage --exclude=htmlcov --exclude=coverage --exclude=test-results \
-        --exclude=.vite --exclude=.cache --exclude=.abacusai --exclude=.idea --exclude=.vscode \
+        --exclude=.cache --exclude=.abacusai --exclude=.idea --exclude=.vscode \
         --exclude=.npmrc --exclude=.pypirc --exclude=.netrc --exclude=.git-credentials \
         --exclude=pip.conf --exclude=.aws --exclude=.ssh --exclude=.docker \
         --exclude='*.pem' --exclude='*.key' --exclude='*.db*' --exclude='*.sqlite*' \
         --exclude='*.log' --exclude='*.tmp' --exclude='*.tsbuildinfo' \
         "$source/" "$destination/"
+}
+
+lcc_verify_runtime_prerequisites() {
+    local command_name
+    for command_name in python3 sqlite3 rsync tar curl systemctl runuser flock dpkg-query; do
+        command -v "$command_name" >/dev/null || lcc_die "Missing production prerequisite: $command_name"
+    done
+    python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' || \
+        lcc_die "Python 3.12 or newer is required."
+    test -x "$LCC_CADDY_BINARY" || lcc_die "The Ubuntu package-owned $LCC_CADDY_BINARY is required."
+    dpkg-query -S "$LCC_CADDY_BINARY" 2>/dev/null | \
+        grep -Eq '^caddy(:[^:]+)?: /usr/bin/caddy$' || \
+        lcc_die "$LCC_CADDY_BINARY must be owned by the Ubuntu caddy package."
+    "$LCC_CADDY_BINARY" version 2>/dev/null | grep -Eq '^v?2\.' || lcc_die "Caddy 2 is required."
+    test -f /lib/systemd/system/caddy.service || test -f /usr/lib/systemd/system/caddy.service || \
+        lcc_die "The packaged Caddy systemd service is required."
+}
+
+lcc_restore_caddy_configuration() {
+    local backup_directory="$1"
+    local site_path="$2"
+    local main_path="$3"
+    if test -f "$backup_directory/site"; then
+        cp -a -- "$backup_directory/site" "$site_path"
+    else
+        rm -f -- "$site_path"
+    fi
+    if test -f "$backup_directory/main"; then
+        cp -a -- "$backup_directory/main" "$main_path"
+    else
+        rm -f -- "$main_path"
+    fi
+}
+
+lcc_format_validate_or_restore_caddy() {
+    local site_path="$1"
+    local main_path="$2"
+    local backup_directory="$3"
+    local caddy_binary="${4:-$LCC_CADDY_BINARY}"
+    if "$caddy_binary" fmt --overwrite "$site_path" && \
+        "$caddy_binary" validate --config "$main_path" --adapter caddyfile; then
+        return 0
+    fi
+    lcc_restore_caddy_configuration "$backup_directory" "$site_path" "$main_path"
+    lcc_die "Caddy configuration conflicts with the LCC site; the previous configuration was restored."
+}
+
+lcc_verify_frontend_artifact() {
+    local release_root="$1"
+    test -x "$release_root/scripts/frontend-artifact.py" || \
+        lcc_die "Release lacks the frontend artifact verifier."
+    "$release_root/scripts/frontend-artifact.py" verify --root "$release_root" >&2 || \
+        lcc_die "Release frontend artifact is missing, stale, or modified."
 }
 
 lcc_require_inactive_service() {

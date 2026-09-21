@@ -526,6 +526,56 @@ def test_units_admin_and_update_assets_encode_production_safety() -> None:
     installer = (REPOSITORY_ROOT / "scripts" / "install-ubuntu.sh").read_text()
     assert "--no-build-isolation" in installer
     assert "setuptools wheel" in installer
+    assert "npm --prefix" not in installer
+    assert "lcc_verify_frontend_artifact" in installer
+    assert "npm --prefix" not in updater
+    assert "lcc_verify_runtime_prerequisites" in updater
+    assert "lcc_verify_frontend_artifact" in updater
+    assert installer.index("lcc_format_validate_or_restore_caddy") < installer.index(
+        'run mv -Tf "$next_link"'
+    )
+    assert "the previous configuration was restored" in common
+
+
+@pytest.mark.parametrize("failing_operation", ["fmt", "validate"])
+def test_caddy_format_or_validation_failure_restores_previous_files(
+    tmp_path: Path, failing_operation: str
+) -> None:
+    site = tmp_path / "site.caddy"
+    main = tmp_path / "Caddyfile"
+    backup = tmp_path / "backup"
+    backup.mkdir()
+    (backup / "site").write_text("old site\n")
+    (backup / "main").write_text("old main\n")
+    site.write_text("new site\n")
+    main.write_text("new main\n")
+    fake_caddy = tmp_path / "caddy"
+    fake_caddy.write_text(
+        "#!/usr/bin/env bash\n"
+        'if test "$1" = "fmt"; then printf "formatted\\n" > "$3"; fi\n'
+        f'test "$1" != "{failing_operation}"\n'
+    )
+    fake_caddy.chmod(0o755)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; lcc_format_validate_or_restore_caddy "$2" "$3" "$4" "$5"',
+            "caddy-rollback-test",
+            str(REPOSITORY_ROOT / "scripts" / "deploy-common.sh"),
+            str(site),
+            str(main),
+            str(backup),
+            str(fake_caddy),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert site.read_text() == "old site\n"
+    assert main.read_text() == "old main\n"
+    assert "previous configuration was restored" in result.stderr
 
 
 def test_update_channel_and_migration_preflight_contracts(tmp_path: Path) -> None:
@@ -733,6 +783,9 @@ def test_sanitized_release_copy_excludes_local_secrets_and_state(tmp_path: Path)
     (source / "data" / "lcc.sqlite3").write_bytes(b"private database")
     (source / ".pytest_cache").mkdir()
     (source / ".pytest_cache" / "state").write_text("private\n")
+    (source / "frontend" / "dist" / "assets").mkdir(parents=True)
+    (source / "frontend" / "dist" / "index.html").write_text("packaged frontend\n")
+    (source / "frontend" / "dist" / "assets" / "app.js").write_text("safe artifact\n")
     subprocess.run(
         [
             "bash",
@@ -754,6 +807,8 @@ def test_sanitized_release_copy_excludes_local_secrets_and_state(tmp_path: Path)
     assert not (destination / ".npmrc").exists()
     assert not (destination / "data").exists()
     assert not (destination / ".pytest_cache").exists()
+    assert (destination / "frontend" / "dist" / "index.html").is_file()
+    assert (destination / "frontend" / "dist" / "assets" / "app.js").is_file()
 
 
 @pytest.mark.skipif(os.name != "posix", reason="deployment scripts target Linux")

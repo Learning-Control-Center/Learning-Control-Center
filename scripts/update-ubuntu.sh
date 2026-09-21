@@ -20,6 +20,7 @@ EOF
 }
 
 test "$(id -u)" -eq 0 || lcc_die "Production updates must run as root."
+lcc_verify_runtime_prerequisites
 action="${1:-}"
 test -n "$action" || { usage; exit 2; }
 shift
@@ -51,8 +52,8 @@ render_caddy() {
         "$release_directory/deploy/Caddyfile.template" > "$temporary"
     install -m 0644 "$temporary" "$LCC_CADDY_SITE"
     rm -f -- "$temporary"
-    caddy fmt --overwrite "$LCC_CADDY_SITE"
-    caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    "$LCC_CADDY_BINARY" fmt --overwrite "$LCC_CADDY_SITE"
+    "$LCC_CADDY_BINARY" validate --config /etc/caddy/Caddyfile --adapter caddyfile
 }
 
 install_units() {
@@ -198,7 +199,9 @@ stage_release() {
     source_root="$(readlink -f "$source_root")"
     test -f "$source_root/requirements-production.lock" || lcc_die "Candidate lacks production constraints."
     test -f "$source_root/frontend/package-lock.json" || lcc_die "Candidate lacks frontend lockfile."
+    test -f "$source_root/frontend/dist/index.html" || lcc_die "Candidate lacks packaged frontend."
     test -f "$source_root/deploy/Caddyfile.template" || lcc_die "Candidate lacks deployment assets."
+    lcc_verify_frontend_artifact "$source_root"
     if git -C "$source_root" rev-parse --verify HEAD >/dev/null 2>&1 && \
         test -n "$(git -C "$source_root" status --porcelain --untracked-files=all)"; then
         lcc_die "Candidate source must have a clean Git worktree."
@@ -264,9 +267,7 @@ stage_release() {
         --constraint "$destination/requirements-production.lock" --no-build-isolation \
         --editable "$destination" >&2
     "$destination/.venv/bin/python" -m pip check >&2
-    npm --prefix "$destination/frontend" ci >&2
-    npm --prefix "$destination/frontend" run build >&2
-    test -f "$destination/frontend/dist/index.html" || lcc_die "Candidate frontend build is missing."
+    lcc_verify_frontend_artifact "$destination"
     printf '%s\n' "$release_id" > "$destination/RELEASE_ID"
     printf '%s\n' "$release_channel" > "$destination/RELEASE_CHANNEL"
     printf '%s\n' "$source_revision" > "$destination/SOURCE_REVISION"

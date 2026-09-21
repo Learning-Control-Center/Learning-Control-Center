@@ -54,9 +54,11 @@ done
     die "--release-id must be an explicit semantic release tag such as v1.0.1."
 test -n "$output_directory" || die "--output-dir is required."
 
-for command_name in git tar gzip sha256sum mktemp touch find cut sed grep; do
+for command_name in git tar gzip sha256sum mktemp touch find cut sed grep node npm python3; do
     command -v "$command_name" >/dev/null || die "Required command is unavailable: $command_name"
 done
+node -e 'const major=Number(process.versions.node.split(".")[0]); process.exit([22, 24].includes(major) ? 0 : 1)' || \
+    die "Release packaging requires Node.js 22 LTS or 24 LTS."
 
 if test -z "$repository_root"; then
     repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -98,6 +100,20 @@ mkdir -p "$staging_root"
 
 git -C "$repository_root" archive --format=tar "$source_commit" | \
     tar -xf - -C "$staging_root"
+
+test -x "$staging_root/scripts/frontend-artifact.py" || \
+    die "Release source lacks the executable frontend artifact verifier."
+"$staging_root/scripts/frontend-artifact.py" verify --root "$staging_root" >/dev/null || \
+    die "Tracked frontend artifact is stale or invalid."
+tracked_frontend_manifest="$(cat "$staging_root/frontend/dist/LCC_FRONTEND_ARTIFACT.json")"
+note "Rebuilding the production frontend from package-lock.json"
+npm --prefix "$staging_root/frontend" ci --ignore-scripts >/dev/null
+npm --prefix "$staging_root/frontend" run build >/dev/null
+"$staging_root/scripts/frontend-artifact.py" write --root "$staging_root" >/dev/null
+test "$(cat "$staging_root/frontend/dist/LCC_FRONTEND_ARTIFACT.json")" = \
+    "$tracked_frontend_manifest" || \
+    die "Fresh frontend build does not match the tracked verified artifact."
+rm -rf -- "$staging_root/frontend/node_modules"
 
 # Public release assets deliberately omit contributor-only fixtures and every private/runtime path,
 # even if one is accidentally tracked in the source repository.
@@ -154,8 +170,9 @@ required_paths=(
     deploy/learning-control-center-backup.timer docs/INSTALLATION.md docs/PRODUCTION_OPERATIONS.md
     docs/UPDATES.md docs/RELEASING.md frontend/index.html frontend/package.json
     frontend/package-lock.json frontend/vite.config.ts frontend/src/main.tsx frontend/public/logo.png
+    frontend/dist/index.html frontend/dist/LCC_FRONTEND_ARTIFACT.json
     scripts/bootstrap-ubuntu.sh scripts/deploy-common.sh scripts/generate-production-env.sh
-    scripts/install-ubuntu.sh scripts/lcc-admin
+    scripts/frontend-artifact.py scripts/install-ubuntu.sh scripts/lcc-admin
     scripts/operational-backup.sh scripts/package-release.sh scripts/uninstall-ubuntu.sh
     scripts/update-ubuntu.sh RELEASE_ID RELEASE_CHANNEL SOURCE_REVISION RELEASE_MANIFEST
 )
@@ -167,6 +184,10 @@ test -x "$staging_root/scripts/bootstrap-ubuntu.sh" || die "Bootstrap script is 
 test -x "$staging_root/scripts/generate-production-env.sh" || \
     die "Environment generator is not executable."
 test -x "$staging_root/scripts/install-ubuntu.sh" || die "Installer is not executable."
+test -x "$staging_root/scripts/frontend-artifact.py" || \
+    die "Frontend artifact verifier is not executable."
+"$staging_root/scripts/frontend-artifact.py" verify --root "$staging_root" >/dev/null || \
+    die "Packaged frontend artifact failed verification."
 
 if find "$staging_root" -type l -print -quit | grep -q .; then
     die "Release staging contains a symbolic link."
