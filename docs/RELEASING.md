@@ -13,25 +13,39 @@ already exist.
 
 ## Trust and branch model
 
-Development occurs on sanitized `dev`; reviewed release work flows `dev` to sanitized `main`.
-Public history must contain no private `memory-bank/` path, private author email, internal refs,
-databases, backups, or secrets. Push only explicitly selected refs. Never use `--all`, `--mirror`,
-or wildcard branch refspecs against the public remote.
+`dev` is private development history. It intentionally contains private agent context, so its
+ancestry must never become reachable from public `main`. `main` contains only application source,
+public documentation, deployment tooling, tests, and public assets. Public history must contain no
+`AGENTS.md`, `memory-bank/`, private author email, internal refs, databases, backups, or secrets.
 
-Because `dev` and `main` now both descend from the sanitized public history, the one-time v1.0.0
-history rewrite, private-history email rewrite, separate sanitized-clone regeneration, and branch
-replacement are not repeated for v1.0.1. Current-tree and reachable-history privacy/secret checks
-remain mandatory before every release.
+Normal merge, fast-forward, rebase, and pull-request merges from `dev` into `main` are prohibited.
+Public promotion uses a sanitized tree transfer into an isolated clone of the existing public
+`main` history. Push only explicitly selected public refs. Never use `--all`, `--mirror`, wildcard
+branch refspecs, or push `dev` to the public GitHub repository.
 
-## Validate and merge the candidate
+## Validate and promote the candidate
 
 1. Complete implementation and focused tests on `dev`.
 2. Run backend/frontend, deployment, bootstrap, packaging, ShellCheck, Gitleaks, documentation-link,
    disposable-deployment, and diff/line-ending checks.
 3. Review exact changes, dependency locks, migrations, update/rollback behavior, and release notes.
-4. Merge reviewed `dev` into `main` without importing any private archived history.
-5. Re-run critical validation and public-history/privacy checks on clean `main`.
-6. Confirm `pyproject.toml`, frontend package metadata, API/export version metadata, and changelog all
+4. Create an isolated public candidate outside the private repository:
+
+   ```bash
+   scripts/prepare-public-promotion.sh \
+     --source-ref dev \
+     --public-base main \
+     --output-dir /tmp/lcc-public-candidate
+   ```
+
+5. Review the candidate diff and prove that its only ref is `main`, its ancestry starts from the
+   existing sanitized public `main`, and neither private path nor private metadata is reachable.
+   The command refuses an already-unsafe public base and runs current-tree and reachable-history
+   secret scans before declaring the candidate ready.
+6. In a fresh clone of the candidate, repeat the path, metadata, secret, link, shell, and focused
+   application checks. Only after review should the local public `main` ref be replaced with the
+   exact candidate SHA. Do not merge `dev` or connect its ancestry.
+7. Confirm `pyproject.toml`, frontend package metadata, API/export version metadata, and changelog all
    identify 1.0.1.
 
 Release packaging requires Node.js 22 LTS or 24 LTS and installs the locked frontend dependency

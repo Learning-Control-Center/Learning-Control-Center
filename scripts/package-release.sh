@@ -118,6 +118,7 @@ rm -rf -- "$staging_root/frontend/node_modules"
 # Public release assets deliberately omit contributor-only fixtures and every private/runtime path,
 # even if one is accidentally tracked in the source repository.
 rm -rf -- \
+    "$staging_root/AGENTS.md" \
     "$staging_root/memory-bank" \
     "$staging_root/data" \
     "$staging_root/backups" \
@@ -163,7 +164,7 @@ source_origin=https://github.com/Learning-Control-Center/Learning-Control-Center
 EOF
 
 required_paths=(
-    AGENTS.md CHANGELOG.md README.md LICENSE SECURITY.md logo.png alembic.ini pyproject.toml
+    CHANGELOG.md README.md LICENSE SECURITY.md logo.png alembic.ini pyproject.toml
     requirements-production.lock backend/app/main.py backend/alembic/env.py
     deploy/Caddyfile.template deploy/learning-control-center.env.example
     deploy/learning-control-center-update.sh
@@ -174,7 +175,8 @@ required_paths=(
     frontend/dist/index.html frontend/dist/LCC_FRONTEND_ARTIFACT.json
     scripts/bootstrap-ubuntu.sh scripts/deploy-common.sh scripts/generate-production-env.sh
     scripts/frontend-artifact.py scripts/install-ubuntu.sh scripts/lcc-admin
-    scripts/operational-backup.sh scripts/package-release.sh scripts/uninstall-ubuntu.sh
+    scripts/operational-backup.sh scripts/package-release.sh scripts/prepare-public-promotion.sh
+    scripts/uninstall-ubuntu.sh
     scripts/update.sh scripts/update-ubuntu.sh RELEASE_ID RELEASE_CHANNEL SOURCE_REVISION RELEASE_MANIFEST
 )
 for relative_path in "${required_paths[@]}"; do
@@ -187,6 +189,8 @@ test -x "$staging_root/scripts/generate-production-env.sh" || \
 test -x "$staging_root/scripts/install-ubuntu.sh" || die "Installer is not executable."
 test -x "$staging_root/scripts/update.sh" || die "User-facing updater is not executable."
 test -x "$staging_root/scripts/update-ubuntu.sh" || die "Canonical updater is not executable."
+test -x "$staging_root/scripts/prepare-public-promotion.sh" || \
+    die "Public promotion tool is not executable."
 test -x "$staging_root/deploy/learning-control-center-update.sh" || \
     die "Persistent update wrapper is not executable."
 test -x "$staging_root/scripts/frontend-artifact.py" || \
@@ -197,7 +201,9 @@ test -x "$staging_root/scripts/frontend-artifact.py" || \
 if find "$staging_root" -type l -print -quit | grep -q .; then
     die "Release staging contains a symbolic link."
 fi
-if find "$staging_root" \( -path "$staging_root/memory-bank/*" -o \
+if test -e "$staging_root/AGENTS.md" || \
+    find "$staging_root" \( -path "$staging_root/memory-bank" -o \
+    -path "$staging_root/memory-bank/*" -o \
     -path "$staging_root/.git/*" -o -path "$staging_root/data/*" -o \
     -path "$staging_root/backups/*" -o -path "$staging_root/tmp/*" -o \
     -name .aws -o -name .ssh -o -name .docker -o \

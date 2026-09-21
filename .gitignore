@@ -69,9 +69,7 @@ backups/
 tmp/
 .cache/
 
-# Local/private agent context
-AGENTS.md
-memory-bank/
+# Private development agent context (public promotion strips this directory)
 .abacusai/
 .agents/
 .codex/
@@ -83,3 +81,7 @@ memory-bank/
 *.swo
 .DS_Store
 Thumbs.db
+
+# Public branch guard: private agent context must never be tracked.
+/AGENTS.md
+/memory-bank/

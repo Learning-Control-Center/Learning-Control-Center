@@ -19,6 +19,7 @@ import pytest
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 BOOTSTRAP = REPOSITORY_ROOT / "scripts" / "bootstrap-ubuntu.sh"
 PACKAGER = REPOSITORY_ROOT / "scripts" / "package-release.sh"
+PROMOTER = REPOSITORY_ROOT / "scripts" / "prepare-public-promotion.sh"
 GENERATOR = REPOSITORY_ROOT / "scripts" / "generate-production-env.sh"
 RELEASE_ID = "v1.0.1"
 ARCHIVE_NAME = f"learning-control-center-{RELEASE_ID}.tar.gz"
@@ -69,6 +70,7 @@ def _release_repository(tmp_path: Path) -> Path:
         "scripts/install-ubuntu.sh",
         "scripts/lcc-admin",
         "scripts/package-release.sh",
+        "scripts/prepare-public-promotion.sh",
         "scripts/update.sh",
         "scripts/update-ubuntu.sh",
         "deploy/learning-control-center-update.sh",
@@ -92,6 +94,7 @@ def _release_repository(tmp_path: Path) -> Path:
     )
 
     private_files: dict[str, str | bytes] = {
+        "AGENTS.md": "private agent instructions\n",
         "memory-bank/private.md": "private agent context\n",
         "data/lcc.db": b"private database",
         "backups/lcc.sqlite3": b"private backup",
@@ -244,6 +247,7 @@ def test_release_packaging_is_deterministic_bounded_and_mode_preserving(
         f"{prefix}scripts/frontend-artifact.py",
         f"{prefix}scripts/generate-production-env.sh",
         f"{prefix}scripts/install-ubuntu.sh",
+        f"{prefix}scripts/prepare-public-promotion.sh",
         f"{prefix}scripts/update.sh",
         f"{prefix}scripts/update-ubuntu.sh",
         f"{prefix}deploy/learning-control-center-update.sh",
@@ -258,6 +262,7 @@ def test_release_packaging_is_deterministic_bounded_and_mode_preserving(
     assert members[f"{prefix}scripts/install-ubuntu.sh"].mode & stat.S_IXUSR
     assert members[f"{prefix}scripts/update.sh"].mode & stat.S_IXUSR
     assert members[f"{prefix}scripts/update-ubuntu.sh"].mode & stat.S_IXUSR
+    assert members[f"{prefix}scripts/prepare-public-promotion.sh"].mode & stat.S_IXUSR
     assert members[f"{prefix}deploy/learning-control-center-update.sh"].mode & stat.S_IXUSR
     assert members[f"{prefix}scripts/frontend-artifact.py"].mode & stat.S_IXUSR
     forbidden_fragments = (
@@ -272,6 +277,7 @@ def test_release_packaging_is_deterministic_bounded_and_mode_preserving(
         "/backend/tests/",
     )
     assert not any(fragment in name for name in members for fragment in forbidden_fragments)
+    assert f"{prefix}AGENTS.md" not in members
     assert not any("/node_modules/" in name for name in members)
     assert not any(
         name.endswith(
@@ -299,6 +305,112 @@ def test_release_packaging_is_deterministic_bounded_and_mode_preserving(
         capture_output=True,
         text=True,
     )
+
+
+def test_public_promotion_transfers_only_a_sanitized_tree(tmp_path: Path) -> None:
+    if shutil.which("gitleaks") is None:
+        pytest.skip("gitleaks is required by the public promotion tool")
+
+    repository = tmp_path / "private-repository"
+    repository.mkdir()
+    subprocess.run(["git", "init", "--quiet", "--initial-branch=main", repository], check=True)
+    subprocess.run(["git", "-C", repository, "config", "user.name", "WaqSea"], check=True)
+    subprocess.run(
+        ["git", "-C", repository, "config", "user.email", "contact@waqsea.com"],
+        check=True,
+    )
+    _write(repository / "README.md", "public base\n")
+    _write(repository / ".gitignore", "/memory-bank/*\n!/memory-bank/*.md\n")
+    shutil.copy2(REPOSITORY_ROOT / ".gitleaks.toml", repository / ".gitleaks.toml")
+    subprocess.run(["git", "-C", repository, "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", repository, "commit", "--quiet", "-m", "public base"],
+        check=True,
+    )
+    base_commit = subprocess.run(
+        ["git", "-C", repository, "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    subprocess.run(["git", "-C", repository, "switch", "--quiet", "-c", "dev"], check=True)
+    subprocess.run(
+        ["git", "-C", repository, "config", "user.email", "waqsea@waqsea.com"],
+        check=True,
+    )
+    _write(repository / "README.md", "validated public change\n")
+    _write(repository / "AGENTS.md", "private agent instructions\n")
+    _write(repository / "memory-bank" / "private.md", "private context\n")
+    subprocess.run(["git", "-C", repository, "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", repository, "commit", "--quiet", "-m", "private development"],
+        check=True,
+    )
+    private_commit = subprocess.run(
+        ["git", "-C", repository, "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    candidate = tmp_path / "public-candidate"
+    result = subprocess.run(
+        [
+            PROMOTER,
+            "--repository",
+            repository,
+            "--source-ref",
+            "dev",
+            "--public-base",
+            "main",
+            "--output-dir",
+            candidate,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "Public candidate is ready" in result.stdout
+    assert (candidate / "README.md").read_text() == "validated public change\n"
+    assert not (candidate / "AGENTS.md").exists()
+    assert not (candidate / "memory-bank").exists()
+    public_ignore = (candidate / ".gitignore").read_text().splitlines()
+    assert "/AGENTS.md" in public_ignore
+    assert "/memory-bank/" in public_ignore
+    assert (
+        subprocess.run(
+            ["git", "-C", candidate, "rev-list", "--count", "main"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        == "2"
+    )
+    assert (
+        subprocess.run(
+            ["git", "-C", candidate, "rev-parse", "main^"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        == base_commit
+    )
+    assert (
+        subprocess.run(
+            ["git", "-C", candidate, "cat-file", "-e", f"{private_commit}^{{commit}}"],
+            check=False,
+            capture_output=True,
+        ).returncode
+        != 0
+    )
+    metadata = subprocess.run(
+        ["git", "-C", candidate, "log", "--format=%ae%n%ce", "main"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "waqsea@waqsea.com" not in metadata
 
 
 def test_frontend_artifact_is_verified_and_bound_to_source(tmp_path: Path) -> None:
@@ -1393,11 +1505,9 @@ def test_public_repository_assets_and_metadata_are_consistent() -> None:
         REPOSITORY_ROOT / "frontend" / "public" / "logo.png"
     ).read_bytes()
     assert 'href="/logo.png"' in (REPOSITORY_ROOT / "frontend" / "index.html").read_text()
-    for script in (BOOTSTRAP, PACKAGER, GENERATOR):
+    for script in (BOOTSTRAP, PACKAGER, PROMOTER, GENERATOR):
         assert script.stat().st_mode & stat.S_IXUSR
 
-    agents = (REPOSITORY_ROOT / "AGENTS.md").read_text()
-    assert "memory-bank" not in agents
     project = tomllib.loads((REPOSITORY_ROOT / "pyproject.toml").read_text())
     assert project["project"]["version"] == "1.0.1"
     assert project["project"]["license"] == "GPL-3.0-only"
@@ -1444,6 +1554,7 @@ def test_public_repository_assets_and_metadata_are_consistent() -> None:
         "scripts/bootstrap-ubuntu.sh",
         "scripts/generate-production-env.sh",
         "scripts/package-release.sh",
+        "scripts/prepare-public-promotion.sh",
     ]
     assert all((REPOSITORY_ROOT / path).is_file() for path in required_public_files)
 
