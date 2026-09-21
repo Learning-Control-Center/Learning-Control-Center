@@ -12,15 +12,22 @@ The bootstrap checks the OS, architecture, free space, APT/dpkg state, conflicti
 existing Caddy ownership. It then installs only missing packages from Ubuntu 24.04's signed
 repositories: `ca-certificates`, `curl`, `python3`, `python3-venv`, `sqlite3`, `rsync`, `tar`,
 `gzip`, `git`, `caddy`, and `iproute2`. Git is installed for both channels so an operator can later
-request an exact-SHA `main` update or channel change without a separate prerequisite step. Caddy comes from
-Ubuntu's `universe` component. The installer adds no third-party APT repository, imports no external
-signing key, does not use `apt-key`, and never upgrades the whole operating system. When packages
-are missing, provisioning refuses to continue if any enabled package index is not an Ubuntu 24.04
-(Noble) index; temporarily disable third-party APT sources and rerun. This conservative check keeps
-candidate selection inside Ubuntu's signed repositories. Caddy must resolve to the package-owned
-`/usr/bin/caddy`; a shadowing or unmanaged executable is rejected. The source check also requires
-each package index to use the `ubuntu-keyring`-owned
-`/usr/share/keyrings/ubuntu-archive-keyring.gpg`, rather than trusting repository labels alone.
+request an exact-SHA `main` update or channel change without a separate prerequisite step. Missing
+Caddy comes from Ubuntu's `universe` component. The installer adds no third-party APT repository,
+imports no external signing key, does not use `apt-key`, and never upgrades the whole operating
+system. When packages are missing, the bootstrap discovers enabled official Ubuntu Noble
+definitions in APT's one-line and deb822 source files, then uses a temporary Ubuntu-only source,
+package-list, archive-cache, and policy view for metadata refresh, candidate checks, and
+installation. Docker, Cloudsmith/Caddy,
+Cloudflare, and other unrelated sources may remain enabled; LCC neither contacts them for this
+operation nor edits their files or keys. Even stale third-party package metadata cannot supply an
+LCC prerequisite. An unreachable unrelated repository does not block this isolated refresh.
+Official sources must use an approved Ubuntu archive/security endpoint and the `ubuntu-keyring`-
+owned `/usr/share/keyrings/ubuntu-archive-keyring.gpg`; signed metadata must identify Ubuntu
+24.04. Missing trusted sources, signature errors, broken package state, and failed dependency
+resolution still stop installation. Caddy must resolve to the package-owned `/usr/bin/caddy`; a
+shadowing or unmanaged executable is rejected. An already-installed compatible Caddy is preserved;
+if Caddy is missing, its candidate is selected from this same Ubuntu-only view.
 
 Node.js/npm are build dependencies, not production-host dependencies. Public `main` commits and
 stable archives carry a verified production frontend whose hash is bound to its build inputs.

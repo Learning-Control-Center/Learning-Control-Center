@@ -511,7 +511,7 @@ def test_prerequisite_dry_run_plans_without_apt_mutation(tmp_path: Path) -> None
     assert "DRY-RUN: would run apt-get update and install: sqlite3 caddy" in result.stdout
 
 
-def test_prerequisite_provisioning_refuses_third_party_package_indexes(
+def test_prerequisite_provisioning_refuses_unexpected_isolated_package_indexes(
     tmp_path: Path,
 ) -> None:
     apt_log = tmp_path / "apt.log"
@@ -534,21 +534,35 @@ def test_prerequisite_provisioning_refuses_third_party_package_indexes(
         env=environment,
     )
     assert result.returncode != 0
-    assert "Non-Ubuntu APT package index is enabled" in result.stderr
+    assert "isolated Ubuntu APT view returned an unexpected package index" in result.stderr
     assert "packages.example.test" in result.stderr
     assert apt_log.read_text().splitlines() == ["update"]
 
 
-def test_prerequisite_dry_run_reports_third_party_package_index_blocker(
+def test_prerequisite_dry_run_preserves_unrelated_package_source(
     tmp_path: Path,
 ) -> None:
+    sources = tmp_path / "apt" / "sources.list.d"
+    sources.mkdir(parents=True)
+    (sources / "ubuntu.sources").write_text(
+        "Types: deb\nURIs: http://archive.ubuntu.com/ubuntu\n"
+        "Suites: noble noble-updates\nComponents: main universe\n"
+        "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n"
+    )
+    vendor = sources / "vendor.sources"
+    vendor_content = (
+        "Types: deb\nURIs: https://apt.example.test/repo\n"
+        "Suites: stable\nComponents: main\n"
+        "Signed-By: /usr/share/keyrings/vendor.gpg\n"
+    )
+    vendor.write_text(vendor_content)
+    captured = tmp_path / "isolated.sources"
     environment = {
         **_bootstrap_environment(tmp_path),
         "LCC_BOOTSTRAP_TEST_MISSING_PACKAGES": "caddy",
-        "LCC_BOOTSTRAP_TEST_APT_INDEX_TARGETS": (
-            "Packages|Third Party|Third Party|noble|https://apt.example.test/repo|"
-            "/usr/share/keyrings/vendor.gpg"
-        ),
+        "LCC_BOOTSTRAP_TEST_APT_SOURCE_ROOT": str(sources.parent),
+        "LCC_BOOTSTRAP_TEST_APT_SOURCE_CAPTURE": str(captured),
+        "LCC_BOOTSTRAP_ASSET_BASE_URL": (tmp_path / "missing-assets").as_uri(),
     }
     result = subprocess.run(
         _stable_command(dry_run=True),
@@ -558,19 +572,26 @@ def test_prerequisite_dry_run_reports_third_party_package_index_blocker(
         env=environment,
     )
     assert result.returncode != 0
-    assert "Non-Ubuntu APT package index is enabled" in result.stderr
+    assert "stable release acquisition" in result.stderr
+    assert "archive.ubuntu.com" in captured.read_text()
+    assert "apt.example.test" not in captured.read_text()
+    assert vendor.read_text() == vendor_content
 
 
-def test_prerequisite_provisioning_rejects_spoofed_ubuntu_metadata(
+def test_prerequisite_provisioning_rejects_spoofed_ubuntu_source(
     tmp_path: Path,
 ) -> None:
+    sources = tmp_path / "apt" / "sources.list.d"
+    sources.mkdir(parents=True)
+    (sources / "spoofed.sources").write_text(
+        "Types: deb\nURIs: https://spoofed.example.test/ubuntu\n"
+        "Suites: noble\nComponents: main universe\n"
+        "Signed-By: /usr/share/keyrings/vendor.gpg\n"
+    )
     environment = {
         **_bootstrap_environment(tmp_path),
         "LCC_BOOTSTRAP_TEST_MISSING_PACKAGES": "caddy",
-        "LCC_BOOTSTRAP_TEST_APT_INDEX_TARGETS": (
-            "Packages|Ubuntu|Ubuntu|noble|https://spoofed.example.test/ubuntu|"
-            "/usr/share/keyrings/vendor.gpg"
-        ),
+        "LCC_BOOTSTRAP_TEST_APT_SOURCE_ROOT": str(sources.parent),
     }
     result = subprocess.run(
         _stable_command(dry_run=True),
@@ -580,7 +601,7 @@ def test_prerequisite_provisioning_rejects_spoofed_ubuntu_metadata(
         env=environment,
     )
     assert result.returncode != 0
-    assert "not bound to Ubuntu's package-owned archive keyring" in result.stderr
+    assert "No trusted Ubuntu 24.04 APT source" in result.stderr
 
 
 @pytest.mark.parametrize(

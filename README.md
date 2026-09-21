@@ -52,6 +52,8 @@ uses a minimal stage zero to resolve `refs/heads/main` and re-run the bootstrap 
 commit before APT or other host mutation. It displays the exact 40-character SHA, checks out and
 verifies that commit, installs required packages, and generates production configuration privately.
 Every installed identity is `main-<full-sha>`; it is never merely the moving branch name.
+Missing OS prerequisites use an isolated, signed Ubuntu 24.04 APT view. Existing third-party
+repositories remain enabled and untouched; LCC does not perform a system-wide upgrade.
 
 Uvicorn remains private on IPv4 loopback. A fresh install uses internal port `8000` when available;
 if it is occupied, the interactive installer reports the listener and asks for another port. For

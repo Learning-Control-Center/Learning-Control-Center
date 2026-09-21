@@ -27,6 +27,8 @@ All notable public changes to Learning Control Center are recorded here. The pro
   Node.js/npm are no longer server dependencies.
 - Re-running the main bootstrap now installs, safely updates through the canonical engine, reports
   an exact-SHA no-op, or explicitly confirms release-to-main migration as appropriate.
+- Ubuntu prerequisite provisioning now isolates source, package-list, cache, and candidate
+  selection to trusted Noble repositories without disabling unrelated third-party APT sources.
 
 ## [1.0.0] - 2026-09-21
 

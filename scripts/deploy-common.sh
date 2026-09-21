@@ -746,7 +746,7 @@ lcc_verify_runtime_prerequisites() {
     done
     python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' || \
         lcc_die "Python 3.12 or newer is required."
-    test -x "$LCC_CADDY_BINARY" || lcc_die "The Ubuntu package-owned $LCC_CADDY_BINARY is required."
+    test -x "$LCC_CADDY_BINARY" || lcc_die "The package-owned $LCC_CADDY_BINARY is required."
     dpkg-query -S "$LCC_CADDY_BINARY" 2>/dev/null | \
         grep -Eq '^caddy(:[^:]+)?: /usr/bin/caddy$' || \
         lcc_die "$LCC_CADDY_BINARY must be owned by the Ubuntu caddy package."

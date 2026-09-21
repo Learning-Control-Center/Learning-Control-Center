@@ -52,13 +52,17 @@ environment and is never a configurable bind address.
 Uvicorn proxy-header rewriting stays disabled; LCC accepts forwarded client addresses only from the
 configured loopback proxy CIDR. Standard output and errors go to journald.
 
-The installation uses Ubuntu's packaged Caddy service and imports only the LCC site file into the
-administrator's main Caddyfile. It does not expose the application environment to Caddy and does
-not execute a PATH-shadowing Caddy binary: production operations use the package-owned
-`/usr/bin/caddy`. Formatting and validation are transactional; either failure restores the prior
-Caddy site and main configuration. The installer does not replace unrelated sites. Review OS
-package updates through the server's normal Ubuntu patching
-policy; LCC installation never performs an OS-wide upgrade.
+The installation uses a compatible package-managed Caddy service and imports only the LCC site
+file into the administrator's main Caddyfile. It does not expose the application environment to
+Caddy and does not execute a PATH-shadowing Caddy binary: production operations use the
+package-owned `/usr/bin/caddy`. Formatting and validation are transactional; either failure
+restores the prior Caddy site and main configuration. The installer does not replace unrelated
+sites. Review OS package updates through the server's normal Ubuntu patching policy; LCC never
+performs an OS-wide upgrade.
+
+When LCC must provision a missing prerequisite, its APT refresh and package selection use only
+validated Ubuntu Noble sources and temporary package metadata. Other configured repositories and
+their keys are left untouched, even if an unrelated repository is temporarily unreachable.
 
 Useful administrator commands:
 

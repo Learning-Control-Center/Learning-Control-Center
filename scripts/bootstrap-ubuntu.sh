@@ -50,6 +50,9 @@ active_id=""
 active_revision=""
 active_channel=""
 current_phase="argument validation"
+apt_view_directory=""
+apt_architecture=""
+apt_options=()
 
 usage() {
     cat <<'EOF'
@@ -188,7 +191,7 @@ record_apt_command() {
 
 run_apt() {
     record_apt_command "$@"
-    if test "$test_mode" = 1; then
+    if test "$test_mode" = 1 && test "${LCC_BOOTSTRAP_TEST_EXECUTE_APT:-0}" != 1; then
         case "$1" in
             update)
                 test "${LCC_BOOTSTRAP_TEST_APT_UPDATE_FAILURE:-0}" != 1 || \
@@ -203,12 +206,15 @@ run_apt() {
     fi
     case "$1" in
         update)
-            apt-get -o DPkg::Lock::Timeout=0 update
+            APT_CONFIG="$apt_view_directory/apt.conf" apt-get "${apt_options[@]}" update
+            ;;
+        check)
+            APT_CONFIG="$apt_view_directory/apt.conf" apt-get "${apt_options[@]}" check
             ;;
         install)
             shift
-            DEBIAN_FRONTEND=noninteractive apt-get \
-                -o DPkg::Lock::Timeout=0 \
+            APT_CONFIG="$apt_view_directory/apt.conf" DEBIAN_FRONTEND=noninteractive apt-get \
+                "${apt_options[@]}" \
                 -o Dpkg::Options::=--force-confold \
                 --no-install-recommends --yes install "$@"
             ;;
@@ -234,8 +240,6 @@ verify_apt_state() {
     fi
     test -z "$(dpkg --audit 2>&1)" || \
         die "dpkg reports unfinished or broken package operations; resolve them before installing LCC."
-    apt-get -o DPkg::Lock::Timeout=0 check >/dev/null || \
-        die "APT dependency state is broken or locked; resolve it explicitly before installing LCC."
 }
 
 verify_host_shape() {
@@ -243,32 +247,232 @@ verify_host_shape() {
     current_phase="OS preflight"
     architecture="${LCC_BOOTSTRAP_TEST_ARCHITECTURE:-$(uname -m)}"
     case "$architecture" in
-        x86_64|aarch64) ;;
+        x86_64) apt_architecture=amd64 ;;
+        aarch64) apt_architecture=arm64 ;;
         *) die "Supported architectures are amd64 and arm64; found $architecture." ;;
     esac
+    if test "$test_mode" != 1; then
+        test "$(dpkg --print-architecture)" = "$apt_architecture" || \
+            die "The dpkg architecture does not match the supported host architecture."
+    fi
     available_kib="${LCC_BOOTSTRAP_TEST_AVAILABLE_KIB:-$(df -Pk / | awk 'NR == 2 {print $4}')}"
     [[ "$available_kib" =~ ^[0-9]+$ ]] || die "Unable to determine available disk space."
     test "$available_kib" -ge 1048576 || \
         die "At least 1 GiB of free disk space is required before installation."
 }
 
+prepare_ubuntu_apt_view() {
+    local source_root=/etc/apt
+    local use_test_default=0
+    apt_view_directory="$(mktemp -d /tmp/lcc-ubuntu-apt.XXXXXXXX)"
+    if test "$test_mode" = 1; then
+        source_root="${LCC_BOOTSTRAP_TEST_APT_SOURCE_ROOT:-$apt_view_directory/default-test-sources}"
+        test -n "${LCC_BOOTSTRAP_TEST_APT_SOURCE_ROOT:-}" || use_test_default=1
+    fi
+    chmod 0755 "$apt_view_directory"
+    mkdir -m 0755 "$apt_view_directory/sources.list.d" "$apt_view_directory/empty.d" \
+        "$apt_view_directory/lists" "$apt_view_directory/archives"
+    mkdir -m 0700 "$apt_view_directory/lists/partial" \
+        "$apt_view_directory/archives/partial"
+    touch "$apt_view_directory/empty.list" "$apt_view_directory/empty.conf" \
+        "$apt_view_directory/empty.pref" "$apt_view_directory/empty.gpg" \
+        "$apt_view_directory/empty.auth"
+    printf 'Dir::Etc::parts "%s";\nDir::Etc::main "%s";\n' \
+        "$apt_view_directory/empty.d" "$apt_view_directory/empty.conf" > \
+        "$apt_view_directory/apt.conf"
+    chmod 0644 "$apt_view_directory/empty.list" "$apt_view_directory/empty.conf" \
+        "$apt_view_directory/empty.pref" "$apt_view_directory/empty.gpg" \
+        "$apt_view_directory/empty.auth" "$apt_view_directory/apt.conf"
+    if test "$test_mode" != 1; then
+        chown _apt:root "$apt_view_directory/lists/partial" \
+            "$apt_view_directory/archives/partial" || \
+            die "Unable to prepare the isolated Ubuntu APT download directories."
+    fi
+
+    python3 - "$source_root" "$apt_view_directory/sources.list.d/ubuntu.sources" \
+        "$apt_architecture" "$use_test_default" <<'PY'
+import re
+import sys
+from pathlib import Path
+from urllib.parse import urlsplit
+
+source_root = Path(sys.argv[1])
+output = Path(sys.argv[2])
+architecture = sys.argv[3]
+use_test_default = sys.argv[4] == "1"
+keyring = "/usr/share/keyrings/ubuntu-archive-keyring.gpg"
+suites = {"noble", "noble-updates", "noble-security", "noble-backports"}
+components = {"main", "universe", "restricted", "multiverse"}
+selected = set()
+
+
+def fail(message):
+    raise SystemExit(f"lcc-bootstrap: {message}")
+
+
+def official_uri(value):
+    parsed = urlsplit(value)
+    host = parsed.hostname or ""
+    allowed_host = host in {
+        "archive.ubuntu.com", "security.ubuntu.com", "ports.ubuntu.com"
+    } or re.fullmatch(r"[a-z]{2}\.archive\.ubuntu\.com", host)
+    if not allowed_host:
+        return None
+    path = "/ubuntu-ports" if host == "ports.ubuntu.com" else "/ubuntu"
+    if (
+        parsed.scheme not in {"http", "https"}
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.port is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path.rstrip("/") != path
+    ):
+        fail(f"Invalid official Ubuntu APT source URI: {value}")
+    return f"{parsed.scheme}://{host}{path}"
+
+
+def add_source(uri, source_suites, source_components, signed_by, source):
+    normalized = official_uri(uri)
+    if normalized is None:
+        return
+    if signed_by != keyring:
+        fail(f"Official Ubuntu APT source {source} must use the package-owned archive keyring.")
+    if not source_suites or any(suite not in suites for suite in source_suites):
+        fail(f"Official Ubuntu APT source {source} must target Ubuntu 24.04 (Noble).")
+    if not source_components or any(part not in components for part in source_components):
+        fail(f"Official Ubuntu APT source {source} has unsupported components.")
+    for suite in source_suites:
+        selected.add((normalized, suite, tuple(source_components)))
+
+
+def parse_one_line(path):
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.split("#", 1)[0].strip()
+        if re.match(r"deb\s", line) is None:
+            continue
+        match = re.fullmatch(r"deb\s+(?:\[([^]]+)\]\s+)?(\S+)\s+(\S+)\s+(.+)", line)
+        if match is None:
+            continue
+        options = {}
+        for item in (match.group(1) or "").split():
+            if "=" in item:
+                key, value = item.split("=", 1)
+                options[key.lower()] = value
+        if options.get("arch") and architecture not in options["arch"].split(","):
+            continue
+        add_source(
+            match.group(2), [match.group(3)], match.group(4).split(),
+            options.get("signed-by", ""), str(path)
+        )
+
+
+def parse_deb822(path):
+    paragraphs = re.split(r"\n\s*\n", path.read_text(encoding="utf-8"))
+    for paragraph in paragraphs:
+        fields = {}
+        previous = None
+        for line in paragraph.splitlines():
+            if not line or line.lstrip().startswith("#"):
+                continue
+            if line[0].isspace() and previous is not None:
+                fields[previous] += " " + line.strip()
+            elif ":" in line:
+                previous, value = line.split(":", 1)
+                previous = previous.lower()
+                fields[previous] = value.strip()
+        if fields.get("enabled", "yes").lower() == "no":
+            continue
+        if "deb" not in fields.get("types", "").split():
+            continue
+        if fields.get("architectures") and architecture not in fields["architectures"].split():
+            continue
+        for uri in fields.get("uris", "").split():
+            add_source(
+                uri, fields.get("suites", "").split(),
+                fields.get("components", "").split(),
+                fields.get("signed-by", ""), str(path)
+            )
+
+
+if use_test_default:
+    selected.add(("http://archive.ubuntu.com/ubuntu", "noble", ("main", "universe")))
+else:
+    paths = [source_root / "sources.list"]
+    paths.extend(sorted((source_root / "sources.list.d").glob("*.list")))
+    paths.extend(sorted((source_root / "sources.list.d").glob("*.sources")))
+    for path in paths:
+        if not path.is_file():
+            continue
+        try:
+            if path.suffix == ".sources":
+                parse_deb822(path)
+            else:
+                parse_one_line(path)
+        except (OSError, UnicodeError, ValueError) as error:
+            fail(f"Cannot validate APT source {path}: {error}")
+
+if not selected:
+    fail("No trusted Ubuntu 24.04 APT source with the package-owned archive keyring is enabled.")
+output.write_text(
+    "".join(
+        "Types: deb\n"
+        f"URIs: {uri}\n"
+        f"Suites: {suite}\n"
+        f"Components: {' '.join(parts)}\n"
+        f"Signed-By: {keyring}\n\n"
+        for uri, suite, parts in sorted(selected)
+    ),
+    encoding="utf-8",
+)
+PY
+    chmod 0644 "$apt_view_directory/sources.list.d/ubuntu.sources"
+
+    if test "$test_mode" = 1 && test -n "${LCC_BOOTSTRAP_TEST_APT_SOURCE_CAPTURE:-}"; then
+        cp -- "$apt_view_directory/sources.list.d/ubuntu.sources" \
+            "$LCC_BOOTSTRAP_TEST_APT_SOURCE_CAPTURE"
+    fi
+    apt_options=(
+        -o "Dir::Etc::sourcelist=$apt_view_directory/empty.list"
+        -o "Dir::Etc::sourceparts=$apt_view_directory/sources.list.d"
+        -o "Dir::Etc::main=$apt_view_directory/empty.conf"
+        -o "Dir::Etc::parts=$apt_view_directory/empty.d"
+        -o "Dir::Etc::preferences=$apt_view_directory/empty.pref"
+        -o "Dir::Etc::preferencesparts=$apt_view_directory/empty.d"
+        -o "Dir::Etc::trusted=$apt_view_directory/empty.gpg"
+        -o "Dir::Etc::trustedparts=$apt_view_directory/empty.d"
+        -o "Dir::Etc::netrc=$apt_view_directory/empty.auth"
+        -o "Dir::Etc::netrcparts=$apt_view_directory/empty.d"
+        -o "Dir::State::lists=$apt_view_directory/lists"
+        -o "Dir::State::status=/var/lib/dpkg/status"
+        -o "Dir::Cache::archives=$apt_view_directory/archives"
+        -o "Dir::Cache::pkgcache=$apt_view_directory/pkgcache.bin"
+        -o "Dir::Cache::srcpkgcache=$apt_view_directory/srcpkgcache.bin"
+        -o "APT::Architecture=$apt_architecture"
+        -o "APT::Update::Error-Mode=any"
+        -o "APT::Get::AllowUnauthenticated=false"
+        -o "Acquire::AllowInsecureRepositories=false"
+        -o "Acquire::AllowDowngradeToInsecureRepositories=false"
+        -o "DPkg::Lock::Timeout=0"
+    )
+}
+
 verify_ubuntu_package_indexes() {
-    local allow_missing="${1:-0}"
     local targets identifier origin label codename site signed_by
     local seen_packages=0
-    if test "$test_mode" = 1; then
+    if test "$test_mode" = 1 && test "${LCC_BOOTSTRAP_TEST_EXECUTE_APT:-0}" != 1; then
         targets="${LCC_BOOTSTRAP_TEST_APT_INDEX_TARGETS:-Packages|Ubuntu|Ubuntu|noble|http://archive.ubuntu.com/ubuntu|/usr/share/keyrings/ubuntu-archive-keyring.gpg}"
     else
         # apt-get expands these indextarget placeholders, not the shell.
         # shellcheck disable=SC2016
-        targets="$(apt-get indextargets \
+        targets="$(APT_CONFIG="$apt_view_directory/apt.conf" apt-get "${apt_options[@]}" indextargets \
             --format '$(IDENTIFIER)|$(ORIGIN)|$(LABEL)|$(CODENAME)|$(SITE)|$(SIGNED_BY)')"
     fi
     while IFS='|' read -r identifier origin label codename site signed_by; do
         test "$identifier" = Packages || continue
         seen_packages=1
         if test "$origin" != Ubuntu || test "$label" != Ubuntu; then
-            die "Non-Ubuntu APT package index is enabled (${site:-unknown site}); disable third-party package sources before LCC provisions prerequisites."
+            die "The isolated Ubuntu APT view returned an unexpected package index (${site:-unknown site})."
         fi
         case "$codename" in
             noble|noble-updates|noble-security|noble-backports) ;;
@@ -278,8 +482,10 @@ verify_ubuntu_package_indexes() {
         esac
         test "$signed_by" = /usr/share/keyrings/ubuntu-archive-keyring.gpg || \
             die "APT package index ${site:-unknown site} is not bound to Ubuntu's package-owned archive keyring."
+        grep -Fqx "URIs: $site" "$apt_view_directory/sources.list.d/ubuntu.sources" || \
+            die "The isolated Ubuntu APT view returned an unselected package source (${site:-unknown site})."
     done <<< "$targets"
-    if test "$seen_packages" -eq 0 && test "$allow_missing" -ne 1; then
+    if test "$seen_packages" -eq 0; then
         die "No Ubuntu 24.04 package index is available; enable the standard signed Ubuntu repositories, including universe."
     fi
 }
@@ -414,26 +620,31 @@ provision_prerequisites() {
         return
     fi
     note "Missing Ubuntu packages: ${missing_packages[*]}"
-    note "Package source: Ubuntu 24.04 signed repositories only; enabled third-party package indexes are refused."
+    note "Package source: isolated Ubuntu 24.04 signed repositories only; third-party sources remain untouched."
+    current_phase="package metadata"
+    prepare_ubuntu_apt_view
     if test "$dry_run" -eq 1; then
-        verify_ubuntu_package_indexes 1
-        note "DRY-RUN: real installation will refresh and re-verify Ubuntu-only package indexes."
+        note "DRY-RUN: real installation will refresh and verify isolated Ubuntu-only package indexes."
         note "DRY-RUN: would run apt-get update and install: ${missing_packages[*]}"
         return
     fi
 
-    current_phase="package metadata"
-    run_apt update
+    run_apt update || die "Trusted Ubuntu package metadata refresh failed; inspect the Ubuntu source and signature error."
     verify_ubuntu_package_indexes
-    if test "$test_mode" != 1; then
+    if test "$test_mode" != 1 || test "${LCC_BOOTSTRAP_TEST_EXECUTE_APT:-0}" = 1; then
+        run_apt check >/dev/null || \
+            die "APT dependency state is broken or locked; resolve it explicitly before installing LCC."
         for package_name in "${missing_packages[@]}"; do
-            candidate="$(apt-cache policy "$package_name" | sed -n 's/^[[:space:]]*Candidate:[[:space:]]*//p')"
+            candidate="$(APT_CONFIG="$apt_view_directory/apt.conf" apt-cache "${apt_options[@]}" policy \
+                "$package_name" | sed -n 's/^[[:space:]]*Candidate:[[:space:]]*//p')" || \
+                die "Ubuntu package candidate inspection failed for $package_name."
             test -n "$candidate" && test "$candidate" != "(none)" || \
                 die "Ubuntu package $package_name has no installable candidate. Ensure the standard Ubuntu 24.04 repositories, including universe, are enabled."
         done
     fi
     current_phase="prerequisite install"
-    run_apt install "${missing_packages[@]}"
+    run_apt install "${missing_packages[@]}" || \
+        die "Trusted Ubuntu prerequisite installation failed; inspect the APT/dpkg error."
 }
 
 verify_provisioned_commands() {
@@ -451,14 +662,14 @@ verify_provisioned_commands() {
     done
     resolved_caddy="$(command -v caddy 2>/dev/null || true)"
     test "$resolved_caddy" = /usr/bin/caddy || \
-        die "Caddy must resolve to the Ubuntu package-owned /usr/bin/caddy; found ${resolved_caddy:-none}."
+        die "Caddy must resolve to the package-owned /usr/bin/caddy; found ${resolved_caddy:-none}."
     dpkg-query -S /usr/bin/caddy 2>/dev/null | grep -Eq '^caddy(:[^:]+)?: /usr/bin/caddy$' || \
         die "/usr/bin/caddy must be owned by the Ubuntu caddy package."
     python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' || \
         die "Ubuntu Python 3.12 or newer is required."
     /usr/bin/caddy version 2>/dev/null | grep -Eq '^v?2\.' || die "Caddy 2 is required."
     test -f /lib/systemd/system/caddy.service || test -f /usr/lib/systemd/system/caddy.service || \
-        die "The Ubuntu Caddy package did not install its systemd service."
+        die "The package-managed Caddy systemd service is required."
 }
 
 verify_existing_caddy() {
@@ -470,12 +681,12 @@ verify_existing_caddy() {
     if test "$test_mode" = 1; then
         resolved_caddy="${LCC_BOOTSTRAP_TEST_CADDY_PATH:-/usr/bin/caddy}"
         if test "$resolved_caddy" != /usr/bin/caddy; then
-            die "Caddy must resolve to the Ubuntu package-owned /usr/bin/caddy; found $resolved_caddy."
+            die "Caddy must resolve to the package-owned /usr/bin/caddy; found $resolved_caddy."
         fi
     else
         resolved_caddy="$(command -v caddy 2>/dev/null || true)"
         if test -n "$resolved_caddy" && test "$resolved_caddy" != /usr/bin/caddy; then
-            die "Caddy must resolve to the Ubuntu package-owned /usr/bin/caddy; found $resolved_caddy."
+            die "Caddy must resolve to the package-owned /usr/bin/caddy; found $resolved_caddy."
         fi
         if test -n "$resolved_caddy" && ! package_is_installed caddy; then
             die "An unmanaged Caddy executable is present. Remove it or install the Ubuntu caddy package explicitly before retrying."
@@ -629,6 +840,9 @@ acquisition_directory=""
 secret_directory=""
 cleanup() {
     status=$?
+    if test -n "$apt_view_directory"; then
+        rm -rf -- "$apt_view_directory"
+    fi
     if test -n "$acquisition_directory"; then
         rm -rf -- "$acquisition_directory"
     fi
@@ -654,7 +868,7 @@ if test "$os_id" != ubuntu || test "$os_version" != 24.04; then
     die "Supported production baseline is Ubuntu Server 24.04 LTS; found $os_id $os_version."
 fi
 
-for command_name in apt-get apt-cache dpkg dpkg-query uname df awk sed grep; do
+for command_name in apt-get apt-cache dpkg dpkg-query python3 uname df awk sed grep; do
     command -v "$command_name" >/dev/null || die "Ubuntu base command is unavailable: $command_name"
 done
 verify_host_shape
