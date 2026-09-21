@@ -37,37 +37,66 @@ been exercised remain explicitly `Not executed`; see the [product QA record](doc
   restore, and password recovery.
 - Keeps the deterministic core fully functional without an LLM or cloud service.
 
-## Quick self-hosting — stable release
+## Install or update — stable
 
 The supported production baseline is **Ubuntu Server 24.04 LTS** with internet access, `sudo`/root,
 a DNS hostname pointing to the server, and inbound ports 80/443 available. The recommended
-installer is permanently bound to one published release archive and its SHA-256 checksum:
+stable entrypoint always redirects to the newest final release's checksum-bound installer:
+
+```bash
+curl -fsSL https://github.com/Learning-Control-Center/Learning-Control-Center/releases/latest/download/install.sh | sudo bash
+```
+
+On a fresh host it asks for the public hostname, application timezone, and confirmation, then
+installs the required Ubuntu packages, generates production configuration privately, and verifies
+the matching release archive. Rerunning the same command updates an older stable installation
+through the canonical backup/migration/activation workflow. The same version is a clean no-op;
+prereleases are never selected; and an older pinned installer cannot silently downgrade a newer
+installation. This command becomes available when the `v1.0.1` assets are published.
+
+Node.js/npm are not installed on the server: every release contains a source-bound, verified
+production frontend built during release packaging. For review-first and manual alternatives, see
+the complete [installation guide](docs/INSTALLATION.md).
+
+## Update an installed server
+
+Every v1.0.1-or-newer installation provides two equivalent entrypoints:
+
+```bash
+sudo /opt/learning-control-center/update.sh
+# Thin administrator alias for the same updater:
+sudo lcc-admin update
+```
+
+Stable installations resolve the newest final stable release. Main installations resolve the
+recorded repository's current public `main` to one exact SHA. Neither command changes channel by
+default. See [updates, rollback, and uninstall](docs/UPDATES.md) for explicit channel changes and
+database-aware rollback.
+
+To install or update to one exact release, use its versioned launcher:
 
 ```bash
 curl -fsSL https://github.com/Learning-Control-Center/Learning-Control-Center/releases/download/v1.0.1/install.sh | sudo bash
 ```
 
-This command becomes available when the `v1.0.1` release assets are published. It asks for the
-public hostname, application timezone, and confirmation; installs the required Ubuntu packages;
-generates the production secrets and configuration privately; verifies the matching archive; and
-delegates LCC host changes to the canonical installer. Node.js/npm are not installed on the server:
-the release contains a source-bound, verified production frontend built during release packaging.
-For a download-and-review alternative, advanced configuration, or manual installation, use the
-complete [installation guide](docs/INSTALLATION.md).
+That launcher remains permanently bound to v1.0.1: it installs or updates older stable versions,
+does nothing when v1.0.1 is active, and refuses to downgrade a newer stable installation.
 
-## Development build — `main` (unstable)
+## Current `main` — latest validated code
 
-For deliberate testing of the current public `main` branch:
+After v1.0.1 is published, operators who deliberately prefer the latest validated public code over
+a versioned release can use its reviewed bootstrap implementation:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Learning-Control-Center/Learning-Control-Center/v1.0.1/scripts/bootstrap-ubuntu.sh \
   | sudo bash -s -- --channel main
 ```
 
-The installer displays a **DEVELOPMENT / UNSTABLE** warning and requires the exact confirmation
-`INSTALL MAIN`. It resolves `main` once, checks out that exact 40-character commit SHA, records it,
-and never follows the moving branch automatically. Stable releases remain the recommended
-production path. Neither channel silently selects `latest`.
+The installer displays the repository and exact 40-character SHA and asks for normal confirmation.
+It checks out that SHA detached, records it, and never follows the moving branch automatically.
+Stable remains the recommended production path because it is immutable, versioned,
+checksum-bound, and easier to reproduce and roll back; `main` is validated current code but is not
+release-pinned.
 
 Production administration uses systemd and `lcc-admin`:
 

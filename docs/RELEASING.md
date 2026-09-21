@@ -104,16 +104,23 @@ printed or passed on argv.
    HTTPS health, first-user bootstrap,
    finalization, systemd restart, scheduled/manual backup, update preflight, and preserve-by-default
    uninstall.
-8. Publish release notes from `CHANGELOG.md` and advertise the quick-install command only after the
+8. Confirm GitHub's final-release `latest` redirect serves the exact published `install.sh`, then
+   publish release notes from `CHANGELOG.md` and advertise the quick-install command only after the
    assets and acceptance checks succeed.
 
-The stable command is:
+The normal stable install-or-update command is:
+
+```bash
+curl -fsSL https://github.com/Learning-Control-Center/Learning-Control-Center/releases/latest/download/install.sh | sudo bash
+```
+
+A release-specific launcher remains available for pinned installs and updates:
 
 ```bash
 curl -fsSL https://github.com/Learning-Control-Center/Learning-Control-Center/releases/download/v1.0.1/install.sh | sudo bash
 ```
 
-The explicit unstable-main command uses the immutable v1.0.1 bootstrap implementation:
+The explicit current-main command uses the immutable v1.0.1 bootstrap implementation:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Learning-Control-Center/Learning-Control-Center/v1.0.1/scripts/bootstrap-ubuntu.sh \
@@ -122,8 +129,17 @@ curl -fsSL https://raw.githubusercontent.com/Learning-Control-Center/Learning-Co
 
 ## Updates and rollback
 
-Bootstrap is for fresh install or exact-identity repair, never an implicit update. Existing
-installations use the controlled workflow in [`UPDATES.md`](UPDATES.md). The updater verifies and
-stages the candidate before stopping services, classifies Alembic compatibility, creates a
-pre-update backup, and records immutable source identity. Code-only rollback is allowed only at the current database schema;
-schema-crossing rollback requires the matching database backup and explicit replacement acceptance.
+Every installed v1.0.1-or-newer server has `/opt/learning-control-center/update.sh`; `lcc-admin update`
+delegates to it without duplicating policy. Stable launchers also detect existing installs
+and hand an immutable candidate to the same canonical engine. The updater verifies and stages the
+candidate before stopping services, classifies Alembic compatibility, creates a pre-update backup,
+and records immutable source identity. Code-only rollback is allowed only at the current database
+schema; schema-crossing rollback requires the matching database backup and explicit replacement
+acceptance.
+
+Automatic stable discovery must use the recorded host's public release API, exclude drafts and
+prereleases, and select the greatest final `vMAJOR.MINOR.PATCH`. The three byte-identical release
+assets must be uploaded to both explicit hosts. There is no automatic host fallback: GitHub-backed
+installs continue with GitHub, and Forgejo-backed installs continue with Forgejo. A release
+candidate remains installable only through its exact versioned asset URL; it never becomes an
+automatic stable update target.

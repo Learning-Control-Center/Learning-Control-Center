@@ -10,7 +10,8 @@ installation step is required on a normal Ubuntu Server image.
 The bootstrap checks the OS, architecture, free space, APT/dpkg state, conflicting listeners, and
 existing Caddy ownership. It then installs only missing packages from Ubuntu 24.04's signed
 repositories: `ca-certificates`, `curl`, `python3`, `python3-venv`, `sqlite3`, `rsync`, `tar`,
-`gzip`, `caddy`, and `iproute2`; the explicit `main` channel also installs `git`. Caddy comes from
+`gzip`, `git`, `caddy`, and `iproute2`. Git is installed for both channels so an operator can later
+request an exact-SHA `main` update or channel change without a separate prerequisite step. Caddy comes from
 Ubuntu's `universe` component. The installer adds no third-party APT repository, imports no external
 signing key, does not use `apt-key`, and never upgrades the whole operating system. When packages
 are missing, provisioning refuses to continue if any enabled package index is not an Ubuntu 24.04
@@ -25,7 +26,7 @@ public `main` commits carry a verified production frontend whose hash is bound t
 Release creation rebuilds it with `npm ci` from `package-lock.json` and rejects a mismatch. The
 server installs and updates that exact artifact without Node.js.
 
-## Stable quick install — recommended
+## Stable install or update — recommended
 
 Every stable release publishes three matching assets:
 
@@ -33,11 +34,17 @@ Every stable release publishes three matching assets:
 - `learning-control-center-<version>.tar.gz`;
 - `learning-control-center-<version>.tar.gz.sha256`.
 
-For v1.0.1, after those assets have been published, run:
+After v1.0.1 has been published, the normal command is:
 
 ```bash
-curl -fsSL https://github.com/Learning-Control-Center/Learning-Control-Center/releases/download/v1.0.1/install.sh | sudo bash
+curl -fsSL https://github.com/Learning-Control-Center/Learning-Control-Center/releases/latest/download/install.sh | sudo bash
 ```
+
+GitHub's `latest` release redirect excludes drafts and prereleases and resolves to a version-bound
+`install.sh`. On a fresh server it installs that release. On an older stable installation it
+delegates the immutable target to the canonical updater. The same release reports
+`Learning Control Center is already up to date.` and exits successfully. If the installed stable
+release is newer, the launcher refuses to downgrade and directs the operator to rollback.
 
 The interactive installer asks only for:
 
@@ -60,13 +67,25 @@ less install.sh
 sudo bash install.sh
 ```
 
-The release-bound launcher cannot switch channel, release, commit, or Git repository. An explicit
-stable asset mirror may be selected with `--asset-base-url`; mirror archive and checksum bytes must
-still agree with the embedded GitHub release digest.
+For one exact version, use the version-specific URL instead:
 
-## Development `main` install — unstable
+```bash
+curl -fsSL https://github.com/Learning-Control-Center/Learning-Control-Center/releases/download/v1.0.1/install.sh | sudo bash
+```
 
-Stable is always the default. To deliberately test the current public `main` branch:
+A pinned launcher never resolves another version. It installs on a fresh host, updates an older
+stable installation to its embedded release, no-ops on the same release, and refuses a downgrade.
+
+The release-bound launcher cannot be redirected to another target channel, release, or commit and
+does not accept a Git-repository override. Switching an existing main installation to its bound
+stable release still requires explicit channel-change confirmation. The explicit supported Forgejo
+mirror may be selected with `--asset-base-url`; its archive and checksum bytes must still agree with
+the embedded GitHub release digest, and that mirror becomes the recorded source for future updates.
+
+## Current `main` — latest validated code
+
+Stable is always the default and remains the recommended reproducible production path. To
+deliberately install the current validated public `main` branch after v1.0.1 is published:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Learning-Control-Center/Learning-Control-Center/v1.0.1/scripts/bootstrap-ubuntu.sh \
@@ -74,10 +93,10 @@ curl -fsSL https://raw.githubusercontent.com/Learning-Control-Center/Learning-Co
 ```
 
 The script fetches only `refs/heads/main` without tags, resolves `FETCH_HEAD` to one full commit
-SHA, displays the repository and SHA, checks out that commit detached, and requires the operator to
-type exactly `INSTALL MAIN`. The installed identity is `main-<full-sha>`; it does not auto-update
-when the remote branch moves. This channel has HTTPS/Git transport trust but not a published
-release checksum, so it is not equivalent to the stable trust path.
+SHA, displays the repository and SHA, asks `Continue? [y/N]`, and checks out that commit detached.
+The installed identity is `main-<full-sha>`; it does not auto-update when the remote branch moves.
+Main is validated current code, not an unfinished branch, but it lacks the immutable versioned
+archive and published digest of stable and is therefore less reproducible.
 
 For automation, identities must remain explicit:
 
@@ -95,7 +114,7 @@ sudo scripts/bootstrap-ubuntu.sh \
 
 Non-interactive main refuses to run without `--commit`, and fails if fetched public `main` differs.
 Stable rejects `--commit`/`--repository-url`; main rejects `--ref`/`--asset-base-url`. Neither mode
-accepts `latest` or another implicit moving identity. Secrets are never accepted on argv.
+accepts a moving identity as the installed identity. Secrets are never accepted on argv.
 
 GitHub is the default source. Forgejo is an explicit, no-fallback alternative:
 
@@ -165,9 +184,11 @@ LCC, and the backup timer; and verifies the public HTTPS health endpoint. Existi
 Caddy configuration is preserved; if the LCC site conflicts, validation fails and the previous
 Caddy files are restored.
 
-A first install is allowed when no active release exists. The same exact identity can be rerun for
-repair. A partial matching `.installing` directory can be resumed safely. A different active
-release is refused and must use the controlled update workflow. For inspection, use `--dry-run`.
+A first install is allowed when no active release exists. Rerunning a release-bound launcher with
+an older installation delegates to the controlled update engine; the same identity is a no-op;
+and a newer stable identity refuses downgrade. A partial matching `.installing` directory can be
+resumed safely. Channel changes are displayed with both exact identities and require explicit
+confirmation. For inspection, use `--dry-run`.
 The isolated `--root`/skip options are test-only and must not be used as production substitutes.
 Dry-run reports missing packages, the exact APT plan and trust source, release/channel/domain,
 frontend-artifact policy, and intended host/service actions without changing packages,

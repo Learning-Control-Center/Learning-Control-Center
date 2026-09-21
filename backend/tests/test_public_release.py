@@ -56,6 +56,7 @@ def _release_repository(tmp_path: Path) -> Path:
         ".gitignore",
         ".gitattributes",
         "CHANGELOG.md",
+        "README.md",
         "pyproject.toml",
         "backend/app/main.py",
         "backend/app/analysis/v1_compat.py",
@@ -65,8 +66,14 @@ def _release_repository(tmp_path: Path) -> Path:
         "scripts/bootstrap-ubuntu.sh",
         "scripts/deploy-common.sh",
         "scripts/generate-production-env.sh",
+        "scripts/install-ubuntu.sh",
+        "scripts/lcc-admin",
         "scripts/package-release.sh",
+        "scripts/update.sh",
+        "scripts/update-ubuntu.sh",
+        "deploy/learning-control-center-update.sh",
         "docs/INSTALLATION.md",
+        "docs/PRODUCTION_OPERATIONS.md",
         "docs/RELEASING.md",
         "docs/UPDATES.md",
     ):
@@ -237,6 +244,9 @@ def test_release_packaging_is_deterministic_bounded_and_mode_preserving(
         f"{prefix}scripts/frontend-artifact.py",
         f"{prefix}scripts/generate-production-env.sh",
         f"{prefix}scripts/install-ubuntu.sh",
+        f"{prefix}scripts/update.sh",
+        f"{prefix}scripts/update-ubuntu.sh",
+        f"{prefix}deploy/learning-control-center-update.sh",
         f"{prefix}RELEASE_ID",
         f"{prefix}RELEASE_CHANNEL",
         f"{prefix}SOURCE_REVISION",
@@ -246,6 +256,9 @@ def test_release_packaging_is_deterministic_bounded_and_mode_preserving(
     assert members[f"{prefix}scripts/bootstrap-ubuntu.sh"].mode & stat.S_IXUSR
     assert members[f"{prefix}scripts/generate-production-env.sh"].mode & stat.S_IXUSR
     assert members[f"{prefix}scripts/install-ubuntu.sh"].mode & stat.S_IXUSR
+    assert members[f"{prefix}scripts/update.sh"].mode & stat.S_IXUSR
+    assert members[f"{prefix}scripts/update-ubuntu.sh"].mode & stat.S_IXUSR
+    assert members[f"{prefix}deploy/learning-control-center-update.sh"].mode & stat.S_IXUSR
     assert members[f"{prefix}scripts/frontend-artifact.py"].mode & stat.S_IXUSR
     forbidden_fragments = (
         "/memory-bank/",
@@ -561,11 +574,13 @@ def test_prerequisite_preflight_rejects_unsupported_ubuntu(tmp_path: Path) -> No
     assert "Ubuntu Server 24.04 LTS" in result.stderr
 
 
-def test_existing_different_install_is_refused_before_package_changes(tmp_path: Path) -> None:
+def test_existing_newer_install_refuses_downgrade_before_package_changes(
+    tmp_path: Path,
+) -> None:
     install_root = tmp_path / "installed-root"
-    active = install_root / "opt" / "learning-control-center" / "releases" / "v1.0.0"
+    active = install_root / "opt" / "learning-control-center" / "releases" / "v1.0.2"
     active.mkdir(parents=True)
-    (active / "RELEASE_ID").write_text("v1.0.0\n")
+    (active / "RELEASE_ID").write_text("v1.0.2\n")
     (active / "RELEASE_CHANNEL").write_text("stable\n")
     (active / "SOURCE_REVISION").write_text("1" * 40 + "\n")
     (active.parent.parent / "current").symlink_to(active)
@@ -584,7 +599,7 @@ def test_existing_different_install_is_refused_before_package_changes(tmp_path: 
         env=environment,
     )
     assert result.returncode != 0
-    assert "controlled update workflow" in result.stderr
+    assert "rollback workflow for downgrades" in result.stderr
     assert not apt_log.exists()
 
 
@@ -593,10 +608,12 @@ def test_main_and_stable_share_prerequisites_without_server_node() -> None:
     provision_start = source.index("provision_prerequisites()")
     provision_end = source.index("verify_provisioned_commands()")
     provision = source[provision_start:provision_end]
-    assert "required_packages+=(git)" in provision
-    required_line = provision[provision.index("required_packages=(") : provision.index(")")]
-    assert "nodejs" not in required_line
-    assert " npm" not in required_line
+    required_packages = re.search(r"required_packages=\((.*?)\n    \)", provision, re.DOTALL)
+    assert required_packages is not None
+    assert "git" in required_packages.group(1).split()
+    assert "required_packages+=(git)" not in provision
+    assert "nodejs" not in required_packages.group(1)
+    assert "npm" not in required_packages.group(1).split()
     assert "apt-key" not in source
     assert "deb.nodesource" not in source
     assert "dl.cloudsmith" not in source
@@ -718,6 +735,139 @@ def test_generated_stable_launcher_is_release_bound_and_rejects_identity_overrid
         )
         assert rejected.returncode != 0
         assert "release-bound install.sh" in rejected.stderr
+
+
+def _write_active_release(
+    root: Path, *, release_id: str, channel: str, revision: str, legacy_v1: bool = False
+) -> None:
+    release = root / "opt" / "learning-control-center" / "releases" / release_id
+    release.mkdir(parents=True)
+    (release / "RELEASE_ID").write_text(f"{release_id}\n")
+    if legacy_v1:
+        revision = "artifact-sha256-" + "a" * 64
+    else:
+        (release / "RELEASE_CHANNEL").write_text(f"{channel}\n")
+    (release / "SOURCE_REVISION").write_text(f"{revision}\n")
+    current = root / "opt" / "learning-control-center" / "current"
+    current.symlink_to(release)
+
+
+def test_release_bound_launcher_rerun_delegates_updates_and_handles_version_order(
+    tmp_path: Path,
+) -> None:
+    repository = _release_repository(tmp_path)
+    asset_root = tmp_path / "assets"
+    _archive, _checksum, launcher = _package(repository, asset_root / RELEASE_ID)
+    target_revision = subprocess.run(
+        ["git", "-C", repository, "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    older_root = tmp_path / "older-root"
+    _write_active_release(
+        older_root,
+        release_id="v1.0.0",
+        channel="stable",
+        revision="1" * 40,
+        legacy_v1=True,
+    )
+    (tmp_path / "older").mkdir(exist_ok=True)
+    older_environment = _bootstrap_environment(tmp_path / "older", asset_root)
+    older_environment.update(
+        {
+            "LCC_BOOTSTRAP_INSTALL_ROOT": str(older_root),
+            "LCC_BOOTSTRAP_UPDATE_HANDOFF_LOG": str(tmp_path / "update-handoff.log"),
+        }
+    )
+    updated = subprocess.run(
+        [launcher, "--non-interactive"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=older_environment,
+    )
+    update_arguments = (tmp_path / "update-handoff.log").read_text().splitlines()
+    assert "apply" in update_arguments
+    assert RELEASE_ID in update_arguments
+    assert target_revision in update_arguments
+    assert "canonical update engine" in updated.stdout
+
+    same_root = tmp_path / "same-root"
+    _write_active_release(
+        same_root, release_id=RELEASE_ID, channel="stable", revision=target_revision
+    )
+    (tmp_path / "same").mkdir(exist_ok=True)
+    same_environment = _bootstrap_environment(tmp_path / "same", asset_root)
+    same_environment["LCC_BOOTSTRAP_INSTALL_ROOT"] = str(same_root)
+    same = subprocess.run(
+        [launcher, "--non-interactive"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=same_environment,
+    )
+    assert same.stdout.strip().endswith("Learning Control Center is already up to date.")
+
+    newer_root = tmp_path / "newer-root"
+    _write_active_release(newer_root, release_id="v1.0.2", channel="stable", revision="2" * 40)
+    (tmp_path / "newer").mkdir(exist_ok=True)
+    newer_environment = _bootstrap_environment(tmp_path / "newer", asset_root)
+    newer_environment["LCC_BOOTSTRAP_INSTALL_ROOT"] = str(newer_root)
+    refused = subprocess.run(
+        [launcher, "--non-interactive"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=newer_environment,
+    )
+    assert refused.returncode != 0
+    assert "rollback workflow for downgrades" in refused.stderr
+
+
+def test_release_bound_launcher_requires_explicit_main_to_stable_channel_change(
+    tmp_path: Path,
+) -> None:
+    repository = _release_repository(tmp_path)
+    asset_root = tmp_path / "assets"
+    _archive, _checksum, launcher = _package(repository, asset_root / RELEASE_ID)
+    root = tmp_path / "main-root"
+    _write_active_release(
+        root,
+        release_id=f"main-{'3' * 40}",
+        channel="main",
+        revision="3" * 40,
+    )
+    (tmp_path / "main-installed").mkdir(exist_ok=True)
+    environment = _bootstrap_environment(tmp_path / "main-installed", asset_root)
+    environment.update(
+        {
+            "LCC_BOOTSTRAP_INSTALL_ROOT": str(root),
+            "LCC_BOOTSTRAP_UPDATE_HANDOFF_LOG": str(tmp_path / "channel-handoff.log"),
+        }
+    )
+    refused = subprocess.run(
+        [launcher, "--non-interactive"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert refused.returncode != 0
+    assert "requires --confirm-channel-change" in refused.stderr
+
+    accepted = subprocess.run(
+        [launcher, "--non-interactive", "--confirm-channel-change"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert "canonical update engine" in accepted.stdout
+    assert (tmp_path / "channel-handoff.log").read_text().splitlines()[-1] == (
+        "--confirm-channel-change"
+    )
 
 
 @pytest.mark.skipif(shutil.which("script") is None, reason="PTY helper is unavailable")
@@ -875,7 +1025,7 @@ def test_main_non_interactive_resolves_exact_sha_and_rejects_mismatch(tmp_path: 
         env=environment,
     )
     handoff = (tmp_path / "handoff.log").read_text().splitlines()
-    assert "DEVELOPMENT / UNSTABLE" in installed.stdout
+    assert "latest validated code, not release-pinned" in installed.stdout
     assert f"Resolved main revision: {revision}" in installed.stdout
     channel_index = handoff.index("--channel")
     assert handoff[channel_index : channel_index + 2] == ["--channel", "main"]
@@ -933,7 +1083,7 @@ def test_main_requires_explicit_channel_and_valid_non_interactive_contract() -> 
 
 
 @pytest.mark.skipif(shutil.which("script") is None, reason="PTY helper is unavailable")
-def test_interactive_main_requires_exact_confirmation(tmp_path: Path) -> None:
+def test_interactive_main_uses_normal_explicit_confirmation(tmp_path: Path) -> None:
     repository = _release_repository(tmp_path)
     environment = _bootstrap_environment(tmp_path)
     environment["LCC_BOOTSTRAP_REPOSITORY_URL"] = str(repository)
@@ -947,18 +1097,18 @@ def test_interactive_main_requires_exact_confirmation(tmp_path: Path) -> None:
         env=environment,
     )
     assert rejected.returncode != 0
-    assert "Type INSTALL MAIN to continue" in rejected.stdout
+    assert "Continue? [y/N]" in rejected.stdout
     assert "Main installation was not confirmed" in rejected.stdout
     assert not (tmp_path / "handoff.log").exists()
     assert list((tmp_path / "secret-temp").iterdir()) == []
     bootstrap_source = (REPOSITORY_ROOT / "scripts" / "bootstrap-ubuntu.sh").read_text()
-    assert bootstrap_source.index("Type INSTALL MAIN to continue") < bootstrap_source.index(
+    assert bootstrap_source.index("Current main — latest validated code") < bootstrap_source.index(
         'checkout --quiet --detach "$source_revision"'
     )
 
     accepted = subprocess.run(
         ["script", "-qec", shlex.join(str(item) for item in command), "/dev/null"],
-        input="INSTALL MAIN\nlcc.example.test\nUTC\n",
+        input="y\nlcc.example.test\nUTC\n",
         check=True,
         capture_output=True,
         text=True,

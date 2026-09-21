@@ -67,6 +67,25 @@ install_units() {
     systemctl daemon-reload
 }
 
+install_update_entrypoint() {
+    local release_directory="$1"
+    test -x "$release_directory/deploy/learning-control-center-update.sh" || \
+        lcc_die "Release lacks the persistent update entrypoint."
+    install -m 0755 "$release_directory/deploy/learning-control-center-update.sh" \
+        "$LCC_UPDATE_ENTRYPOINT"
+}
+
+sync_update_entrypoint() {
+    local release_directory="$1"
+    if test -x "$release_directory/deploy/learning-control-center-update.sh"; then
+        install_update_entrypoint "$release_directory"
+    else
+        # v1.0.0 predates the persistent updater. A rollback to that release
+        # must not leave a wrapper that appears current but targets old policy.
+        rm -f -- "$LCC_UPDATE_ENTRYPOINT"
+    fi
+}
+
 release_head() {
     local release_directory="$1"
     PYTHONPATH="$release_directory/backend" "$release_directory/.venv/bin/python" -c \
@@ -142,6 +161,16 @@ recover_original_installation() {
         lcc_note "CRITICAL: could not restore the original systemd units."
         recovery_failed=1
     fi
+    if test -x "$old_release/deploy/learning-control-center-update.sh"; then
+        (set -e; install_update_entrypoint "$old_release")
+    else
+        (set -e; rm -f -- "$LCC_UPDATE_ENTRYPOINT")
+    fi
+    step_status=$?
+    if test "$step_status" -ne 0; then
+        lcc_note "CRITICAL: could not restore the original update entrypoint."
+        recovery_failed=1
+    fi
     (set -e; render_caddy "$old_release")
     step_status=$?
     if test "$step_status" -ne 0; then
@@ -192,7 +221,7 @@ stage_release() {
     local source_ref="$6"
     local source_origin="$7"
     local destination="$LCC_APPLICATION_ROOT/releases/$release_id"
-    local source_revision git_source_root
+    local source_revision git_source_root artifact_manifest artifact_repository
     lcc_validate_release_channel "$release_channel"
     lcc_validate_release_id "$release_id"
     lcc_validate_source_revision "$declared_source_revision"
@@ -220,10 +249,13 @@ stage_release() {
         test "$(tr -d '\r\n' < "$source_root/RELEASE_CHANNEL")" = "$release_channel" || \
             lcc_die "Artifact channel does not match the requested channel."
         artifact_manifest="$source_root/RELEASE_MANIFEST"
+        artifact_repository="$(sed -n 's/^source_repository=//p' "$artifact_manifest")"
+        test "$artifact_repository" = "$LCC_GITHUB_REPOSITORY" || \
+            lcc_die "Artifact release manifest has an unsupported canonical repository."
         if ! { grep -Fqx 'metadata_version=1' "$artifact_manifest" && \
             grep -Fqx "channel=$release_channel" "$artifact_manifest" && \
             grep -Fqx "release_id=$release_id" "$artifact_manifest" && \
-            grep -Fqx "source_repository=$source_repository" "$artifact_manifest" && \
+            grep -Fqx "source_origin=$LCC_GITHUB_ASSET_ORIGIN" "$artifact_manifest" && \
             grep -Fqx "source_ref=$source_ref" "$artifact_manifest" && \
             grep -Fqx "source_revision=$source_revision" "$artifact_manifest"; }; then
             lcc_die "Artifact release manifest does not match the requested immutable identity."
@@ -341,6 +373,7 @@ if test "$action" = "apply"; then
     lcc_validate_source_revision "$source_revision"
     lcc_validate_https_url "$source_repository" "Source repository"
     lcc_validate_https_url "$source_origin" "Source origin"
+    lcc_validate_source_metadata "$release_channel" "$source_repository" "$source_origin"
     case "$release_channel" in
         stable)
             [[ "$release_id" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]] || \
@@ -405,6 +438,7 @@ if test "$action" = "apply"; then
         'from app.database import run_migrations; run_migrations()'
     atomic_activate "$candidate"
     install_units "$candidate"
+    install_update_entrypoint "$candidate"
     render_caddy "$candidate"
     start_and_verify
     deployment_record="$LCC_DATA_DIRECTORY/deployment-$release_id.env"
@@ -483,6 +517,7 @@ elif test "$action" = "rollback"; then
     fi
     atomic_activate "$target_release"
     install_units "$target_release"
+    sync_update_entrypoint "$target_release"
     render_caddy "$target_release"
     if test "$target_head" != "$current_head"; then
         lcc_run_as_service_user "$target_release" "$target_release/.venv/bin/lcc-ops" \

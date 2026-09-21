@@ -10,6 +10,7 @@ readonly stable_only_launcher="0"
 
 readonly github_repository="https://github.com/Learning-Control-Center/Learning-Control-Center.git"
 readonly github_asset_base="https://github.com/Learning-Control-Center/Learning-Control-Center/releases/download"
+readonly forgejo_repository="https://forgejo.waqsea.com/Learning-Control-Center/Learning-Control-Center.git"
 if test "${LCC_BOOTSTRAP_TESTING:-0}" = 1; then
     maximum_archive_bytes="${LCC_BOOTSTRAP_TEST_MAXIMUM_ARCHIVE_BYTES:-268435456}"
     maximum_unpacked_bytes="${LCC_BOOTSTRAP_TEST_MAXIMUM_UNPACKED_BYTES:-536870912}"
@@ -32,6 +33,13 @@ asset_base_was_set=0
 repository_was_set=0
 non_interactive=0
 dry_run=0
+confirm_channel_change=0
+channel_change_confirmed=0
+existing_installation=0
+active_release=""
+active_id=""
+active_revision=""
+active_channel=""
 current_phase="argument validation"
 
 usage() {
@@ -42,7 +50,7 @@ Usage:
 
 Channels:
   stable  Published release archive and SHA-256 (default, recommended)
-  main    Current public main tip, resolved once to an exact Git commit
+  main    Current validated main, resolved once to an exact Git commit
 
 Options:
   --channel stable|main     Installation channel (default: stable)
@@ -53,6 +61,7 @@ Options:
   --env-file FILE          Advanced root-owned production environment file
   --asset-base-url URL     Explicit HTTPS stable release mirror
   --repository-url URL     Explicit HTTPS main Git repository
+  --confirm-channel-change Confirm an explicit non-interactive channel change
   --non-interactive        Disable prompts; require every deliberate choice
   --dry-run                Validate/acquire and invoke the canonical installer in dry-run mode
 
@@ -209,37 +218,108 @@ verify_source_url_shape() {
 }
 
 verify_existing_lcc_shape() {
-    local current_path active_path active_id active_channel
+    local current_path
     current_path="${install_root%/}/opt/learning-control-center/current"
     if test -e "$current_path" && test ! -L "$current_path"; then
         die "Existing LCC current path is not a symbolic link; inspect it before retrying."
     fi
     test -L "$current_path" || return 0
-    active_path="$(readlink -f "$current_path")"
-    test -n "$active_path" && test -d "$active_path" && \
-        test -f "$active_path/RELEASE_ID" && test -f "$active_path/SOURCE_REVISION" || \
+    active_release="$(readlink -f "$current_path")"
+    test -n "$active_release" && test -d "$active_release" && \
+        test -f "$active_release/RELEASE_ID" && test -f "$active_release/SOURCE_REVISION" || \
         die "Existing LCC installation has incomplete release metadata."
-    active_id="$(tr -d '\r\n' < "$active_path/RELEASE_ID")"
+    existing_installation=1
+    active_id="$(tr -d '\r\n' < "$active_release/RELEASE_ID")"
+    active_revision="$(tr -d '\r\n' < "$active_release/SOURCE_REVISION")"
+    if [[ ! "$active_revision" =~ ^[0-9a-f]{40}$ ]]; then
+        if test -f "$active_release/RELEASE_CHANNEL" || \
+            [[ ! "$active_revision" =~ ^artifact-sha256-[0-9a-f]{64}$ ]]; then
+            die "Existing LCC installation has an invalid source revision."
+        fi
+        note "Existing v1.0.0 installation uses its legacy artifact-content revision."
+    fi
     active_channel="stable"
-    if test -f "$active_path/RELEASE_CHANNEL"; then
-        active_channel="$(tr -d '\r\n' < "$active_path/RELEASE_CHANNEL")"
+    if test -f "$active_release/RELEASE_CHANNEL"; then
+        active_channel="$(tr -d '\r\n' < "$active_release/RELEASE_CHANNEL")"
     fi
+    case "$active_channel" in stable|main) ;; *) die "Existing LCC channel metadata is invalid." ;; esac
     note "Existing LCC installation detected: channel=$active_channel release=$active_id"
-    if test "$channel" = stable && \
-        { test "$active_channel" != stable || test "$active_id" != "$release_ref"; }; then
-        die "A different LCC release is active; use the controlled update workflow."
+    if test "$channel" = stable && test "$active_channel" = stable; then
+        comparison="$(compare_stable_release_ids "$active_id" "$release_ref")" || \
+            die "Existing or requested stable release identity is invalid."
+        if test "$comparison" -gt 0; then
+            die "Installed stable release $active_id is newer than requested $release_ref; use the rollback workflow for downgrades."
+        fi
     fi
+}
+
+compare_stable_release_ids() {
+    python3 - "$1" "$2" <<'PY'
+import re
+import sys
+
+pattern = re.compile(
+    r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+    r"(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$"
+)
+
+
+def parse(value):
+    match = pattern.fullmatch(value)
+    if match is None:
+        raise SystemExit(1)
+    core = tuple(int(part) for part in match.groups()[:3])
+    prerelease = match.group(4)
+    if prerelease is None:
+        return core, None
+    identifiers = []
+    for item in prerelease.split("."):
+        identifiers.append((0, int(item)) if item.isdigit() else (1, item))
+    return core, tuple(identifiers)
+
+
+def compare(left, right):
+    left_core, left_pre = parse(left)
+    right_core, right_pre = parse(right)
+    if left_core != right_core:
+        return -1 if left_core < right_core else 1
+    if left_pre is None or right_pre is None:
+        if left_pre is right_pre:
+            return 0
+        return 1 if left_pre is None else -1
+    for left_item, right_item in zip(left_pre, right_pre):
+        if left_item == right_item:
+            continue
+        if left_item[0] != right_item[0]:
+            return -1 if left_item[0] < right_item[0] else 1
+        return -1 if left_item[1] < right_item[1] else 1
+    return (len(left_pre) > len(right_pre)) - (len(left_pre) < len(right_pre))
+
+
+print(compare(sys.argv[1], sys.argv[2]))
+PY
+}
+
+repository_for_asset_base() {
+    python3 - "$1" <<'PY'
+import sys
+from urllib.parse import urlparse
+
+value = sys.argv[1].rstrip("/")
+suffix = "/releases/download"
+parsed = urlparse(value)
+if parsed.scheme != "https" or not parsed.netloc or not parsed.path.endswith(suffix):
+    raise SystemExit("stable asset base must end with /releases/download")
+print(f"https://{parsed.netloc}{parsed.path.removesuffix(suffix)}.git")
+PY
 }
 
 provision_prerequisites() {
     local package_name candidate
     local -a required_packages missing_packages
     required_packages=(
-        ca-certificates curl python3 python3-venv sqlite3 rsync tar gzip caddy iproute2
+        ca-certificates curl python3 python3-venv sqlite3 rsync tar gzip git caddy iproute2
     )
-    if test "$channel" = main; then
-        required_packages+=(git)
-    fi
     missing_packages=()
     for package_name in "${required_packages[@]}"; do
         if ! package_is_installed "$package_name"; then
@@ -282,9 +362,7 @@ verify_provisioned_commands() {
         command -v "$command_name" >/dev/null || \
             die "Acquisition command is unavailable: $command_name"
     done
-    if test "$channel" = main; then
-        command -v git >/dev/null || die "Provisioned Git command is unavailable."
-    fi
+    command -v git >/dev/null || die "Provisioned Git command is unavailable."
     test "$dry_run" -eq 1 && return 0
     for command_name in sqlite3 rsync systemctl runuser flock ss; do
         command -v "$command_name" >/dev/null || \
@@ -375,6 +453,7 @@ while test "$#" -gt 0; do
         --repository-url)
             test "$stable_only_launcher" = 0 || die "This release-bound install.sh does not accept --repository-url."
             repository_url="${2:?Missing --repository-url value}"; repository_was_set=1; shift 2 ;;
+        --confirm-channel-change) confirm_channel_change=1; shift ;;
         --non-interactive) non_interactive=1; shift ;;
         --dry-run) dry_run=1; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -426,6 +505,8 @@ if test "$test_mode" = 1 && test "$repository_was_set" -eq 0 && \
     test -n "${LCC_BOOTSTRAP_REPOSITORY_URL:-}"; then
     repository_url="$LCC_BOOTSTRAP_REPOSITORY_URL"
 fi
+asset_base_url="${asset_base_url%/}"
+repository_url="${repository_url%/}"
 if test "$test_mode" != 1; then
     verify_source_url_shape
 fi
@@ -606,11 +687,26 @@ PY
     fi
     source_ref="refs/tags/$release_ref"
     source_origin="$asset_base_url"
-    source_repository="$github_repository"
+    if test "$test_mode" = 1 && [[ "$asset_base_url" = file://* ]]; then
+        source_repository="$github_repository"
+    else
+        source_repository="$(repository_for_asset_base "$asset_base_url")" || \
+            die "Unable to derive the stable source repository from --asset-base-url."
+        case "$source_repository" in
+            "$github_repository"|"$forgejo_repository") ;;
+            *) die "Stable mirrors are supported only from the explicit GitHub or Forgejo source." ;;
+        esac
+    fi
     note "Verified stable release: $release_id"
     note "Exact source revision: $source_revision"
 else
     current_phase="main source acquisition"
+    if test "$test_mode" != 1; then
+        case "$repository_url" in
+            "$github_repository"|"$forgejo_repository") ;;
+            *) die "Main acquisition is supported only from the explicit GitHub or Forgejo repository." ;;
+        esac
+    fi
     source_repository="$repository_url"
     source_origin="$repository_url"
     source_ref="refs/heads/main"
@@ -629,21 +725,27 @@ else
         die "Remote main resolved to $source_revision, not expected commit $expected_commit."
     fi
     release_id="main-$source_revision"
-    note "DEVELOPMENT / UNSTABLE channel selected."
+    note "Current main channel selected — latest validated code, not release-pinned."
     note "Repository: $repository_url"
     note "Resolved main revision: $source_revision"
 fi
 
-# Do not source or execute anything from an unstable main checkout until the
-# operator has seen and accepted the exact immutable revision.
+# Do not source or execute anything from main until the operator has seen and
+# accepted the exact immutable revision.
 if test "$channel" = main && test "$non_interactive" -eq 0; then
     exec 3<>/dev/tty || die "Interactive main installation requires a controlling terminal."
-    printf '\nDEVELOPMENT / UNSTABLE installation\n' >&3
+    printf '\nCurrent main — latest validated code, not release-pinned\n' >&3
     printf '  Repository: %s\n  Exact source SHA: %s\n' "$repository_url" "$source_revision" >&3
-    printf 'This build is not a published stable release and will remain pinned to this SHA.\n' >&3
-    printf 'Type INSTALL MAIN to continue: ' >&3
+    printf 'This installation will remain pinned to this SHA until an explicit update.\n' >&3
+    if test "$existing_installation" -eq 1 && test "$active_channel" != main; then
+        printf '  Channel change: %s -> main\n' "$active_channel" >&3
+    fi
+    printf 'Continue? [y/N]: ' >&3
     IFS= read -r confirmation <&3 || die "Unable to read confirmation from the terminal."
-    test "$confirmation" = "INSTALL MAIN" || die "Main installation was not confirmed."
+    case "${confirmation,,}" in y|yes) ;; *) die "Main installation was not confirmed." ;; esac
+    if test "$existing_installation" -eq 1 && test "$active_channel" != main; then
+        channel_change_confirmed=1
+    fi
 fi
 
 if test "$channel" = main; then
@@ -658,19 +760,52 @@ fi
 current_release="${install_root%/}/opt/learning-control-center/current"
 environment_target="${install_root%/}/etc/learning-control-center.env"
 
-if test -L "$current_release"; then
-    active_release="$(readlink -f "$current_release")"
-    active_id="$(tr -d '\r\n' < "$active_release/RELEASE_ID")"
-    active_revision="$(tr -d '\r\n' < "$active_release/SOURCE_REVISION")"
-    active_channel="stable"
-    if test -f "$active_release/RELEASE_CHANNEL"; then
-        active_channel="$(tr -d '\r\n' < "$active_release/RELEASE_CHANNEL")"
+if test "$existing_installation" -eq 1; then
+    if test "$active_id" = "$release_id" && test "$active_revision" = "$source_revision" && \
+        test "$active_channel" = "$channel"; then
+        echo "Learning Control Center is already up to date."
+        exit 0
     fi
-    if test "$active_id" != "$release_id" || test "$active_revision" != "$source_revision" || \
-        test "$active_channel" != "$channel"; then
-        die "Another release is active; use the controlled update workflow instead of install.sh."
+    if test "$active_channel" != "$channel" && test "$channel_change_confirmed" -ne 1 && \
+        test "$confirm_channel_change" -ne 1; then
+        if test "$non_interactive" -eq 1; then
+            die "Changing from $active_channel to $channel requires --confirm-channel-change."
+        fi
+        exec 3<>/dev/tty || die "Channel-change confirmation requires a controlling terminal."
+        printf '\nChannel change: %s -> %s\n' "$active_channel" "$channel" >&3
+        printf '  Current: %s (%s)\n  Target: %s (%s)\n' \
+            "$active_id" "$active_revision" "$release_id" "$source_revision" >&3
+        printf 'Continue? [y/N]: ' >&3
+        IFS= read -r confirmation <&3 || die "Unable to read channel-change confirmation."
+        case "${confirmation,,}" in y|yes) channel_change_confirmed=1 ;; \
+            *) die "Channel change was not confirmed." ;; esac
     fi
-    note "The exact selected release is already active; performing an idempotent repair check."
+    updater_command=(
+        "$source_root/scripts/update-ubuntu.sh" apply
+        --source "$source_root"
+        --channel "$channel"
+        --release-id "$release_id"
+        --source-revision "$source_revision"
+        --source-repository "$source_repository"
+        --source-ref "$source_ref"
+        --source-origin "$source_origin"
+    )
+    if test "$active_channel" != "$channel"; then
+        updater_command+=(--confirm-channel-change)
+    fi
+    if test "$dry_run" -eq 1; then
+        printf 'DRY-RUN: would delegate to canonical update engine:'
+        printf ' %q' "${updater_command[@]}"
+        printf '\n'
+        exit 0
+    fi
+    note "Delegating immutable target $release_id to the canonical update engine."
+    if test "$test_mode" = 1 && test -n "${LCC_BOOTSTRAP_UPDATE_HANDOFF_LOG:-}"; then
+        printf '%s\n' "${updater_command[@]}" > "$LCC_BOOTSTRAP_UPDATE_HANDOFF_LOG"
+        exit 0
+    fi
+    "${updater_command[@]}"
+    exit 0
 fi
 
 # Load validation helpers only after the selected source has been verified.

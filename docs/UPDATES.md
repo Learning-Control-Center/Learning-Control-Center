@@ -1,46 +1,54 @@
 # Production updates, rollback, and uninstall
 
-## Controlled update
+## Normal update
 
-Updates always target reviewed source and a complete immutable identity. The updater never fetches
-`latest`, follows `main`, or resolves a release automatically.
-
-For stable releases, download the deliberate archive and checksum from the canonical GitHub
-release, verify them, and extract into an operator-owned staging directory:
+The installed user-facing updater is:
 
 ```bash
-mkdir -p "$HOME/lcc-releases/v1.1.0"
-cd "$HOME/lcc-releases/v1.1.0"
-curl -fLO https://github.com/Learning-Control-Center/Learning-Control-Center/releases/download/v1.1.0/learning-control-center-v1.1.0.tar.gz
-curl -fLO https://github.com/Learning-Control-Center/Learning-Control-Center/releases/download/v1.1.0/learning-control-center-v1.1.0.tar.gz.sha256
-sha256sum --check learning-control-center-v1.1.0.tar.gz.sha256
-tar -xzf learning-control-center-v1.1.0.tar.gz
+sudo /opt/learning-control-center/update.sh
 ```
 
-Inspect `RELEASE_ID`, `RELEASE_CHANNEL`, `SOURCE_REVISION`, `RELEASE_MANIFEST`, the changelog, and
-archive contents. Then pass the manifest identity explicitly:
+`sudo lcc-admin update` is a thin alias to that same path. No backup, migration, staging, or source
+resolution logic is duplicated in the administrator wrapper.
+
+The default never changes channel:
+
+- stable resolves the newest final semantic release from the recorded GitHub or Forgejo source;
+- main resolves the recorded repository's public `refs/heads/main` once to a full SHA.
+
+The updater displays current and target identities and asks for confirmation. `--yes` is available
+for deliberate automation, and `--dry-run` resolves and verifies the target without applying it.
+If the exact release/SHA is already active it prints `Learning Control Center is already up to
+date.` and exits zero. Main advances only when the operator runs an update; there is no poller or
+background branch following.
+
+Stable discovery reads the host's public release API, ignores drafts and prereleases, selects the
+highest final `vMAJOR.MINOR.PATCH`, and then downloads that exact release's bound `install.sh`.
+The launcher's embedded archive digest must agree with the published checksum. GitHub is the
+default; Forgejo is used only when it is the installation's explicitly recorded source. There is
+no cross-host fallback.
+
+Rerunning the stable curl command is equivalent:
 
 ```bash
-sudo "$HOME/lcc-releases/v1.1.0/Learning-Control-Center-v1.1.0/scripts/update-ubuntu.sh" apply \
-  --source "$HOME/lcc-releases/v1.1.0/Learning-Control-Center-v1.1.0" \
-  --channel stable \
-  --release-id v1.1.0 \
-  --source-revision FULL_40_CHARACTER_TAG_COMMIT_SHA \
-  --source-repository https://github.com/Learning-Control-Center/Learning-Control-Center.git \
-  --source-ref refs/tags/v1.1.0 \
-  --source-origin https://github.com/Learning-Control-Center/Learning-Control-Center/releases/download
+curl -fsSL https://github.com/Learning-Control-Center/Learning-Control-Center/releases/latest/download/install.sh | sudo bash
 ```
 
-For `main`, first perform a deliberate shallow fetch of public `refs/heads/main`, record the exact
-`FETCH_HEAD^{commit}`, and leave a clean detached checkout. Apply it as channel `main`, release ID
-`main-<full-sha>`, source ref `refs/heads/main`, and that exact source revision. The updater verifies
-the checkout SHA; a moving branch name is never the installed identity.
+The downloaded release-bound launcher installs a fresh host or delegates an older installation to
+the same canonical update engine. A version-specific launcher targets only its embedded release:
 
-The updater first verifies the Ubuntu runtime prerequisites and the candidate's source-bound
-frontend artifact. It creates a new exact-constrained Python virtual environment but does not run
-Node.js/npm on the production host. Missing prerequisites are an operator-visible preflight failure;
-updates do not silently alter system packages. It then compares the deployed database revision with
-the candidate Alembic graph and classifies the transition:
+```bash
+curl -fsSL https://github.com/Learning-Control-Center/Learning-Control-Center/releases/download/v1.0.1/install.sh | sudo bash
+```
+
+It no-ops at v1.0.1 and refuses to downgrade a newer stable installation.
+
+The public update resolver uses the shared bootstrap preflight to install only missing required
+Ubuntu packages from the already documented signed Ubuntu source; it never performs an OS-wide
+upgrade. The canonical update engine then verifies those runtime prerequisites and the candidate's
+source-bound frontend artifact. It creates a new exact-constrained Python virtual environment but
+does not run Node.js/npm on the production host. It then compares the deployed database revision
+with the candidate Alembic graph and classifies the transition:
 
 - same revision: allowed;
 - candidate is a forward descendant: allowed;
@@ -53,18 +61,22 @@ records channel/source/schema/backup identity under `/var/lib/learning-control-c
 activation restores the previous release; if migrations changed the database, it also restores the
 exact pre-update backup before old code restarts.
 
-Run the updater from the verified candidate tree when crossing from v1.0.0 to v1.0.1 so the new
-channel/source contract is available. It recognizes v1.0.0's legacy artifact-content revision for
-history/rollback purposes, while every newly staged release must carry a full Git commit SHA.
+The public resolver and release-bound bootstrap acquire and verify the candidate, then delegate the
+complete immutable identity to `scripts/update-ubuntu.sh apply`. That script remains the sole
+backup/migration/staging/activation engine. It recognizes v1.0.0's legacy artifact-content
+revision for history/rollback, while every newly staged release carries a full Git commit SHA.
 
 ## Channel-transition rules
 
-- Stable to a newer stable tag is the normal update path. Older/equal stable identities are refused.
-- Main to a different exact main SHA is allowed only when deliberately supplied; there is no poller
-  or auto-follow behavior.
-- Stable to main and main to stable require `--confirm-channel-change` in addition to the complete
-  target identity.
-- The same release ID or source SHA is reported as already active and is not rebuilt silently.
+- Stable to newer stable and main to a newly resolved exact main SHA are the default paths.
+- Stable to main requires `sudo /opt/learning-control-center/update.sh --channel main`.
+- Main to stable requires `sudo /opt/learning-control-center/update.sh --channel stable`.
+- The thin aliases `sudo lcc-admin update --channel main` and `sudo lcc-admin update --channel
+  stable` forward those exact requests to the same resolver.
+- Both channel changes show exact current/target identities and require confirmation. The internal
+  engine additionally requires `--confirm-channel-change` from its verified caller.
+- The same release ID or source SHA is a successful no-op and is not rebuilt.
+- Stable downgrades are refused and use rollback instead.
 - Any transition requiring a database downgrade is refused as an update, including channel changes.
 
 GitHub is the canonical default acquisition source. Forgejo may be selected explicitly, but there

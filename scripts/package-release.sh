@@ -166,6 +166,7 @@ required_paths=(
     AGENTS.md CHANGELOG.md README.md LICENSE SECURITY.md logo.png alembic.ini pyproject.toml
     requirements-production.lock backend/app/main.py backend/alembic/env.py
     deploy/Caddyfile.template deploy/learning-control-center.env.example
+    deploy/learning-control-center-update.sh
     deploy/learning-control-center.service deploy/learning-control-center-backup.service
     deploy/learning-control-center-backup.timer docs/INSTALLATION.md docs/PRODUCTION_OPERATIONS.md
     docs/UPDATES.md docs/RELEASING.md frontend/index.html frontend/package.json
@@ -174,7 +175,7 @@ required_paths=(
     scripts/bootstrap-ubuntu.sh scripts/deploy-common.sh scripts/generate-production-env.sh
     scripts/frontend-artifact.py scripts/install-ubuntu.sh scripts/lcc-admin
     scripts/operational-backup.sh scripts/package-release.sh scripts/uninstall-ubuntu.sh
-    scripts/update-ubuntu.sh RELEASE_ID RELEASE_CHANNEL SOURCE_REVISION RELEASE_MANIFEST
+    scripts/update.sh scripts/update-ubuntu.sh RELEASE_ID RELEASE_CHANNEL SOURCE_REVISION RELEASE_MANIFEST
 )
 for relative_path in "${required_paths[@]}"; do
     test -f "$staging_root/$relative_path" || die "Required release file is missing: $relative_path"
@@ -184,6 +185,10 @@ test -x "$staging_root/scripts/bootstrap-ubuntu.sh" || die "Bootstrap script is 
 test -x "$staging_root/scripts/generate-production-env.sh" || \
     die "Environment generator is not executable."
 test -x "$staging_root/scripts/install-ubuntu.sh" || die "Installer is not executable."
+test -x "$staging_root/scripts/update.sh" || die "User-facing updater is not executable."
+test -x "$staging_root/scripts/update-ubuntu.sh" || die "Canonical updater is not executable."
+test -x "$staging_root/deploy/learning-control-center-update.sh" || \
+    die "Persistent update wrapper is not executable."
 test -x "$staging_root/scripts/frontend-artifact.py" || \
     die "Frontend artifact verifier is not executable."
 "$staging_root/scripts/frontend-artifact.py" verify --root "$staging_root" >/dev/null || \

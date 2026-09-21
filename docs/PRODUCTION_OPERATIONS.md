@@ -15,6 +15,7 @@ repository-root `start.sh` or `stop.sh` helpers in production; they run developm
 | Operational backups | `/var/backups/learning-control-center` |
 | Caddy site | `/etc/caddy/Caddyfile.d/learning-control-center.caddy` |
 | Administrator command | `/usr/local/sbin/lcc-admin` |
+| Persistent update entrypoint | `/opt/learning-control-center/update.sh` |
 
 Every immutable release stores `RELEASE_ID`, `RELEASE_CHANNEL`, `SOURCE_REVISION`, and a
 `RELEASE_MANIFEST` containing the selected repository, source ref, revision, and acquisition
@@ -63,7 +64,18 @@ Useful administrator commands:
 sudo lcc-admin status
 sudo lcc-admin health
 sudo lcc-admin logs 200
+sudo /opt/learning-control-center/update.sh
+# Exact thin alias to the same updater:
+sudo lcc-admin update
 ```
+
+The persistent update entrypoint delegates through the active `current` release, so an atomic
+release switch also switches the implementation it invokes without leaving a path to an obsolete
+release. Stable installations discover only final semantic releases from their recorded source;
+main installations resolve their recorded repository's current public `main` to one exact SHA.
+Neither path changes channel unless the operator supplies `--channel stable` or `--channel main`
+and confirms the transition. The complete safety and rollback contract is in
+[`UPDATES.md`](UPDATES.md).
 
 Startup holds an exclusive database-operation lock, upgrades the configured database to Alembic
 head, verifies the production bootstrap/single-user invariant, recovers projection work, backfills

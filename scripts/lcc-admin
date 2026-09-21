@@ -15,6 +15,8 @@ Process lifecycle (delegates to systemd):
   start | stop | restart | status
 
 Operations:
+  update [--channel stable|main] [--yes] [--dry-run]
+                                 Resolve and run the canonical installed updater
   health                         Check the public HTTPS health endpoint
   logs [LINES]                   Show recent application journal entries
   backup                         Run one SQLite-safe operational backup
@@ -41,7 +43,7 @@ test -n "$command_name" || { usage; exit 2; }
 shift
 
 case "$command_name" in
-    status|health|logs|backup-status|show-bootstrap-token|-h|--help|help) ;;
+    status|health|logs|backup-status|show-bootstrap-token|update|-h|--help|help) ;;
     *) lcc_acquire_deployment_lock ;;
 esac
 
@@ -99,6 +101,11 @@ case "$command_name" in
         lines="${1:-100}"
         [[ "$lines" =~ ^[1-9][0-9]*$ ]] || lcc_die "logs line count must be positive."
         journalctl -u "$LCC_SERVICE_NAME" -n "$lines" --no-pager
+        ;;
+    update)
+        test -x "$LCC_UPDATE_ENTRYPOINT" || \
+            lcc_die "Installed update entrypoint is unavailable: $LCC_UPDATE_ENTRYPOINT"
+        exec "$LCC_UPDATE_ENTRYPOINT" "$@"
         ;;
     backup)
         test "$#" -eq 0 || lcc_die "backup accepts no arguments."

@@ -9,10 +9,12 @@ All notable public changes to Learning Control Center are recorded here. The pro
 
 - Human-first stable installation with secure generated production configuration and guarded
   first-user bootstrap-token handling.
-- An explicit DEVELOPMENT / UNSTABLE `main` channel that resolves once to an exact Git commit and
-  never follows the branch automatically.
+- An explicit current-`main` channel that resolves validated public code once to an exact Git
+  commit and never follows the moving branch automatically.
 - Installed channel/source metadata and channel-aware update and rollback records.
 - Automatic Ubuntu 24.04 prerequisite provisioning from signed Ubuntu repositories.
+- A persistent installed updater, also available through `lcc-admin update`, that discovers the
+  newest final stable release or the current exact `main` revision without changing channel.
 
 ### Changed
 
@@ -20,6 +22,8 @@ All notable public changes to Learning Control Center are recorded here. The pro
   digest must agree with the published checksum.
 - Production hosts now consume a verified frontend artifact built during release packaging, so
   Node.js/npm are no longer server dependencies.
+- Re-running a stable release launcher now installs, safely updates through the canonical engine,
+  reports an exact-version no-op, or refuses an implicit downgrade as appropriate.
 
 ## [1.0.0] - 2026-09-21
 

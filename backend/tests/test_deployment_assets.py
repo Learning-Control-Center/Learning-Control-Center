@@ -109,6 +109,9 @@ def test_isolated_installer_is_idempotent_and_renders_non_secret_caddy(tmp_path:
     assert "channel=stable" in deployment_record
     assert f"source_revision={source_revision}" in deployment_record
     assert (current / "scripts" / "lcc-admin").stat().st_mode & stat.S_IXUSR
+    assert (
+        test_root / "opt" / "learning-control-center" / "update.sh"
+    ).stat().st_mode & stat.S_IXUSR
 
     installed_environment = test_root / "etc" / "learning-control-center.env"
     assert stat.S_IMODE(installed_environment.stat().st_mode) == 0o640
@@ -152,7 +155,7 @@ def test_isolated_installer_is_idempotent_and_renders_non_secret_caddy(tmp_path:
         text=True,
     )
     assert different_release.returncode != 0
-    assert "use update-ubuntu.sh" in different_release.stderr
+    assert "Another release is already active" in different_release.stderr
 
     changed_environment = tmp_path / "changed-production.env"
     changed_environment.write_text(
@@ -493,6 +496,10 @@ def test_units_admin_and_update_assets_encode_production_safety() -> None:
     ).read_text()
     admin = (REPOSITORY_ROOT / "scripts" / "lcc-admin").read_text()
     updater = (REPOSITORY_ROOT / "scripts" / "update-ubuntu.sh").read_text()
+    update_frontend = (REPOSITORY_ROOT / "scripts" / "update.sh").read_text()
+    persistent_update = (
+        REPOSITORY_ROOT / "deploy" / "learning-control-center-update.sh"
+    ).read_text()
     assert "--workers 1 --no-proxy-headers" in service
     assert "EnvironmentFile=/etc/learning-control-center.env" in service
     assert "UMask=0077" in service and "NoNewPrivileges=true" in service
@@ -522,6 +529,12 @@ def test_units_admin_and_update_assets_encode_production_safety() -> None:
     assert "main-$source_revision" in updater
     assert "lcc-ops" in updater and "restore --from" in updater
     assert "show-bootstrap-token" in admin
+    assert 'exec "$LCC_UPDATE_ENTRYPOINT" "$@"' in admin
+    assert "releases?per_page=100" in update_frontend
+    assert "releases?limit=100" in update_frontend
+    assert "prerelease" in update_frontend and "draft" in update_frontend
+    assert 'exec "$current_updater" "$@"' in persistent_update
+    assert "install_update_entrypoint" in updater
     assert "Source revision:" in admin and "Channel:" in admin
     installer = (REPOSITORY_ROOT / "scripts" / "install-ubuntu.sh").read_text()
     assert "--no-build-isolation" in installer
@@ -616,6 +629,10 @@ def test_update_channel_and_migration_preflight_contracts(tmp_path: Path) -> Non
         == 0
     )
     assert (
+        transition("stable", "v1.0.0", old_sha, "main", f"main-{old_sha}", old_sha, "1").returncode
+        == 0
+    )
+    assert (
         transition("main", f"main-{old_sha}", old_sha, "stable", "v1.0.1", new_sha, "1").returncode
         == 0
     )
@@ -625,14 +642,13 @@ def test_update_channel_and_migration_preflight_contracts(tmp_path: Path) -> Non
     assert "already active" in same.stderr
     backward = transition("stable", "v1.0.1", old_sha, "stable", "v1.0.0", new_sha, "0")
     assert backward.returncode != 0
-    assert "requires a newer vMAJOR.MINOR.PATCH release" in backward.stderr
+    assert "requires a newer semantic release" in backward.stderr
     prerelease = transition("stable", "v1.0.0", old_sha, "stable", "v1.0.1-rc.1", new_sha, "0")
-    assert prerelease.returncode != 0
-    assert "vMAJOR.MINOR.PATCH" in prerelease.stderr
+    assert prerelease.returncode == 0
     build_metadata = transition(
         "stable", "v1.0.0", old_sha, "stable", "v1.0.1+build.1", new_sha, "0"
     )
-    assert build_metadata.returncode != 0
+    assert build_metadata.returncode == 0
 
     revisions = sorted(
         path.stem

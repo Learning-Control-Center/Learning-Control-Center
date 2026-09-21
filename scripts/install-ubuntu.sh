@@ -99,6 +99,7 @@ esac
 if test "$install_root" = "/"; then
     lcc_validate_https_url "$source_repository" "Source repository"
     lcc_validate_https_url "$source_origin" "Source origin"
+    lcc_validate_source_metadata "$release_channel" "$source_repository" "$source_origin"
 fi
 source_root="$(readlink -f "$source_root")"
 test ! -L "$environment_source" || lcc_die "Environment source must not be a symbolic link."
@@ -151,6 +152,7 @@ caddy_site="$(lcc_prefixed_path "$install_root" "$LCC_CADDY_SITE")"
 caddy_main="$(lcc_prefixed_path "$install_root" "/etc/caddy/Caddyfile")"
 systemd_directory="$(lcc_prefixed_path "$install_root" "/etc/systemd/system")"
 admin_link="$(lcc_prefixed_path "$install_root" "/usr/local/sbin/lcc-admin")"
+update_entrypoint="$(lcc_prefixed_path "$install_root" "$LCC_UPDATE_ENTRYPOINT")"
 release_directory="$application_root/releases/$release_id"
 
 if test -L "$current_release"; then
@@ -377,6 +379,8 @@ run install -m 0644 "$asset_release/deploy/learning-control-center-backup.servic
     "$systemd_directory/learning-control-center-backup.service"
 run install -m 0644 "$asset_release/deploy/learning-control-center-backup.timer" \
     "$systemd_directory/learning-control-center-backup.timer"
+run install -m 0755 "$asset_release/deploy/learning-control-center-update.sh" \
+    "$update_entrypoint"
 
 rendered_caddy="$(mktemp)"
 caddy_backup_directory=""
@@ -480,4 +484,5 @@ After installation succeeds, delete the temporary source copy of the environment
 Inspect operation with:
   sudo lcc-admin status
   sudo lcc-admin backup-status
+  sudo $LCC_UPDATE_ENTRYPOINT
 EOF

@@ -13,6 +13,7 @@ LCC_SERVICE_USER="lcc"
 LCC_SERVICE_GROUP="lcc"
 LCC_APPLICATION_ROOT="/opt/learning-control-center"
 LCC_CURRENT_RELEASE="/opt/learning-control-center/current"
+LCC_UPDATE_ENTRYPOINT="/opt/learning-control-center/update.sh"
 LCC_ENVIRONMENT_FILE="/etc/learning-control-center.env"
 LCC_DATA_DIRECTORY="/var/lib/learning-control-center"
 LCC_DATABASE_FILE="/var/lib/learning-control-center/lcc.sqlite3"
@@ -20,6 +21,10 @@ LCC_BACKUP_DIRECTORY_DEFAULT="/var/backups/learning-control-center"
 LCC_CADDY_SITE="/etc/caddy/Caddyfile.d/learning-control-center.caddy"
 LCC_CADDY_IMPORT="import /etc/caddy/Caddyfile.d/*.caddy"
 LCC_CADDY_BINARY="/usr/bin/caddy"
+LCC_GITHUB_REPOSITORY="https://github.com/Learning-Control-Center/Learning-Control-Center.git"
+LCC_GITHUB_ASSET_ORIGIN="https://github.com/Learning-Control-Center/Learning-Control-Center/releases/download"
+LCC_FORGEJO_REPOSITORY="https://forgejo.waqsea.com/Learning-Control-Center/Learning-Control-Center.git"
+LCC_FORGEJO_ASSET_ORIGIN="https://forgejo.waqsea.com/Learning-Control-Center/Learning-Control-Center/releases/download"
 
 lcc_die() {
     echo "ERROR: $*" >&2
@@ -50,9 +55,82 @@ lcc_validate_release_channel() {
     esac
 }
 
+lcc_compare_stable_release_ids() {
+    local left="$1"
+    local right="$2"
+    /usr/bin/python3 - "$left" "$right" <<'PY'
+import re
+import sys
+
+pattern = re.compile(
+    r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+    r"(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$"
+)
+
+
+def parse(value: str) -> tuple[tuple[int, int, int], tuple[tuple[int, object], ...] | None]:
+    match = pattern.fullmatch(value)
+    if match is None:
+        raise SystemExit(f"invalid semantic release identity: {value}")
+    core = tuple(int(part) for part in match.groups()[:3])
+    prerelease = match.group(4)
+    if prerelease is None:
+        return core, None
+    identifiers: list[tuple[int, object]] = []
+    for identifier in prerelease.split("."):
+        if identifier.isdigit():
+            identifiers.append((0, int(identifier)))
+        else:
+            identifiers.append((1, identifier))
+    return core, tuple(identifiers)
+
+
+def compare(left: str, right: str) -> int:
+    left_core, left_pre = parse(left)
+    right_core, right_pre = parse(right)
+    if left_core != right_core:
+        return -1 if left_core < right_core else 1
+    if left_pre is None and right_pre is None:
+        return 0
+    if left_pre is None:
+        return 1
+    if right_pre is None:
+        return -1
+    for left_item, right_item in zip(left_pre, right_pre, strict=False):
+        if left_item == right_item:
+            continue
+        if left_item[0] != right_item[0]:
+            return -1 if left_item[0] < right_item[0] else 1
+        return -1 if left_item[1] < right_item[1] else 1
+    if len(left_pre) == len(right_pre):
+        return 0
+    return -1 if len(left_pre) < len(right_pre) else 1
+
+
+print(compare(sys.argv[1], sys.argv[2]))
+PY
+}
+
+lcc_is_final_stable_release_id() {
+    [[ "$1" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+}
+
 lcc_validate_source_revision() {
     [[ "$1" =~ ^[0-9a-f]{40}$ ]] || \
         lcc_die "Source revision must be one lowercase 40-character Git commit SHA."
+}
+
+lcc_validate_source_metadata() {
+    local channel="$1"
+    local repository="$2"
+    local origin="$3"
+    case "$channel|$repository|$origin" in
+        "stable|$LCC_GITHUB_REPOSITORY|$LCC_GITHUB_ASSET_ORIGIN"|\
+        "stable|$LCC_FORGEJO_REPOSITORY|$LCC_FORGEJO_ASSET_ORIGIN"|\
+        "main|$LCC_GITHUB_REPOSITORY|$LCC_GITHUB_REPOSITORY"|\
+        "main|$LCC_FORGEJO_REPOSITORY|$LCC_FORGEJO_REPOSITORY") ;;
+        *) lcc_die "Source repository/origin do not identify a supported GitHub or Forgejo channel source." ;;
+    esac
 }
 
 lcc_validate_public_hostname() {
@@ -218,29 +296,21 @@ lcc_validate_update_transition() {
     local new_release_id="$5"
     local new_source_revision="$6"
     local confirm_channel_change="${7:-0}"
-    if test "$new_release_id" = "$old_release_id" || \
-        test "$new_source_revision" = "$old_source_revision"; then
+    if test "$new_channel" = "$old_channel" && \
+        { test "$new_release_id" = "$old_release_id" || \
+            test "$new_source_revision" = "$old_source_revision"; }; then
         lcc_die "The requested immutable source identity is already active."
     fi
     if test "$new_channel" != "$old_channel" && test "$confirm_channel_change" -ne 1; then
         lcc_die "Changing from $old_channel to $new_channel requires --confirm-channel-change."
     fi
     if test "$new_channel" = stable && test "$old_channel" = stable; then
-        /usr/bin/python3 - "$old_release_id" "$new_release_id" <<'PY' || \
-            lcc_die "Stable apply requires a newer vMAJOR.MINOR.PATCH release; use rollback for older releases."
-import re
-import sys
-
-pattern = re.compile(r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
-versions = []
-for value in sys.argv[1:]:
-    match = pattern.fullmatch(value)
-    if match is None:
-        raise SystemExit(1)
-    versions.append(tuple(int(part) for part in match.groups()))
-if versions[1] <= versions[0]:
-    raise SystemExit(1)
-PY
+        local stable_comparison
+        stable_comparison="$(lcc_compare_stable_release_ids "$old_release_id" "$new_release_id")" || \
+            lcc_die "Stable update identities are not valid semantic releases."
+        if test "$stable_comparison" -ge 0; then
+            lcc_die "Stable apply requires a newer semantic release; use rollback for an older release."
+        fi
     fi
 }
 
