@@ -16,6 +16,12 @@ repository-root `start.sh` or `stop.sh` helpers in production; they run developm
 | Caddy site | `/etc/caddy/Caddyfile.d/learning-control-center.caddy` |
 | Administrator command | `/usr/local/sbin/lcc-admin` |
 
+Every immutable release stores `RELEASE_ID`, `RELEASE_CHANNEL`, `SOURCE_REVISION`, and a
+`RELEASE_MANIFEST` containing the selected repository, source ref, revision, and acquisition
+origin. Activation/update records under `/var/lib/learning-control-center` add timestamps, schema
+revisions, and backup lineage. `sudo lcc-admin status` reports the active channel, release ID, and
+full source SHA before the systemd status.
+
 The `lcc` account is a non-login system account. Application releases are read-only to that
 account. Only the data and backup directories are writable. Operational backups contain password
 hashes and authentication/session state and must remain protected.
@@ -58,13 +64,17 @@ The initial installation starts with a strong `LCC_BOOTSTRAP_TOKEN`. Open the co
 create the first user, and immediately run:
 
 ```bash
+sudo lcc-admin show-bootstrap-token
 sudo lcc-admin finalize-bootstrap
 ```
 
-The command stops LCC, verifies that the current database is at the expected schema with exactly
-one user, removes only the bootstrap-token line atomically, restarts the service, and verifies the
-public HTTPS health endpoint. An initialized production database intentionally refuses to restart
-while a bootstrap token remains configured.
+`show-bootstrap-token` requires root and a controlling terminal, writes the value only to that
+terminal, and refuses once any user exists. Interactive installation shows it once after the HTTPS
+health check; non-interactive installation never prints it. `finalize-bootstrap` stops LCC,
+verifies that the current database is at the expected schema with exactly one user, removes only
+the bootstrap-token line atomically, restarts the service, and verifies the public HTTPS health
+endpoint. An initialized production database intentionally refuses to restart while a bootstrap
+token remains configured.
 
 ## Scheduled and manual backups
 
@@ -84,9 +94,10 @@ timer; it is safe while LCC is running.
 The backup script uses SQLite's online backup operation, then requires successful integrity and
 foreign-key checks. It also requires the copied database revision to equal the active release's
 Alembic head. Each `0600` database file has a `0600` manifest containing its checksum, schema
-revision, release ID, source revision, and database path. `LCC_BACKUP_RETENTION_COUNT` defaults to
-14 and applies only to scheduled backups. Pre-update, pre-rollback, pre-migration, pre-import,
-pre-restore, and pre-recovery backups are not removed by scheduled retention.
+revision, channel, release ID, full source revision, source repository/ref/origin, and database
+path. `LCC_BACKUP_RETENTION_COUNT` defaults to 14 and applies only to scheduled backups. Pre-update,
+pre-rollback, pre-migration, pre-import, pre-restore, and pre-recovery backups are not removed by
+scheduled retention.
 
 ## Offline restore
 

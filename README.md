@@ -37,36 +37,35 @@ been exercised remain explicitly `Not executed`; see the [product QA record](doc
   restore, and password recovery.
 - Keeps the deterministic core fully functional without an LLM or cloud service.
 
-## Quick self-hosting
+## Quick self-hosting — stable release
 
 The supported production baseline is **Ubuntu Server 24.04 LTS** with a DNS hostname pointing to
-the server and inbound ports 80/443 available. Published releases provide a versioned archive and
-SHA-256 checksum. Production installs never default to `main` or an unspecified latest build.
-
-Prepare the production environment file first; it contains secrets and must remain root-readable:
+the server and inbound ports 80/443 available. The recommended installer is permanently bound to
+one published release archive and its SHA-256 checksum:
 
 ```bash
-sudo curl -fsSLo /root/learning-control-center.env \
-  https://raw.githubusercontent.com/Learning-Control-Center/Learning-Control-Center/v1.0.0/deploy/learning-control-center.env.example
-sudo chmod 0600 /root/learning-control-center.env
-sudo editor /root/learning-control-center.env
+curl -fsSL https://github.com/Learning-Control-Center/Learning-Control-Center/releases/download/v1.0.1/install.sh | sudo bash
 ```
 
-After replacing every `CHANGE_ME` value, run the release-pinned bootstrap:
+This command becomes available when the `v1.0.1` release assets are published. It asks for the
+public hostname, application timezone, and confirmation; generates the production secrets and
+configuration privately; verifies the matching archive; and delegates host changes to the
+canonical installer. For a download-and-review alternative, advanced configuration, or manual
+installation, use the complete [installation guide](docs/INSTALLATION.md).
+
+## Development build — `main` (unstable)
+
+For deliberate testing of the current public `main` branch:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Learning-Control-Center/Learning-Control-Center/v1.0.0/scripts/bootstrap-ubuntu.sh \
-  | sudo bash -s -- \
-      --ref v1.0.0 \
-      --domain lcc.example.com \
-      --env-file /root/learning-control-center.env
+curl -fsSL https://raw.githubusercontent.com/Learning-Control-Center/Learning-Control-Center/v1.0.1/scripts/bootstrap-ubuntu.sh \
+  | sudo bash -s -- --channel main
 ```
 
-The bootstrap downloads and verifies the matching GitHub release archive, then delegates all host
-provisioning to the canonical installer. Do not use this command until the referenced GitHub tag
-and release assets have been published. Review the complete [installation guide](docs/INSTALLATION.md)
-for prerequisites, DNS, firewall, configuration, bootstrap finalization, and the manual source
-installation path.
+The installer displays a **DEVELOPMENT / UNSTABLE** warning and requires the exact confirmation
+`INSTALL MAIN`. It resolves `main` once, checks out that exact 40-character commit SHA, records it,
+and never follows the moving branch automatically. Stable releases remain the recommended
+production path. Neither channel silently selects `latest`.
 
 Production administration uses systemd and `lcc-admin`:
 

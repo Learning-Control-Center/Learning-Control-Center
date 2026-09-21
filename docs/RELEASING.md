@@ -1,102 +1,121 @@
 # Public release process
 
-The canonical public repository is:
+Canonical public repository:
 
 `https://github.com/Learning-Control-Center/Learning-Control-Center.git`
 
-This document describes the intended process; it does not mean that a tag or GitHub release has
-already been published.
+Explicit Forgejo mirror:
 
-## Trust boundary
+`https://forgejo.waqsea.com/Learning-Control-Center/Learning-Control-Center.git`
 
-Prepare public releases only from the separately sanitized public repository. Its selected public
-history must contain no `memory-bank/` path, private author email, internal refs, local databases,
-backups, or secrets. Never publish the private source repository with `--mirror` or `--all`.
+This is the preparation workflow for v1.0.1; it does not claim that its tag or remote releases
+already exist.
 
-The release scripts do not fetch or select a new source revision. The operator chooses and reviews
-the exact commit before tagging it.
+## Trust and branch model
 
-## Validate the candidate
+Development occurs on sanitized `dev`; reviewed release work flows `dev` to sanitized `main`.
+Public history must contain no private `memory-bank/` path, private author email, internal refs,
+databases, backups, or secrets. Push only explicitly selected refs. Never use `--all`, `--mirror`,
+or wildcard branch refspecs against the public remote.
 
-From a clean sanitized `main` checkout:
+Because `dev` and `main` now both descend from the sanitized public history, the one-time v1.0.0
+history rewrite, private-history email rewrite, separate sanitized-clone regeneration, and branch
+replacement are not repeated for v1.0.1. Current-tree and reachable-history privacy/secret checks
+remain mandatory before every release.
+
+## Validate and merge the candidate
+
+1. Complete implementation and focused tests on `dev`.
+2. Run backend/frontend, deployment, bootstrap, packaging, ShellCheck, Gitleaks, documentation-link,
+   disposable-deployment, and diff/line-ending checks.
+3. Review exact changes, dependency locks, migrations, update/rollback behavior, and release notes.
+4. Merge reviewed `dev` into `main` without importing any private archived history.
+5. Re-run critical validation and public-history/privacy checks on clean `main`.
+6. Confirm `pyproject.toml`, frontend package metadata, API/export version metadata, and changelog all
+   identify 1.0.1.
+
+Record the exact clean `main` candidate SHA. Confirm the configured development database hash and
+mtime did not change.
+
+## Tag and deterministic assets
+
+Only after validation succeeds, create the annotated tag on the exact public candidate:
 
 ```bash
-.venv/bin/ruff format --check backend scripts
-.venv/bin/ruff check backend scripts
-.venv/bin/mypy backend/app
-.venv/bin/pytest
-cd frontend
-npm ci
-npm run lint
-npm run test
-npm run build
+git tag -a v1.0.1 -m "Learning Control Center v1.0.1"
 ```
 
-Also run ShellCheck, Gitleaks against the current tree and full intended public history, documentation
-link checks, the disposable deployment test, and `git diff --check`. Record the exact candidate SHA
-and verify that the configured development database hash and modification time did not change.
-
-## Prepare the tag and assets
-
-Confirm that `pyproject.toml`, `frontend/package.json`, and the API version all identify `1.0.0`, then
-create the annotated tag in the sanitized repository:
-
-```bash
-git tag -a v1.0.0 -m "Learning Control Center v1.0.0"
-```
-
-Do not sign the tag unless an appropriate signing key is deliberately configured. Package exactly
-the tagged tree into a destination outside the repository:
+Do not sign unless an appropriate signing key is deliberately configured. Package the tagged tree
+outside the repository:
 
 ```bash
 scripts/package-release.sh \
-  --release-id v1.0.0 \
-  --source-ref v1.0.0 \
-  --output-dir /tmp/lcc-v1.0.0-release
+  --release-id v1.0.1 \
+  --source-ref v1.0.1 \
+  --output-dir /tmp/lcc-v1.0.1-release
 ```
 
-The command produces these GitHub release assets:
+The command produces exactly:
 
-- `learning-control-center-v1.0.0.tar.gz`
-- `learning-control-center-v1.0.0.tar.gz.sha256`
+- `install.sh` — deterministic stable-only launcher with embedded `v1.0.1` and archive SHA-256;
+- `learning-control-center-v1.0.1.tar.gz` — deterministic public release tree;
+- `learning-control-center-v1.0.1.tar.gz.sha256` — published archive checksum.
 
-The archive has one top-level directory, `Learning-Control-Center-v1.0.0/`, plus `RELEASE_ID`,
-`SOURCE_REVISION`, and `RELEASE_MANIFEST` identity files. It is built from tracked content, omits
-private/runtime/test-fixture paths, preserves executable modes, normalizes timestamps and ownership,
-and is gzip-encoded without a variable header timestamp.
+The archive has top-level directory `Learning-Control-Center-v1.0.1/` and immutable
+`RELEASE_ID`, `RELEASE_CHANNEL`, `SOURCE_REVISION`, and `RELEASE_MANIFEST` files. It excludes Git
+metadata, contributor-only tests, private/runtime state, local environments, databases, and backups;
+preserves executable modes; normalizes ownership/timestamps; and uses deterministic gzip headers.
 
-Verify the checksum and inspect the complete member list before publication:
+Package twice into empty directories and require byte-identical archives, checksums, and launchers.
+Then inspect all assets:
 
 ```bash
-cd /tmp/lcc-v1.0.0-release
-sha256sum --check learning-control-center-v1.0.0.tar.gz.sha256
-tar -tzf learning-control-center-v1.0.0.tar.gz
+cd /tmp/lcc-v1.0.1-release
+sha256sum --check learning-control-center-v1.0.1.tar.gz.sha256
+tar -tzf learning-control-center-v1.0.1.tar.gz
+grep -E '^readonly (embedded_stable_ref|embedded_archive_sha256|stable_only_launcher)=' install.sh
 ```
+
+Exercise the bound `install.sh` against local assets through the dry-run/test seam. Exercise generic
+stable bootstrap and both interactive and commit-asserted main acquisition. Reconfirm no secret is
+printed or passed on argv.
 
 ## Publication order
 
-1. Reconfirm that only sanitized `main` and the intended annotated tag will be selected.
-2. Push sanitized `main` explicitly to the canonical GitHub repository.
-3. Push only `refs/tags/v1.0.0`.
-4. Create the GitHub release for `v1.0.0` and upload both generated assets without renaming them.
-5. Re-download both assets and repeat checksum and archive inspection.
-6. Exercise `scripts/bootstrap-ubuntu.sh --dry-run` against the published assets.
-7. Publish release notes based on `CHANGELOG.md`; only then advertise the quick-install command.
+1. Reconfirm clean sanitized `main`, exact tag target, intended refs, Gitleaks/history results, and
+   all three asset hashes.
+2. Explicitly push only `main` and `refs/tags/v1.0.1` to Forgejo; create the Forgejo release and
+   upload the three assets without renaming them.
+3. Explicitly push only `main` and `refs/tags/v1.0.1` to GitHub; create the GitHub release and upload
+   the same three byte-identical assets.
+4. Re-download every asset from each host and verify hashes, archive member safety, embedded
+   `install.sh` identity/digest, and exact tag/source revision.
+5. Run the stable installer test from the canonical GitHub URL.
+6. Run the main-channel installer test and verify the recorded SHA equals the deliberately resolved
+   public `main` tip.
+7. Complete a real supported Ubuntu acceptance test: install, HTTPS health, first-user bootstrap,
+   finalization, systemd restart, scheduled/manual backup, update preflight, and preserve-by-default
+   uninstall.
+8. Publish release notes from `CHANGELOG.md` and advertise the quick-install command only after the
+   assets and acceptance checks succeed.
 
-Never use `main`, `latest`, an unreviewed moving ref, or an automatically resolved tag as the
-production install identity.
+The stable command is:
 
-The release-pinned bootstrap URL is:
+```bash
+curl -fsSL https://github.com/Learning-Control-Center/Learning-Control-Center/releases/download/v1.0.1/install.sh | sudo bash
+```
 
-`https://raw.githubusercontent.com/Learning-Control-Center/Learning-Control-Center/v1.0.0/scripts/bootstrap-ubuntu.sh`
+The explicit unstable-main command uses the immutable v1.0.1 bootstrap implementation:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Learning-Control-Center/Learning-Control-Center/v1.0.1/scripts/bootstrap-ubuntu.sh \
+  | sudo bash -s -- --channel main
+```
 
 ## Updates and rollback
 
-The bootstrap is for initial acquisition and installation. Existing installations use the
-controlled update workflow in `UPDATES.md` with an extracted, checksum-verified release archive.
-The updater creates a pre-update operational backup before migration and activation.
-
-Code-only rollback is allowed only when the target code expects the current database schema. A
-schema-crossing rollback requires the matching pre-update database backup and explicit acceptance
-of database replacement. Do not describe rollback as lossless when application changes occurred
-after that backup.
+Bootstrap is for fresh install or exact-identity repair, never an implicit update. Existing
+installations use the controlled workflow in [`UPDATES.md`](UPDATES.md). The updater stages/builds
+before stopping services, classifies Alembic compatibility, creates a pre-update backup, and records
+immutable source identity. Code-only rollback is allowed only at the current database schema;
+schema-crossing rollback requires the matching database backup and explicit replacement acceptance.

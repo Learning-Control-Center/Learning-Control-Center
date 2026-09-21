@@ -42,7 +42,7 @@ Portable schema V9 is an internal database-row and immutable-history representat
   "schemaVersion": 1,
   "packageType": "roadmap_update",
   "packageId": "example-package-001",
-  "appVersion": "1.0.0",
+  "appVersion": "1.0.1",
   "createdAt": "2026-09-04T18:30:00.000Z",
   "payload": {}
 }
@@ -102,7 +102,7 @@ Representative shape (IDs and metric details vary):
   "schemaVersion": 1,
   "packageType": "analysis_snapshot",
   "packageId": "6db58de0-794d-49ec-86f6-2ea9bdaf84e1",
-  "appVersion": "1.0.0",
+  "appVersion": "1.0.1",
   "createdAt": "2026-09-04T18:30:00.000Z",
   "payload": {
     "scope": {
@@ -238,7 +238,7 @@ The following is an **application-generated representative structure**, retained
   "schemaVersion": 9,
   "packageType": "portable_logical_backup",
   "packageId": "example-empty-portable-v9",
-  "appVersion": "1.0.0",
+  "appVersion": "1.0.1",
   "createdAt": "2026-09-04T18:30:00.000Z",
   "payload": {
     "manifest": {
@@ -525,7 +525,7 @@ This synthetic **legacy V1 Roadmap** package is for demonstrations and populated
   "schemaVersion": 1,
   "packageType": "roadmap_replace",
   "packageId": "example-realistic-roadmap-v1",
-  "appVersion": "1.0.0",
+  "appVersion": "1.0.1",
   "createdAt": "2026-09-04T18:30:00.000Z",
   "payload": {
     "roadmap": {
@@ -585,7 +585,7 @@ This synthetic **legacy V1 Roadmap** package is for demonstrations and populated
 | `schemaVersion` | integer | yes | `1` for legacy mutation and `analysis_snapshot` packages; portable backup/restore accepts `1` through `9` and exports `9` | `9` |
 | `packageType` | string | yes | One accepted import type listed above; exports use `analysis_snapshot` or `portable_logical_backup` | `roadmap_update` |
 | `packageId` | string | yes | Non-empty, at most 255 characters; must not have been applied before | `example-package-001` |
-| `appVersion` | string | yes | Producer application version; recorded, not semantically compared | `1.0.0` |
+| `appVersion` | string | yes | Producer application version; recorded, not semantically compared | `1.0.1` |
 | `createdAt` | string | yes | Producer timestamp; exports emit RFC 3339 UTC | `2026-09-04T18:30:00.000Z` |
 | `payload` | object | yes | Strict package-specific object | `{"roadmap": {...}}` |
 
@@ -657,7 +657,7 @@ This disposable example is a complete legacy V1 Roadmap version and can be copie
   "schemaVersion": 1,
   "packageType": "roadmap_update",
   "packageId": "example-minimal-roadmap-v1",
-  "appVersion": "1.0.0",
+  "appVersion": "1.0.1",
   "createdAt": "2026-09-04T18:30:00.000Z",
   "payload": {
     "roadmap": {

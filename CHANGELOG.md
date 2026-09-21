@@ -3,6 +3,21 @@
 All notable public changes to Learning Control Center are recorded here. The project follows
 [Semantic Versioning](https://semver.org/) for published release identities.
 
+## [1.0.1] - Unreleased
+
+### Added
+
+- Human-first stable installation with secure generated production configuration and guarded
+  first-user bootstrap-token handling.
+- An explicit DEVELOPMENT / UNSTABLE `main` channel that resolves once to an exact Git commit and
+  never follows the branch automatically.
+- Installed channel/source metadata and channel-aware update and rollback records.
+
+### Changed
+
+- Stable releases now include a deterministic release-bound `install.sh` whose embedded archive
+  digest must agree with the published checksum.
+
 ## [1.0.0] - 2026-09-21
 
 Initial public release.
@@ -28,3 +43,4 @@ Initial public release.
   recorded in `frontend/qa/platform-qa-ledger.json`.
 
 [1.0.0]: https://github.com/Learning-Control-Center/Learning-Control-Center/releases/tag/v1.0.0
+[1.0.1]: https://github.com/Learning-Control-Center/Learning-Control-Center/compare/v1.0.0...main
