@@ -11,37 +11,34 @@ sudo /opt/learning-control-center/update.sh
 `sudo lcc-admin update` is a thin alias to that same path. No backup, migration, staging, or source
 resolution logic is duplicated in the administrator wrapper.
 
-The default never changes channel:
+The updater always targets validated `main`. It reads the installed source metadata, resolves that
+same GitHub or Forgejo repository's public `refs/heads/main` once to a full SHA, and compares it
+with the installed source revision. If a main installation already has that SHA it prints
+`Learning Control Center is already up to date.` and exits zero. Otherwise it displays the current
+channel/release/SHA and target main SHA, then asks for confirmation. `--yes` is available for
+deliberate automation, and `--dry-run` resolves and verifies the target without applying it.
 
-- stable resolves the newest final semantic release from the recorded GitHub or Forgejo source;
-- main resolves the recorded repository's public `refs/heads/main` once to a full SHA.
+Main advances only when the operator runs an update; there is no poller or background branch
+following. A release-channel installation is a deliberate one-time channel migration: the updater
+shows `stable -> main`, obtains confirmation, and passes `--confirm-channel-change` only to the
+verified canonical update engine.
 
-The updater displays current and target identities and asks for confirmation. `--yes` is available
-for deliberate automation, and `--dry-run` resolves and verifies the target without applying it.
-If the exact release/SHA is already active it prints `Learning Control Center is already up to
-date.` and exits zero. Main advances only when the operator runs an update; there is no poller or
-background branch following.
-
-Stable discovery reads the host's public release API, ignores drafts and prereleases, selects the
-highest final `vMAJOR.MINOR.PATCH`, and then downloads that exact release's bound `install.sh`.
-The launcher's embedded archive digest must agree with the published checksum. GitHub is the
-default; Forgejo is used only when it is the installation's explicitly recorded source. There is
-no cross-host fallback.
-
-Rerunning the stable curl command is equivalent:
+Rerunning the canonical main-first curl command is equivalent:
 
 ```bash
-curl -fsSL https://github.com/Learning-Control-Center/Learning-Control-Center/releases/latest/download/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/Learning-Control-Center/Learning-Control-Center/main/scripts/bootstrap-ubuntu.sh | sudo bash
 ```
 
-The downloaded release-bound launcher installs a fresh host or delegates an older installation to
-the same canonical update engine. A version-specific launcher targets only its embedded release:
+It installs a fresh host, no-ops when the exact main SHA is already active, or delegates a changed
+SHA to the same canonical update engine. A version-specific launcher remains available when an
+operator intentionally wants an immutable pinned release snapshot:
 
 ```bash
 curl -fsSL https://github.com/Learning-Control-Center/Learning-Control-Center/releases/download/v1.0.1/install.sh | sudo bash
 ```
 
-It no-ops at v1.0.1 and refuses to downgrade a newer stable installation.
+It no-ops at v1.0.1, refuses to downgrade a newer stable installation, and does not silently move
+that installation to main. Normal update discovery does not query release APIs or `releases/latest`.
 
 The public update resolver uses the shared bootstrap preflight to install only missing required
 Ubuntu packages from the already documented signed Ubuntu source; it never performs an OS-wide
@@ -55,29 +52,30 @@ with the candidate Alembic graph and classifies the transition:
 - candidate is backward: refused; use database-aware rollback;
 - divergent or unknown: refused before service stop.
 
-Only after the candidate is fully staged does it stop the timer/application, create an offline `pre-update` backup, migrate with candidate
-code, activates atomically, updates units/Caddy, starts services, checks public HTTPS health, and
-records channel/source/schema/backup identity under `/var/lib/learning-control-center`. Failed
+Only after the candidate is fully staged does the engine stop the timer/application, create an
+offline `pre-update` backup, migrate with candidate code, activate atomically, update units/Caddy,
+start services, check public HTTPS health, and record channel/source/schema/backup identity under
+`/var/lib/learning-control-center`. Failed
 activation restores the previous release; if migrations changed the database, it also restores the
 exact pre-update backup before old code restarts.
 
-The public resolver and release-bound bootstrap acquire and verify the candidate, then delegate the
-complete immutable identity to `scripts/update-ubuntu.sh apply`. That script remains the sole
-backup/migration/staging/activation engine. It recognizes v1.0.0's legacy artifact-content
-revision for history/rollback, while every newly staged release carries a full Git commit SHA.
+The main-first resolver and release-bound bootstrap acquire and verify their candidate, then
+delegate the complete immutable identity to `scripts/update-ubuntu.sh apply`. That script remains
+the sole backup/migration/staging/activation engine. It recognizes v1.0.0's legacy
+artifact-content revision for migration/history/rollback, while every newly staged deployment
+carries a full Git commit SHA.
 
-## Channel-transition rules
+## Channel and pinned-release rules
 
-- Stable to newer stable and main to a newly resolved exact main SHA are the default paths.
-- Stable to main requires `sudo /opt/learning-control-center/update.sh --channel main`.
-- Main to stable requires `sudo /opt/learning-control-center/update.sh --channel stable`.
-- The thin aliases `sudo lcc-admin update --channel main` and `sudo lcc-admin update --channel
-  stable` forward those exact requests to the same resolver.
-- Both channel changes show exact current/target identities and require confirmation. The internal
-  engine additionally requires `--confirm-channel-change` from its verified caller.
-- The same release ID or source SHA is a successful no-op and is not rebuilt.
-- Stable downgrades are refused and use rollback instead.
-- Any transition requiring a database downgrade is refused as an update, including channel changes.
+- Main to a newly resolved exact main SHA is the normal update path.
+- Release to main is the normal migration path but always requires explicit confirmation.
+- Main to a pinned release is never automatic; use that release's exact bound `install.sh`, which
+  also requires explicit channel-change confirmation.
+- Pinned release-to-release changes use exact version-bound installers, not latest-release
+  discovery.
+- The same immutable identity is a successful no-op and is not rebuilt.
+- Downgrades are refused as updates and use rollback instead.
+- Any transition requiring a database downgrade is refused before service stop.
 
 GitHub is the canonical default acquisition source. Forgejo may be selected explicitly, but there
 is no silent fallback and its repository/asset origin must be recorded. If mirror `main` differs,

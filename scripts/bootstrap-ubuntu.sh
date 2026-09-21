@@ -11,6 +11,14 @@ readonly stable_only_launcher="0"
 readonly github_repository="https://github.com/Learning-Control-Center/Learning-Control-Center.git"
 readonly github_asset_base="https://github.com/Learning-Control-Center/Learning-Control-Center/releases/download"
 readonly forgejo_repository="https://forgejo.waqsea.com/Learning-Control-Center/Learning-Control-Center.git"
+readonly github_main_ref_api="https://api.github.com/repos/Learning-Control-Center/Learning-Control-Center/git/ref/heads/main"
+readonly forgejo_main_ref_api="https://forgejo.waqsea.com/api/v1/repos/Learning-Control-Center/Learning-Control-Center/git/refs/heads/main"
+bootstrap_from_stdin=0
+if test -z "${BASH_SOURCE[0]:-}"; then
+    bootstrap_from_stdin=1
+fi
+readonly bootstrap_from_stdin
+original_arguments=("$@")
 if test "${LCC_BOOTSTRAP_TESTING:-0}" = 1; then
     maximum_archive_bytes="${LCC_BOOTSTRAP_TEST_MAXIMUM_ARCHIVE_BYTES:-268435456}"
     maximum_unpacked_bytes="${LCC_BOOTSTRAP_TEST_MAXIMUM_UNPACKED_BYTES:-536870912}"
@@ -20,8 +28,7 @@ else
 fi
 readonly maximum_archive_bytes maximum_unpacked_bytes
 
-channel="stable"
-channel_was_set=0
+channel="main"
 release_ref=""
 expected_commit=""
 domain=""
@@ -45,15 +52,15 @@ current_phase="argument validation"
 usage() {
     cat <<'EOF'
 Usage:
+  bootstrap-ubuntu.sh [--channel main] [--commit FULL_SHA] [options]
   bootstrap-ubuntu.sh --channel stable --ref VERSION [options]
-  bootstrap-ubuntu.sh --channel main [--commit FULL_SHA] [options]
 
 Channels:
-  stable  Published release archive and SHA-256 (default, recommended)
-  main    Current validated main, resolved once to an exact Git commit
+  main    Current validated main, resolved once to an exact Git commit (default)
+  stable  Explicit pinned release archive and SHA-256
 
 Options:
-  --channel stable|main     Installation channel (default: stable)
+  --channel stable|main     Installation channel (default: main)
   --ref VERSION            Stable semantic release tag, for example v1.0.1
   --commit FULL_SHA        Expected current main tip; required for non-interactive main
   --domain HOST            Public DNS hostname (prompted interactively when omitted)
@@ -78,6 +85,77 @@ die() {
 
 note() {
     printf 'lcc-bootstrap: %s\n' "$*"
+}
+
+run_pinned_bootstrap_stage() {
+    local ref_api raw_url stage_directory ref_payload pinned_bootstrap stage_revision stage_status
+    case "$repository_url" in
+        "$github_repository")
+            ref_api="$github_main_ref_api"
+            ;;
+        "$forgejo_repository")
+            ref_api="$forgejo_main_ref_api"
+            ;;
+        *) die "Main acquisition is supported only from the explicit GitHub or Forgejo repository." ;;
+    esac
+    for command_name in curl sed head mktemp stat chmod bash cp; do
+        command -v "$command_name" >/dev/null || \
+            die "Bootstrap stage command is unavailable: $command_name"
+    done
+    stage_directory="$(mktemp -d "${TMPDIR:-/tmp}/lcc-bootstrap-stage.XXXXXXXX")"
+    chmod 0700 "$stage_directory"
+    trap 'rm -rf -- "$stage_directory"' EXIT
+    ref_payload="$stage_directory/main-ref.json"
+    pinned_bootstrap="$stage_directory/bootstrap-ubuntu.sh"
+
+    if test "${LCC_BOOTSTRAP_TESTING:-0}" = 1 && \
+        test -n "${LCC_BOOTSTRAP_STAGE_TEST_RESOLVED_SHA:-}" && \
+        test -n "${LCC_BOOTSTRAP_STAGE_TEST_SCRIPT:-}"; then
+        stage_revision="$LCC_BOOTSTRAP_STAGE_TEST_RESOLVED_SHA"
+        cp -- "$LCC_BOOTSTRAP_STAGE_TEST_SCRIPT" "$pinned_bootstrap"
+    else
+        curl --fail --location --silent --show-error --retry 3 --max-filesize 1048576 \
+            --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            --header 'Accept: application/json' \
+            --header 'User-Agent: Learning-Control-Center-Bootstrap/1.0.1' \
+            --output "$ref_payload" "$ref_api"
+        stage_revision="$(
+            sed -nE 's/.*"sha"[[:space:]]*:[[:space:]]*"([0-9a-f]{40})".*/\1/p' \
+                "$ref_payload" | head -n1
+        )"
+        [[ "$stage_revision" =~ ^[0-9a-f]{40}$ ]] || \
+            die "Unable to resolve public main to one full Git commit SHA."
+        case "$repository_url" in
+            "$github_repository")
+                raw_url="https://raw.githubusercontent.com/Learning-Control-Center/Learning-Control-Center/$stage_revision/scripts/bootstrap-ubuntu.sh"
+                ;;
+            "$forgejo_repository")
+                raw_url="https://forgejo.waqsea.com/Learning-Control-Center/Learning-Control-Center/raw/commit/$stage_revision/scripts/bootstrap-ubuntu.sh"
+                ;;
+        esac
+        curl --fail --location --silent --show-error --retry 3 --max-filesize 1048576 \
+            --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            --output "$pinned_bootstrap" "$raw_url"
+    fi
+
+    [[ "$stage_revision" =~ ^[0-9a-f]{40}$ ]] || \
+        die "Resolved bootstrap revision is not a full Git commit SHA."
+    test -f "$pinned_bootstrap" && test "$(stat -c %s "$pinned_bootstrap")" -le 1048576 || \
+        die "Pinned bootstrap is missing or exceeds the maximum allowed size."
+    test "$(sed -n '1p' "$pinned_bootstrap")" = '#!/usr/bin/env bash' || \
+        die "Pinned bootstrap has an invalid script header."
+    chmod 0700 "$pinned_bootstrap"
+    note "Stage zero resolved main revision: $stage_revision"
+    note "Continuing with the bootstrap fetched from that immutable commit."
+    set +e
+    LCC_BOOTSTRAP_PINNED_REVISION="$stage_revision" \
+    LCC_BOOTSTRAP_PINNED_REPOSITORY="$repository_url" \
+        bash "$pinned_bootstrap" "${original_arguments[@]}"
+    stage_status=$?
+    set -e
+    rm -rf -- "$stage_directory"
+    trap - EXIT
+    exit "$stage_status"
 }
 
 package_is_installed() {
@@ -439,7 +517,7 @@ while test "$#" -gt 0; do
     case "$1" in
         --channel)
             test "$stable_only_launcher" = 0 || die "This release-bound install.sh is stable-only."
-            channel="${2:?Missing --channel value}"; channel_was_set=1; shift 2 ;;
+            channel="${2:?Missing --channel value}"; shift 2 ;;
         --ref)
             test "$stable_only_launcher" = 0 || die "This release-bound install.sh does not accept --ref."
             release_ref="${2:?Missing --ref value}"; shift 2 ;;
@@ -466,8 +544,20 @@ if test "$stable_only_launcher" = 1; then
         die "The generated stable installer lacks its embedded release binding."
     channel="stable"
     release_ref="$embedded_stable_ref"
-elif test "$channel_was_set" -eq 0; then
-    channel="stable"
+fi
+
+pinned_bootstrap_revision="${LCC_BOOTSTRAP_PINNED_REVISION:-}"
+pinned_bootstrap_repository="${LCC_BOOTSTRAP_PINNED_REPOSITORY:-}"
+if test -n "$pinned_bootstrap_revision" || test -n "$pinned_bootstrap_repository"; then
+    [[ "$pinned_bootstrap_revision" =~ ^[0-9a-f]{40}$ ]] || \
+        die "Pinned bootstrap revision is not a full Git commit SHA."
+    test "$channel" = main || die "A pinned main bootstrap cannot install the stable channel."
+    test "$repository_url" = "$pinned_bootstrap_repository" || \
+        die "Pinned bootstrap repository does not match the selected source."
+    if test -n "$expected_commit" && test "$expected_commit" != "$pinned_bootstrap_revision"; then
+        die "--commit does not match the pinned bootstrap revision."
+    fi
+    expected_commit="$pinned_bootstrap_revision"
 fi
 
 case "$channel" in
@@ -512,6 +602,10 @@ if test "$test_mode" != 1; then
 fi
 if test "$dry_run" -eq 0 && test "$test_mode" != 1 && test "${EUID:-$(id -u)}" -ne 0; then
     die "Run the bootstrap as root, normally through sudo."
+fi
+if test "$bootstrap_from_stdin" = 1 && test "$channel" = main && \
+    test -z "$pinned_bootstrap_revision"; then
+    run_pinned_bootstrap_stage
 fi
 
 install_root="${LCC_BOOTSTRAP_INSTALL_ROOT:-/}"
@@ -725,17 +819,32 @@ else
         die "Remote main resolved to $source_revision, not expected commit $expected_commit."
     fi
     release_id="main-$source_revision"
-    note "Current main channel selected — latest validated code, not release-pinned."
+    note "Current main — latest validated code, resolved to an exact commit at install/update time."
     note "Repository: $repository_url"
     note "Resolved main revision: $source_revision"
+fi
+
+# Resolve identical reruns before asking for confirmation or checking out the
+# already-installed source again.
+if test "$existing_installation" -eq 1 && test "$active_id" = "$release_id" && \
+    test "$active_revision" = "$source_revision" && test "$active_channel" = "$channel"; then
+    echo "Learning Control Center is already up to date."
+    exit 0
 fi
 
 # Do not source or execute anything from main until the operator has seen and
 # accepted the exact immutable revision.
 if test "$channel" = main && test "$non_interactive" -eq 0; then
     exec 3<>/dev/tty || die "Interactive main installation requires a controlling terminal."
-    printf '\nCurrent main — latest validated code, not release-pinned\n' >&3
-    printf '  Repository: %s\n  Exact source SHA: %s\n' "$repository_url" "$source_revision" >&3
+    printf '\nCurrent main — latest validated code, resolved to an exact commit at install/update time\n' >&3
+    printf '  Repository: %s\n' "$repository_url" >&3
+    if test "$existing_installation" -eq 1; then
+        printf '  Current channel: %s\n  Current release: %s\n' "$active_channel" "$active_id" >&3
+        if [[ "$active_revision" =~ ^[0-9a-f]{40}$ ]]; then
+            printf '  Current source SHA: %s\n' "$active_revision" >&3
+        fi
+    fi
+    printf '  Target source SHA: %s\n' "$source_revision" >&3
     printf 'This installation will remain pinned to this SHA until an explicit update.\n' >&3
     if test "$existing_installation" -eq 1 && test "$active_channel" != main; then
         printf '  Channel change: %s -> main\n' "$active_channel" >&3
@@ -761,11 +870,6 @@ current_release="${install_root%/}/opt/learning-control-center/current"
 environment_target="${install_root%/}/etc/learning-control-center.env"
 
 if test "$existing_installation" -eq 1; then
-    if test "$active_id" = "$release_id" && test "$active_revision" = "$source_revision" && \
-        test "$active_channel" = "$channel"; then
-        echo "Learning Control Center is already up to date."
-        exit 0
-    fi
     if test "$active_channel" != "$channel" && test "$channel_change_confirmed" -ne 1 && \
         test "$confirm_channel_change" -ne 1; then
         if test "$non_interactive" -eq 1; then

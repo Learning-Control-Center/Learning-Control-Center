@@ -71,11 +71,10 @@ sudo lcc-admin update
 
 The persistent update entrypoint delegates through the active `current` release, so an atomic
 release switch also switches the implementation it invokes without leaving a path to an obsolete
-release. Stable installations discover only final semantic releases from their recorded source;
-main installations resolve their recorded repository's current public `main` to one exact SHA.
-Neither path changes channel unless the operator supplies `--channel stable` or `--channel main`
-and confirms the transition. The complete safety and rollback contract is in
-[`UPDATES.md`](UPDATES.md).
+release. Normal updates resolve the recorded repository's public `main` to one exact SHA. A
+release-channel installation migrates to main only after the operator confirms the displayed
+channel and immutable target. Exact pinned releases remain available through their version-bound
+installers. The complete safety and rollback contract is in [`UPDATES.md`](UPDATES.md).
 
 Startup holds an exclusive database-operation lock, upgrades the configured database to Alembic
 head, verifies the production bootstrap/single-user invariant, recovers projection work, backfills

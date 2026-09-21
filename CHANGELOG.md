@@ -7,23 +7,24 @@ All notable public changes to Learning Control Center are recorded here. The pro
 
 ### Added
 
-- Human-first stable installation with secure generated production configuration and guarded
+- Human-first main installation with secure generated production configuration and guarded
   first-user bootstrap-token handling.
-- An explicit current-`main` channel that resolves validated public code once to an exact Git
-  commit and never follows the moving branch automatically.
+- A canonical current-`main` channel that resolves validated public code once to an exact Git
+  commit on every explicit install/update and never follows the moving branch automatically.
 - Installed channel/source metadata and channel-aware update and rollback records.
 - Automatic Ubuntu 24.04 prerequisite provisioning from signed Ubuntu repositories.
-- A persistent installed updater, also available through `lcc-admin update`, that discovers the
-  newest final stable release or the current exact `main` revision without changing channel.
+- A persistent installed updater, also available through `lcc-admin update`, that resolves the
+  recorded repository's current `main` revision and migrates pinned-release installations only
+  after confirmation.
 
 ### Changed
 
-- Stable releases now include a deterministic release-bound `install.sh` whose embedded archive
-  digest must agree with the published checksum.
+- Releases remain optional immutable snapshots with a deterministic release-bound `install.sh`
+  whose embedded archive digest must agree with the published checksum.
 - Production hosts now consume a verified frontend artifact built during release packaging, so
   Node.js/npm are no longer server dependencies.
-- Re-running a stable release launcher now installs, safely updates through the canonical engine,
-  reports an exact-version no-op, or refuses an implicit downgrade as appropriate.
+- Re-running the main bootstrap now installs, safely updates through the canonical engine, reports
+  an exact-SHA no-op, or explicitly confirms release-to-main migration as appropriate.
 
 ## [1.0.0] - 2026-09-21
 

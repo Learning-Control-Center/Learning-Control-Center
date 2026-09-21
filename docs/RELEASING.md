@@ -83,9 +83,9 @@ tar -tzf learning-control-center-v1.0.1.tar.gz
 grep -E '^readonly (embedded_stable_ref|embedded_archive_sha256|stable_only_launcher)=' install.sh
 ```
 
-Exercise the bound `install.sh` against local assets through the dry-run/test seam. Exercise generic
-stable bootstrap and both interactive and commit-asserted main acquisition. Reconfirm no secret is
-printed or passed on argv.
+Exercise the bound `install.sh` against local assets through the dry-run/test seam. Exercise the
+explicit pinned-release bootstrap and both interactive and commit-asserted main acquisition.
+Reconfirm no secret is printed or passed on argv.
 
 ## Publication order
 
@@ -97,49 +97,40 @@ printed or passed on argv.
    the same three byte-identical assets.
 4. Re-download every asset from each host and verify hashes, archive member safety, embedded
    `install.sh` identity/digest, and exact tag/source revision.
-5. Run the stable installer test from the canonical GitHub URL.
-6. Run the main-channel installer test and verify the recorded SHA equals the deliberately resolved
-   public `main` tip.
+5. Run the canonical main-first installer test and verify the recorded SHA equals the deliberately
+   resolved public `main` tip.
+6. Run the exact versioned release installer test and verify its archive/checksum binding.
 7. Complete a real clean Ubuntu Server 24.04 acceptance test: prerequisite provisioning, install,
    HTTPS health, first-user bootstrap,
    finalization, systemd restart, scheduled/manual backup, update preflight, and preserve-by-default
    uninstall.
-8. Confirm GitHub's final-release `latest` redirect serves the exact published `install.sh`, then
-   publish release notes from `CHANGELOG.md` and advertise the quick-install command only after the
-   assets and acceptance checks succeed.
+8. Confirm the versioned release assets are downloadable and byte-identical across intended hosts,
+   then publish release notes from `CHANGELOG.md`. The normal quick-install URL remains the public
+   `main` bootstrap rather than a Release redirect.
 
-The normal stable install-or-update command is:
+The normal install-or-update command is:
 
 ```bash
-curl -fsSL https://github.com/Learning-Control-Center/Learning-Control-Center/releases/latest/download/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/Learning-Control-Center/Learning-Control-Center/main/scripts/bootstrap-ubuntu.sh | sudo bash
 ```
 
-A release-specific launcher remains available for pinned installs and updates:
+A release-specific launcher remains available for optional pinned installs and updates:
 
 ```bash
 curl -fsSL https://github.com/Learning-Control-Center/Learning-Control-Center/releases/download/v1.0.1/install.sh | sudo bash
 ```
 
-The explicit current-main command uses the immutable v1.0.1 bootstrap implementation:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Learning-Control-Center/Learning-Control-Center/v1.0.1/scripts/bootstrap-ubuntu.sh \
-  | sudo bash -s -- --channel main
-```
-
 ## Updates and rollback
 
 Every installed v1.0.1-or-newer server has `/opt/learning-control-center/update.sh`; `lcc-admin update`
-delegates to it without duplicating policy. Stable launchers also detect existing installs
-and hand an immutable candidate to the same canonical engine. The updater verifies and stages the
-candidate before stopping services, classifies Alembic compatibility, creates a pre-update backup,
-and records immutable source identity. Code-only rollback is allowed only at the current database
-schema; schema-crossing rollback requires the matching database backup and explicit replacement
-acceptance.
+delegates to it without duplicating policy. The updater resolves the recorded repository's
+`refs/heads/main` to an exact SHA and never queries release APIs for a latest version. Release-bound
+launchers still detect existing installations and hand their exact immutable candidate to the same
+canonical engine. The engine verifies and stages the candidate before stopping services,
+classifies Alembic compatibility, creates a pre-update backup, and records immutable source
+identity. Code-only rollback is allowed only at the current database schema; schema-crossing
+rollback requires the matching database backup and explicit replacement acceptance.
 
-Automatic stable discovery must use the recorded host's public release API, exclude drafts and
-prereleases, and select the greatest final `vMAJOR.MINOR.PATCH`. The three byte-identical release
-assets must be uploaded to both explicit hosts. There is no automatic host fallback: GitHub-backed
-installs continue with GitHub, and Forgejo-backed installs continue with Forgejo. A release
-candidate remains installable only through its exact versioned asset URL; it never becomes an
-automatic stable update target.
+The three byte-identical release assets must still be uploaded to both explicit hosts for pinned
+installation, release history, and rollback/reference. There is no automatic host fallback:
+GitHub-backed installs continue with GitHub, and Forgejo-backed installs continue with Forgejo.

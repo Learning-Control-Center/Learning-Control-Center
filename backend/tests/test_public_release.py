@@ -622,7 +622,7 @@ def test_main_and_stable_share_prerequisites_without_server_node() -> None:
     assert "npm --prefix" not in (REPOSITORY_ROOT / "scripts" / "update-ubuntu.sh").read_text()
 
 
-def test_stable_is_default_but_requires_an_explicit_release_ref(tmp_path: Path) -> None:
+def test_main_is_default_and_non_interactive_use_requires_exact_commit(tmp_path: Path) -> None:
     missing = subprocess.run(
         [BOOTSTRAP, "--non-interactive", "--domain", "lcc.example.test", "--timezone", "UTC"],
         check=False,
@@ -630,7 +630,7 @@ def test_stable_is_default_but_requires_an_explicit_release_ref(tmp_path: Path) 
         text=True,
     )
     assert missing.returncode != 0
-    assert "Stable bootstrap requires --ref" in missing.stderr
+    assert "Non-interactive main installation requires --commit" in missing.stderr
 
     moving = subprocess.run(
         [
@@ -651,6 +651,50 @@ def test_stable_is_default_but_requires_an_explicit_release_ref(tmp_path: Path) 
     )
     assert moving.returncode != 0
     assert "semantic release tag" in moving.stderr
+
+
+def test_piped_main_bootstrap_reexecutes_immutable_stage_before_host_mutation(
+    tmp_path: Path,
+) -> None:
+    revision = "a" * 40
+    stage_log = tmp_path / "stage.log"
+    pinned_bootstrap = tmp_path / "pinned-bootstrap.sh"
+    pinned_bootstrap.write_text(
+        "\n".join(
+            (
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                'printf "%s\\n" "$LCC_BOOTSTRAP_PINNED_REVISION" > "$LCC_STAGE_TEST_LOG"',
+                'printf "%s\\n" "$LCC_BOOTSTRAP_PINNED_REPOSITORY" >> "$LCC_STAGE_TEST_LOG"',
+                'printf "%s\\n" "$@" >> "$LCC_STAGE_TEST_LOG"',
+                "",
+            )
+        )
+    )
+    environment = {
+        **os.environ,
+        "LCC_BOOTSTRAP_TESTING": "1",
+        "LCC_BOOTSTRAP_STAGE_TEST_RESOLVED_SHA": revision,
+        "LCC_BOOTSTRAP_STAGE_TEST_SCRIPT": str(pinned_bootstrap),
+        "LCC_STAGE_TEST_LOG": str(stage_log),
+        "LCC_BOOTSTRAP_TEST_DPKG_AUDIT_FAILURE": "1",
+        "TMPDIR": str(tmp_path),
+    }
+    result = subprocess.run(
+        ["bash", "-s", "--", "--dry-run"],
+        input=BOOTSTRAP.read_text(),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert f"Stage zero resolved main revision: {revision}" in result.stdout
+    assert stage_log.read_text().splitlines() == [
+        revision,
+        "https://github.com/Learning-Control-Center/Learning-Control-Center.git",
+        "--dry-run",
+    ]
+    assert not list(tmp_path.glob("lcc-bootstrap-stage.*"))
 
 
 def test_bootstrap_generates_secure_environment_and_hands_off_without_secrets(
@@ -1007,8 +1051,6 @@ def test_main_non_interactive_resolves_exact_sha_and_rejects_mismatch(tmp_path: 
     environment["LCC_BOOTSTRAP_APT_LOG"] = str(tmp_path / "main-apt.log")
     command = [
         BOOTSTRAP,
-        "--channel",
-        "main",
         "--commit",
         revision,
         "--domain",
@@ -1025,7 +1067,7 @@ def test_main_non_interactive_resolves_exact_sha_and_rejects_mismatch(tmp_path: 
         env=environment,
     )
     handoff = (tmp_path / "handoff.log").read_text().splitlines()
-    assert "latest validated code, not release-pinned" in installed.stdout
+    assert "latest validated code, resolved to an exact commit" in installed.stdout
     assert f"Resolved main revision: {revision}" in installed.stdout
     channel_index = handoff.index("--channel")
     assert handoff[channel_index : channel_index + 2] == ["--channel", "main"]
@@ -1047,10 +1089,122 @@ def test_main_non_interactive_resolves_exact_sha_and_rejects_mismatch(tmp_path: 
     assert "not expected commit" in mismatch.stderr
 
 
-def test_main_requires_explicit_channel_and_valid_non_interactive_contract() -> None:
+def test_main_first_bootstrap_rerun_noops_updates_and_requires_release_migration_opt_in(
+    tmp_path: Path,
+) -> None:
+    repository = _release_repository(tmp_path)
+    revision = subprocess.run(
+        ["git", "-C", repository, "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    same_root = tmp_path / "same-root"
+    _write_active_release(
+        same_root,
+        release_id=f"main-{revision}",
+        channel="main",
+        revision=revision,
+    )
+    same_case = tmp_path / "same-case"
+    same_case.mkdir()
+    same_environment = _bootstrap_environment(same_case)
+    same_environment.update(
+        {
+            "LCC_BOOTSTRAP_REPOSITORY_URL": str(repository),
+            "LCC_BOOTSTRAP_INSTALL_ROOT": str(same_root),
+        }
+    )
+    command = [BOOTSTRAP, "--commit", revision, "--non-interactive"]
+    same = subprocess.run(
+        command,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=same_environment,
+    )
+    assert same.stdout.strip().endswith("Learning Control Center is already up to date.")
+    assert not (same_case / "handoff.log").exists()
+
+    changed_root = tmp_path / "changed-root"
+    previous_revision = "1" * 40
+    _write_active_release(
+        changed_root,
+        release_id=f"main-{previous_revision}",
+        channel="main",
+        revision=previous_revision,
+    )
+    changed_case = tmp_path / "changed-case"
+    changed_case.mkdir()
+    changed_environment = _bootstrap_environment(changed_case)
+    update_handoff = changed_case / "update-handoff.log"
+    changed_environment.update(
+        {
+            "LCC_BOOTSTRAP_REPOSITORY_URL": str(repository),
+            "LCC_BOOTSTRAP_INSTALL_ROOT": str(changed_root),
+            "LCC_BOOTSTRAP_UPDATE_HANDOFF_LOG": str(update_handoff),
+        }
+    )
+    changed = subprocess.run(
+        command,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=changed_environment,
+    )
+    changed_arguments = update_handoff.read_text().splitlines()
+    assert "canonical update engine" in changed.stdout
+    assert "apply" in changed_arguments
+    assert f"main-{revision}" in changed_arguments
+    assert revision in changed_arguments
+    assert "--confirm-channel-change" not in changed_arguments
+
+    release_root = tmp_path / "release-root"
+    _write_active_release(
+        release_root,
+        release_id="v1.0.0",
+        channel="stable",
+        revision="2" * 40,
+        legacy_v1=True,
+    )
+    release_case = tmp_path / "release-case"
+    release_case.mkdir()
+    release_environment = _bootstrap_environment(release_case)
+    release_handoff = release_case / "update-handoff.log"
+    release_environment.update(
+        {
+            "LCC_BOOTSTRAP_REPOSITORY_URL": str(repository),
+            "LCC_BOOTSTRAP_INSTALL_ROOT": str(release_root),
+            "LCC_BOOTSTRAP_UPDATE_HANDOFF_LOG": str(release_handoff),
+        }
+    )
+    refused = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=release_environment,
+    )
+    assert refused.returncode != 0
+    assert "requires --confirm-channel-change" in refused.stderr
+
+    migrated = subprocess.run(
+        [*command, "--confirm-channel-change"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=release_environment,
+    )
+    assert "channel=stable release=v1.0.0" in migrated.stdout
+    assert f"Resolved main revision: {revision}" in migrated.stdout
+    assert release_handoff.read_text().splitlines()[-1] == "--confirm-channel-change"
+
+
+def test_main_default_and_pinned_release_have_unambiguous_cli_contract() -> None:
     cases = (
-        (["--channel", "main", "--non-interactive"], "requires --commit"),
-        (["--channel", "main", "--ref", RELEASE_ID], "only with --channel stable"),
+        (["--non-interactive"], "requires --commit"),
+        (["--ref", RELEASE_ID], "only with --channel stable"),
         (
             ["--channel", "stable", "--ref", RELEASE_ID, "--commit", "0" * 40],
             "only with --channel main",
@@ -1087,7 +1241,7 @@ def test_interactive_main_uses_normal_explicit_confirmation(tmp_path: Path) -> N
     repository = _release_repository(tmp_path)
     environment = _bootstrap_environment(tmp_path)
     environment["LCC_BOOTSTRAP_REPOSITORY_URL"] = str(repository)
-    command = [BOOTSTRAP, "--channel", "main"]
+    command = [BOOTSTRAP]
     rejected = subprocess.run(
         ["script", "-qec", shlex.join(str(item) for item in command), "/dev/null"],
         input="NO\n",
@@ -1116,6 +1270,42 @@ def test_interactive_main_uses_normal_explicit_confirmation(tmp_path: Path) -> N
     )
     assert "Learning Control Center installation summary" in accepted.stdout
     assert (tmp_path / "handoff.log").is_file()
+
+    changed_root = tmp_path / "changed-root"
+    previous_revision = "9" * 40
+    _write_active_release(
+        changed_root,
+        release_id=f"main-{previous_revision}",
+        channel="main",
+        revision=previous_revision,
+    )
+    changed_case = tmp_path / "changed"
+    changed_case.mkdir()
+    changed_environment = _bootstrap_environment(changed_case)
+    changed_environment.update(
+        {
+            "LCC_BOOTSTRAP_REPOSITORY_URL": str(repository),
+            "LCC_BOOTSTRAP_INSTALL_ROOT": str(changed_root),
+            "LCC_BOOTSTRAP_UPDATE_HANDOFF_LOG": str(tmp_path / "changed-handoff.log"),
+        }
+    )
+    changed = subprocess.run(
+        ["script", "-qec", shlex.join(str(item) for item in command), "/dev/null"],
+        input="y\n",
+        check=True,
+        capture_output=True,
+        text=True,
+        env=changed_environment,
+    )
+    current_revision = subprocess.run(
+        ["git", "-C", repository, "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert f"Current source SHA: {previous_revision}" in changed.stdout
+    assert f"Target source SHA: {current_revision}" in changed.stdout
+    assert "Delegating immutable target" in changed.stdout
 
 
 def test_external_environment_file_must_be_regular_private_and_not_a_symlink(

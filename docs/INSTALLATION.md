@@ -21,30 +21,34 @@ candidate selection inside Ubuntu's signed repositories. Caddy must resolve to t
 each package index to use the `ubuntu-keyring`-owned
 `/usr/share/keyrings/ubuntu-archive-keyring.gpg`, rather than trusting repository labels alone.
 
-Node.js/npm are release-build dependencies, not production-host dependencies. Stable archives and
-public `main` commits carry a verified production frontend whose hash is bound to its build inputs.
+Node.js/npm are build dependencies, not production-host dependencies. Public `main` commits and
+stable archives carry a verified production frontend whose hash is bound to its build inputs.
 Release creation rebuilds it with `npm ci` from `package-lock.json` and rejects a mismatch. The
 server installs and updates that exact artifact without Node.js.
 
-## Stable install or update — recommended
+## Main-first install or update — canonical
 
-Every stable release publishes three matching assets:
-
-- `install.sh`, permanently bound to that release and archive digest;
-- `learning-control-center-<version>.tar.gz`;
-- `learning-control-center-<version>.tar.gz.sha256`.
-
-After v1.0.1 has been published, the normal command is:
+The normal command is:
 
 ```bash
-curl -fsSL https://github.com/Learning-Control-Center/Learning-Control-Center/releases/latest/download/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/Learning-Control-Center/Learning-Control-Center/main/scripts/bootstrap-ubuntu.sh | sudo bash
 ```
 
-GitHub's `latest` release redirect excludes drafts and prereleases and resolves to a version-bound
-`install.sh`. On a fresh server it installs that release. On an older stable installation it
-delegates the immutable target to the canonical updater. The same release reports
-`Learning Control Center is already up to date.` and exits successfully. If the installed stable
-release is newer, the launcher refuses to downgrade and directs the operator to rollback.
+For the piped command, a minimal stage zero first queries the selected host's public main-ref API,
+resolves one full commit SHA, and downloads and re-runs `bootstrap-ubuntu.sh` from that immutable
+commit URL before APT or other host mutation. The pinned bootstrap then fetches only
+`refs/heads/main` without tags, requires the fetched tip to equal the stage-zero SHA, displays that
+SHA, and asks `Continue? [y/N]`. It checks out that commit detached and verifies the final `HEAD`
+and clean source tree before candidate installation code is used. The installed identity is
+`main-<full-sha>` with
+`RELEASE_CHANNEL=main`, `SOURCE_REF=refs/heads/main`, the selected source repository, and the full
+`SOURCE_REVISION`; the moving branch name is never used as the immutable installed identity.
+
+Rerunning the same command explicitly checks validated `main` again. The same SHA reports
+`Learning Control Center is already up to date.` and exits successfully. A changed SHA is shown
+alongside the installed SHA, confirmed, and delegated to the canonical updater. A historical
+release-channel installation shows its current channel/release and target main SHA, then requires
+explicit confirmation before migration. Main never advances in the background.
 
 The interactive installer asks only for:
 
@@ -54,18 +58,28 @@ The interactive installer asks only for:
 
 It reports missing packages before installing them, generates independent strong application and
 bootstrap secrets in a root-only temporary directory, renders a complete production environment,
-downloads the bounded release archive and checksum, requires the published checksum to match the
-digest embedded in `install.sh`, safely extracts the archive, and invokes
-`scripts/install-ubuntu.sh`. The temporary secrets file is removed after handoff. Caddy never
-receives the application environment.
+and invokes `scripts/install-ubuntu.sh` with the verified immutable source identity. The temporary
+secrets file is removed after handoff. Caddy never receives the application environment.
 
 To review before executing:
 
 ```bash
-curl -fsSLo install.sh https://github.com/Learning-Control-Center/Learning-Control-Center/releases/download/v1.0.1/install.sh
-less install.sh
-sudo bash install.sh
+curl -fsSLo bootstrap-ubuntu.sh https://raw.githubusercontent.com/Learning-Control-Center/Learning-Control-Center/main/scripts/bootstrap-ubuntu.sh
+less bootstrap-ubuntu.sh
+sudo bash bootstrap-ubuntu.sh
 ```
+
+The one-line command necessarily trusts the HTTPS-delivered stage-zero script and the selected
+public repository. Download-and-review makes that initial trust decision explicit. Both paths pin
+the installed source to a full SHA and verify it again during Git acquisition.
+
+## Pinned release snapshots
+
+Every release may publish three matching assets:
+
+- `install.sh`, permanently bound to that release and archive digest;
+- `learning-control-center-<version>.tar.gz`;
+- `learning-control-center-<version>.tar.gz.sha256`.
 
 For one exact version, use the version-specific URL instead:
 
@@ -80,35 +94,22 @@ The release-bound launcher cannot be redirected to another target channel, relea
 does not accept a Git-repository override. Switching an existing main installation to its bound
 stable release still requires explicit channel-change confirmation. The explicit supported Forgejo
 mirror may be selected with `--asset-base-url`; its archive and checksum bytes must still agree with
-the embedded GitHub release digest, and that mirror becomes the recorded source for future updates.
-
-## Current `main` — latest validated code
-
-Stable is always the default and remains the recommended reproducible production path. To
-deliberately install the current validated public `main` branch after v1.0.1 is published:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Learning-Control-Center/Learning-Control-Center/v1.0.1/scripts/bootstrap-ubuntu.sh \
-  | sudo bash -s -- --channel main
-```
-
-The script fetches only `refs/heads/main` without tags, resolves `FETCH_HEAD` to one full commit
-SHA, displays the repository and SHA, asks `Continue? [y/N]`, and checks out that commit detached.
-The installed identity is `main-<full-sha>`; it does not auto-update when the remote branch moves.
-Main is validated current code, not an unfinished branch, but it lacks the immutable versioned
-archive and published digest of stable and is therefore less reproducible.
+the embedded GitHub release digest. A pinned installation remains on the release channel until the
+operator explicitly confirms migration to `main`. Release assets remain the stronger choice when
+an immutable, versioned, checksum-published snapshot is specifically required; they are not the
+normal update-discovery mechanism.
 
 For automation, identities must remain explicit:
 
 ```bash
-# Generic stable bootstrap
+# Explicit pinned release bootstrap
 sudo scripts/bootstrap-ubuntu.sh \
   --channel stable --ref v1.0.1 \
   --domain lcc.example.com --timezone UTC --non-interactive
 
-# Main, asserting the expected current remote tip
+# Canonical main, asserting the expected current remote tip
 sudo scripts/bootstrap-ubuntu.sh \
-  --channel main --commit 0123456789abcdef0123456789abcdef01234567 \
+  --commit 0123456789abcdef0123456789abcdef01234567 \
   --domain lcc.example.com --timezone UTC --non-interactive
 ```
 
@@ -124,7 +125,7 @@ sudo bash install.sh \
   --asset-base-url https://forgejo.waqsea.com/Learning-Control-Center/Learning-Control-Center/releases/download
 
 # Main mirror
-sudo scripts/bootstrap-ubuntu.sh --channel main \
+sudo scripts/bootstrap-ubuntu.sh \
   --repository-url https://forgejo.waqsea.com/Learning-Control-Center/Learning-Control-Center.git
 ```
 
@@ -184,11 +185,12 @@ LCC, and the backup timer; and verifies the public HTTPS health endpoint. Existi
 Caddy configuration is preserved; if the LCC site conflicts, validation fails and the previous
 Caddy files are restored.
 
-A first install is allowed when no active release exists. Rerunning a release-bound launcher with
-an older installation delegates to the controlled update engine; the same identity is a no-op;
-and a newer stable identity refuses downgrade. A partial matching `.installing` directory can be
-resumed safely. Channel changes are displayed with both exact identities and require explicit
-confirmation. For inspection, use `--dry-run`.
+A first install is allowed when no active deployment exists. Rerunning the main-first bootstrap
+delegates a changed exact SHA to the controlled update engine, while the same SHA is a no-op.
+Rerunning a release-bound launcher retains its exact-version update/no-op/downgrade-refusal
+behavior. A partial matching `.installing` directory can be resumed safely. Channel changes are
+displayed with both exact identities and require explicit confirmation. For inspection, use
+`--dry-run`.
 The isolated `--root`/skip options are test-only and must not be used as production substitutes.
 Dry-run reports missing packages, the exact APT plan and trust source, release/channel/domain,
 frontend-artifact policy, and intended host/service actions without changing packages,

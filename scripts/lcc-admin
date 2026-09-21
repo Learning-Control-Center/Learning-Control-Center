@@ -15,7 +15,7 @@ Process lifecycle (delegates to systemd):
   start | stop | restart | status
 
 Operations:
-  update [--channel stable|main] [--yes] [--dry-run]
+  update [--yes] [--dry-run]
                                  Resolve and run the canonical installed updater
   health                         Check the public HTTPS health endpoint
   logs [LINES]                   Show recent application journal entries

@@ -530,9 +530,10 @@ def test_units_admin_and_update_assets_encode_production_safety() -> None:
     assert "lcc-ops" in updater and "restore --from" in updater
     assert "show-bootstrap-token" in admin
     assert 'exec "$LCC_UPDATE_ENTRYPOINT" "$@"' in admin
-    assert "releases?per_page=100" in update_frontend
-    assert "releases?limit=100" in update_frontend
-    assert "prerelease" in update_frontend and "draft" in update_frontend
+    assert "git ls-remote" in update_frontend
+    assert "refs/heads/main" in update_frontend
+    assert "releases?per_page" not in update_frontend
+    assert "/api/v1/repos" not in update_frontend
     assert 'exec "$current_updater" "$@"' in persistent_update
     assert "install_update_entrypoint" in updater
     assert "Source revision:" in admin and "Channel:" in admin

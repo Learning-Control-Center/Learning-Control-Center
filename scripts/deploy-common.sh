@@ -111,10 +111,6 @@ print(compare(sys.argv[1], sys.argv[2]))
 PY
 }
 
-lcc_is_final_stable_release_id() {
-    [[ "$1" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
-}
-
 lcc_validate_source_revision() {
     [[ "$1" =~ ^[0-9a-f]{40}$ ]] || \
         lcc_die "Source revision must be one lowercase 40-character Git commit SHA."

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 from pathlib import Path
@@ -63,147 +62,76 @@ def _installed_root(
     return root, release
 
 
-def _installer(path: Path, release_id: str) -> Path:
-    path.write_text(
-        "\n".join(
-            (
-                "#!/usr/bin/env bash",
-                f'readonly embedded_stable_ref="{release_id}"',
-                f'readonly embedded_archive_sha256="{"a" * 64}"',
-                'readonly stable_only_launcher="1"',
-                "exit 98",
-                "",
-            )
-        )
-    )
-    path.chmod(0o755)
-    return path
-
-
-def _release(
-    release_id: str,
-    origin: str,
-    *,
-    prerelease: bool = False,
-    draft: bool = False,
-    include_installer: bool = True,
-) -> dict[str, object]:
-    assets: list[dict[str, str]] = []
-    if include_installer:
-        assets.append(
-            {
-                "name": "install.sh",
-                "browser_download_url": f"{origin}/{release_id}/install.sh",
-            }
-        )
-    return {
-        "tag_name": release_id,
-        "draft": draft,
-        "prerelease": prerelease,
-        "assets": assets,
-    }
-
-
-def _environment(
-    tmp_path: Path,
-    root: Path,
-    releases: list[dict[str, object]],
-    installer: Path | None = None,
-) -> tuple[dict[str, str], Path]:
+def _environment(tmp_path: Path, root: Path, target_revision: str) -> tuple[dict[str, str], Path]:
     tmp_path.mkdir(parents=True, exist_ok=True)
-    release_json = tmp_path / "releases.json"
-    release_json.write_text(json.dumps(releases))
     handoff = tmp_path / "handoff.log"
-    environment = {
-        **os.environ,
-        "LCC_UPDATE_TESTING": "1",
-        "LCC_UPDATE_INSTALL_ROOT": str(root),
-        "LCC_UPDATE_TEST_LATEST_JSON": str(release_json),
-        "LCC_UPDATE_TEST_HANDOFF_LOG": str(handoff),
-    }
-    if installer is not None:
-        environment["LCC_UPDATE_TEST_INSTALLER"] = str(installer)
-    return environment, handoff
+    return (
+        {
+            **os.environ,
+            "LCC_UPDATE_TESTING": "1",
+            "LCC_UPDATE_INSTALL_ROOT": str(root),
+            "LCC_UPDATE_TEST_MAIN_SHA": target_revision,
+            "LCC_UPDATE_TEST_HANDOFF_LOG": str(handoff),
+        },
+        handoff,
+    )
 
 
 @pytest.mark.parametrize(
     ("repository", "origin"),
     ((GITHUB_REPOSITORY, GITHUB_ORIGIN), (FORGEJO_REPOSITORY, FORGEJO_ORIGIN)),
 )
-def test_stable_update_selects_newest_final_and_preserves_source(
+def test_release_installation_updates_to_exact_main_and_preserves_repository(
     tmp_path: Path, repository: str, origin: str
 ) -> None:
-    root, _release_path = _installed_root(
+    old_revision = "1" * 40
+    new_revision = "2" * 40
+    root, _release = _installed_root(
         tmp_path,
         channel="stable",
-        release_id="v1.0.0",
-        revision="1" * 40,
+        release_id="v1.0.1",
+        revision=old_revision,
         repository=repository,
         origin=origin,
     )
-    installer = _installer(tmp_path / "install.sh", "v1.0.10")
-    releases = [
-        _release("v1.0.3-rc.1", origin, prerelease=True),
-        _release("v9.0.0", origin, draft=True),
-        _release("v1.0.1", origin),
-        _release("v1.0.2", origin),
-        _release("v1.0.10", origin),
-    ]
-    environment, handoff = _environment(tmp_path, root, releases, installer)
+    environment, handoff = _environment(tmp_path, root, new_revision)
     result = subprocess.run(
         [UPDATER, "--yes"], check=True, capture_output=True, text=True, env=environment
     )
-    assert "Target release: v1.0.10" in result.stdout
-    arguments = handoff.read_text().splitlines()
-    assert arguments[0].endswith("/install.sh")
-    assert arguments[1:] == ["--asset-base-url", origin, "--non-interactive"]
-
-
-def test_stable_same_release_is_noop_and_newer_install_refuses_downgrade(
-    tmp_path: Path,
-) -> None:
-    root, _release_path = _installed_root(
-        tmp_path,
-        channel="stable",
-        release_id="v1.0.2",
-        revision="2" * 40,
-    )
-    releases = [_release("v1.0.2", GITHUB_ORIGIN, include_installer=False)]
-    environment, handoff = _environment(tmp_path, root, releases)
-    current = subprocess.run(
-        [UPDATER, "--yes"], check=True, capture_output=True, text=True, env=environment
-    )
-    assert current.stdout.strip() == "Learning Control Center is already up to date."
-    assert not handoff.exists()
-
-    releases = [_release("v1.0.1", GITHUB_ORIGIN)]
-    environment, _handoff = _environment(tmp_path, root, releases)
-    older = subprocess.run(
-        [UPDATER, "--yes"], check=False, capture_output=True, text=True, env=environment
-    )
-    assert older.returncode != 0
-    assert "rollback workflow" in older.stderr
+    assert "Current channel: stable" in result.stdout
+    assert "Current release: v1.0.1" in result.stdout
+    assert f"Current source SHA: {old_revision}" in result.stdout
+    assert f"Target source SHA: {new_revision}" in result.stdout
+    assert "Channel change: stable -> main" in result.stdout
+    assert handoff.read_text().splitlines()[1:] == [
+        "--channel",
+        "main",
+        "--commit",
+        new_revision,
+        "--repository-url",
+        repository,
+        "--non-interactive",
+        "--confirm-channel-change",
+    ]
 
 
 def test_main_update_is_exact_sha_pinned_and_same_sha_is_noop(tmp_path: Path) -> None:
     old_revision = "3" * 40
     new_revision = "4" * 40
-    root, _release_path = _installed_root(
+    root, _release = _installed_root(
         tmp_path,
         channel="main",
         release_id=f"main-{old_revision}",
         revision=old_revision,
         origin=GITHUB_REPOSITORY,
     )
-    environment, handoff = _environment(tmp_path, root, [])
-    environment["LCC_UPDATE_TEST_MAIN_SHA"] = new_revision
+    environment, handoff = _environment(tmp_path, root, new_revision)
     result = subprocess.run(
         [UPDATER, "--yes"], check=True, capture_output=True, text=True, env=environment
     )
     assert f"Current source SHA: {old_revision}" in result.stdout
     assert f"Target source SHA: {new_revision}" in result.stdout
-    arguments = handoff.read_text().splitlines()
-    assert arguments[1:] == [
+    assert handoff.read_text().splitlines()[1:] == [
         "--channel",
         "main",
         "--commit",
@@ -222,20 +150,15 @@ def test_main_update_is_exact_sha_pinned_and_same_sha_is_noop(tmp_path: Path) ->
     assert not handoff.exists()
 
 
-def test_dry_run_reaches_verified_bootstrap_without_applying(tmp_path: Path) -> None:
-    root, _release_path = _installed_root(
+def test_dry_run_reaches_verified_main_bootstrap_without_applying(tmp_path: Path) -> None:
+    root, _release = _installed_root(
         tmp_path,
         channel="stable",
-        release_id="v1.0.0",
-        revision="1" * 40,
+        release_id="v1.0.1",
+        revision="5" * 40,
     )
-    installer = _installer(tmp_path / "install.sh", "v1.0.1")
-    environment, handoff = _environment(
-        tmp_path,
-        root,
-        [_release("v1.0.1", GITHUB_ORIGIN)],
-        installer,
-    )
+    target_revision = "6" * 40
+    environment, handoff = _environment(tmp_path, root, target_revision)
     result = subprocess.run(
         [UPDATER, "--dry-run"],
         check=True,
@@ -243,53 +166,36 @@ def test_dry_run_reaches_verified_bootstrap_without_applying(tmp_path: Path) -> 
         text=True,
         env=environment,
     )
-    assert "DRY-RUN: verifying stable target v1.0.1" in result.stdout
-    assert handoff.read_text().splitlines()[-1] == "--dry-run"
+    assert f"DRY-RUN: verifying current main at {target_revision}" in result.stdout
+    assert handoff.read_text().splitlines()[-2:] == ["--confirm-channel-change", "--dry-run"]
 
 
-def test_channel_changes_are_explicit_and_forward_confirmation(tmp_path: Path) -> None:
-    revision = "5" * 40
-    root, _release_path = _installed_root(
+def test_normal_updater_has_no_release_discovery_or_channel_override(tmp_path: Path) -> None:
+    source = UPDATER.read_text()
+    assert "api.github.com/repos" not in source
+    assert "/api/v1/repos" not in source
+    assert "releases/latest" not in source
+    assert "prerelease" not in source
+    assert "refs/heads/main" in source
+    assert "git ls-remote" in source
+
+    root, _release = _installed_root(
         tmp_path,
-        channel="stable",
-        release_id="v1.0.1",
-        revision=revision,
-    )
-    environment, handoff = _environment(tmp_path, root, [])
-    environment["LCC_UPDATE_TEST_MAIN_SHA"] = "6" * 40
-    result = subprocess.run(
-        [UPDATER, "--channel", "main", "--yes"],
-        check=True,
-        capture_output=True,
-        text=True,
-        env=environment,
-    )
-    assert "Channel change: stable -> main" in result.stdout
-    assert handoff.read_text().splitlines()[-1] == "--confirm-channel-change"
-
-    main_root, _main_release = _installed_root(
-        tmp_path / "main-to-stable",
         channel="main",
         release_id=f"main-{'7' * 40}",
         revision="7" * 40,
         origin=GITHUB_REPOSITORY,
     )
-    stable_installer = _installer(tmp_path / "stable-install.sh", "v1.0.2")
-    stable_environment, stable_handoff = _environment(
-        tmp_path / "stable-switch",
-        main_root,
-        [_release("v1.0.2", GITHUB_ORIGIN)],
-        stable_installer,
-    )
-    switched = subprocess.run(
-        [UPDATER, "--channel", "stable", "--yes"],
-        check=True,
+    environment, _handoff = _environment(tmp_path, root, "8" * 40)
+    rejected = subprocess.run(
+        [UPDATER, "--channel", "stable"],
+        check=False,
         capture_output=True,
         text=True,
-        env=stable_environment,
+        env=environment,
     )
-    assert "Channel change: main -> stable" in switched.stdout
-    assert stable_handoff.read_text().splitlines()[-1] == "--confirm-channel-change"
+    assert rejected.returncode != 0
+    assert "Unknown update option" in rejected.stderr
 
 
 def test_persistent_wrapper_and_admin_are_thin_delegates() -> None:
@@ -308,7 +214,7 @@ def test_persistent_wrapper_follows_atomic_current_release_switch(tmp_path: Path
     application_root = tmp_path / "opt" / "learning-control-center"
     releases = application_root / "releases"
     releases.mkdir(parents=True)
-    for release_name in ("v1.0.1", "v1.0.2"):
+    for release_name in ("main-old", "main-new"):
         scripts = releases / release_name / "scripts"
         scripts.mkdir(parents=True)
         updater = scripts / "update.sh"
@@ -323,15 +229,15 @@ def test_persistent_wrapper_follows_atomic_current_release_switch(tmp_path: Path
     )
     wrapper.chmod(0o755)
     current = application_root / "current"
-    current.symlink_to(releases / "v1.0.1")
+    current.symlink_to(releases / "main-old")
     first = subprocess.run([wrapper], check=True, capture_output=True, text=True)
-    assert first.stdout.strip() == "v1.0.1"
+    assert first.stdout.strip() == "main-old"
 
     replacement = application_root / ".current.next"
-    replacement.symlink_to(releases / "v1.0.2")
+    replacement.symlink_to(releases / "main-new")
     replacement.replace(current)
     second = subprocess.run([wrapper], check=True, capture_output=True, text=True)
-    assert second.stdout.strip() == "v1.0.2"
+    assert second.stdout.strip() == "main-new"
 
 
 def test_public_update_commands_and_main_terminology_stay_synchronized() -> None:
@@ -341,18 +247,19 @@ def test_public_update_commands_and_main_terminology_stay_synchronized() -> None
     operations = (REPOSITORY_ROOT / "docs" / "PRODUCTION_OPERATIONS.md").read_text()
     release_docs = (REPOSITORY_ROOT / "docs" / "RELEASING.md").read_text()
     documentation = "\n".join((readme, installation, updates, operations, release_docs))
-    stable_command = (
-        "curl -fsSL https://github.com/Learning-Control-Center/"
-        "Learning-Control-Center/releases/latest/download/install.sh | sudo bash"
+    main_command = (
+        "curl -fsSL https://raw.githubusercontent.com/Learning-Control-Center/"
+        "Learning-Control-Center/main/scripts/bootstrap-ubuntu.sh | sudo bash"
     )
-    assert stable_command in readme
-    assert stable_command in installation
-    assert stable_command in updates
+    assert main_command in readme
+    assert main_command in installation
+    assert main_command in updates
+    assert "releases/latest/download/install.sh" not in documentation
     assert "sudo /opt/learning-control-center/update.sh" in readme
     assert "sudo lcc-admin update" in readme
     assert "DEVELOPMENT / UNSTABLE" not in documentation
     assert "unstable-main" not in documentation
-    assert "Current `main`" in readme
+    assert "immutable version snapshots" in readme
 
 
 @pytest.mark.parametrize(
