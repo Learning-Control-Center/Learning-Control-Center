@@ -27,7 +27,7 @@ from app.time_utils import local_date_for_ms, utc_now_ms
 
 PURPOSE = "v1_recommendation_compat"
 ALGORITHM_VERSION = "recommendation-v1"
-APPLICATION_VERSION = "1.0.0"
+APPLICATION_VERSION = "1.0.1"
 
 
 def _required_exit_ready(

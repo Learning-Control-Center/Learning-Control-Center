@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import stat
 import subprocess
@@ -35,10 +36,17 @@ def _production_environment(test_root: Path, destination: Path) -> Path:
         str(test_root / "var" / "backups" / "learning-control-center"),
     )
     destination.write_text(content)
+    destination.chmod(0o600)
     return destination
 
 
 def _install(test_root: Path, environment_file: Path) -> subprocess.CompletedProcess[str]:
+    source_revision = subprocess.run(
+        ["git", "-C", REPOSITORY_ROOT, "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
     return subprocess.run(
         [
             str(REPOSITORY_ROOT / "scripts" / "install-ubuntu.sh"),
@@ -46,6 +54,16 @@ def _install(test_root: Path, environment_file: Path) -> subprocess.CompletedPro
             "lcc.example.test",
             "--release-id",
             "test-release",
+            "--channel",
+            "stable",
+            "--source-revision",
+            source_revision,
+            "--source-repository",
+            "https://example.invalid/Learning-Control-Center.git",
+            "--source-ref",
+            "refs/tags/test-release",
+            "--source-origin",
+            "https://example.invalid/releases/download",
             "--env-file",
             str(environment_file),
             "--source",
@@ -74,6 +92,22 @@ def test_isolated_installer_is_idempotent_and_renders_non_secret_caddy(tmp_path:
     assert current.is_symlink()
     assert current.resolve() == application_root / "releases" / "test-release"
     assert (current / "RELEASE_ID").read_text().strip() == "test-release"
+    assert (current / "RELEASE_CHANNEL").read_text().strip() == "stable"
+    source_revision = subprocess.run(
+        ["git", "-C", REPOSITORY_ROOT, "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert (current / "SOURCE_REVISION").read_text().strip() == source_revision
+    release_manifest = (current / "RELEASE_MANIFEST").read_text()
+    assert "channel=stable" in release_manifest
+    assert f"source_revision={source_revision}" in release_manifest
+    deployment_record = (
+        test_root / "var" / "lib" / "learning-control-center" / "deployment-test-release.env"
+    ).read_text()
+    assert "channel=stable" in deployment_record
+    assert f"source_revision={source_revision}" in deployment_record
     assert (current / "scripts" / "lcc-admin").stat().st_mode & stat.S_IXUSR
 
     installed_environment = test_root / "etc" / "learning-control-center.env"
@@ -119,6 +153,31 @@ def test_isolated_installer_is_idempotent_and_renders_non_secret_caddy(tmp_path:
     )
     assert different_release.returncode != 0
     assert "use update-ubuntu.sh" in different_release.stderr
+
+    changed_environment = tmp_path / "changed-production.env"
+    changed_environment.write_text(
+        environment_file.read_text().replace(
+            "LCC_APP_TIMEZONE=UTC", "LCC_APP_TIMEZONE=Europe/Istanbul"
+        )
+    )
+    changed_environment.chmod(0o600)
+    refused_environment_replacement = _run_install_without_check(test_root, changed_environment)
+    assert refused_environment_replacement.returncode != 0
+    assert "--replace-env" in refused_environment_replacement.stderr
+
+
+def test_installer_recovers_only_marked_partial_matching_release(tmp_path: Path) -> None:
+    test_root = tmp_path / "installed-root"
+    environment_file = _production_environment(test_root, tmp_path / "production.env")
+    partial = test_root / "opt" / "learning-control-center" / "releases" / "test-release"
+    partial.mkdir(parents=True)
+    (partial / ".installing").write_text("")
+    (partial / "untrusted-partial-file").write_text("remove me")
+    result = _install(test_root, environment_file)
+    assert result.returncode == 0
+    assert not (partial / ".installing").exists()
+    assert not (partial / "untrusted-partial-file").exists()
+    assert (partial / "RELEASE_ID").read_text().strip() == "test-release"
 
 
 def test_uninstall_preserves_data_and_purge_requires_two_opt_ins(tmp_path: Path) -> None:
@@ -198,6 +257,7 @@ def test_production_environment_rejects_placeholder_and_development_database(
             str(test_root / "var" / "backups" / "learning-control-center"),
         )
     )
+    placeholder.chmod(0o600)
     result = subprocess.run(
         [
             str(REPOSITORY_ROOT / "scripts" / "install-ubuntu.sh"),
@@ -305,6 +365,104 @@ def test_environment_parser_does_not_export_or_echo_secrets(tmp_path: Path) -> N
     assert "line 1" in malformed.stderr
 
 
+def test_parsed_secrets_are_inherited_without_child_argv_exposure(tmp_path: Path) -> None:
+    environment_file = _production_environment(tmp_path, tmp_path / "production.env")
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            """
+source "$1"
+lcc_load_environment "$2"
+lcc_run_with_deploy_environment /usr/bin/python3 -c '
+import json
+import os
+from pathlib import Path
+secret = os.environ["LCC_SECURITY_SECRET"]
+bootstrap = os.environ["LCC_BOOTSTRAP_TOKEN"]
+cmdline = Path("/proc/self/cmdline").read_bytes()
+print(json.dumps({
+    "argv_has_security_secret": secret.encode() in cmdline,
+    "argv_has_bootstrap_token": bootstrap.encode() in cmdline,
+    "security_secret_available": len(secret) >= 32,
+    "bootstrap_token_available": len(bootstrap) >= 32,
+}))'
+""",
+            "environment-argv-test",
+            str(REPOSITORY_ROOT / "scripts" / "deploy-common.sh"),
+            str(environment_file),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert json.loads(result.stdout) == {
+        "argv_has_security_secret": False,
+        "argv_has_bootstrap_token": False,
+        "security_secret_available": True,
+        "bootstrap_token_available": True,
+    }
+
+
+def test_environment_generator_creates_complete_private_independent_secrets(
+    tmp_path: Path,
+) -> None:
+    test_root = tmp_path / "installed-root"
+    destination = tmp_path / "generated.env"
+    subprocess.run(
+        [
+            str(REPOSITORY_ROOT / "scripts" / "generate-production-env.sh"),
+            "--domain",
+            "lcc.example.test",
+            "--timezone",
+            "Europe/Istanbul",
+            "--output",
+            str(destination),
+            "--root",
+            str(test_root),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+    values = dict(
+        line.split("=", 1)
+        for line in destination.read_text().splitlines()
+        if line and not line.startswith("#")
+    )
+    assert values["LCC_ENVIRONMENT"] == "production"
+    assert values["LCC_PUBLIC_ORIGIN"] == "https://lcc.example.test"
+    assert values["LCC_APP_TIMEZONE"] == "Europe/Istanbul"
+    assert values["LCC_SECURITY_SECRET"] != values["LCC_BOOTSTRAP_TOKEN"]
+    assert len(values["LCC_SECURITY_SECRET"]) >= 32
+    assert len(values["LCC_BOOTSTRAP_TOKEN"]) >= 32
+    assert str(test_root / "var" / "lib" / "learning-control-center") in values["LCC_DATABASE_URL"]
+    assert (
+        str(test_root / "var" / "backups" / "learning-control-center")
+        == values["LCC_BACKUP_DIRECTORY"]
+    )
+
+    replacement = subprocess.run(
+        [
+            str(REPOSITORY_ROOT / "scripts" / "generate-production-env.sh"),
+            "--domain",
+            "lcc.example.test",
+            "--timezone",
+            "UTC",
+            "--output",
+            str(destination),
+            "--root",
+            str(test_root),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert replacement.returncode != 0
+    assert "Refusing to replace" in replacement.stderr
+
+
 def _run_install_without_check(
     test_root: Path, environment_file: Path
 ) -> subprocess.CompletedProcess[str]:
@@ -350,11 +508,198 @@ def test_units_admin_and_update_assets_encode_production_safety() -> None:
     assert 'export "$assignment"' in common
     assert "sqlite:///./data/lcc.db" not in admin
     assert "pre-update" in updater
+    assert "Backup command returned an unexpected path" in updater
+    assert 'test -f "$backup_path.manifest"' in updater
+    assert "lcc_select_single_new_backup" in updater
+    assert "did not create exactly one new backup" in common
+    assert "Never select an older file" in updater
+    assert "Recovery is incomplete; application and backup services remain stopped" in updater
+    assert "Automatic update recovery failed" in updater
+    assert "Automatic rollback recovery failed" in updater
     assert "--confirm-database-replacement" in updater
+    assert "--confirm-channel-change" in updater
+    assert "lcc_migration_relation" in updater
+    assert "main-$source_revision" in updater
     assert "lcc-ops" in updater and "restore --from" in updater
+    assert "show-bootstrap-token" in admin
+    assert "Source revision:" in admin and "Channel:" in admin
     installer = (REPOSITORY_ROOT / "scripts" / "install-ubuntu.sh").read_text()
     assert "--no-build-isolation" in installer
     assert "setuptools wheel" in installer
+
+
+def test_update_channel_and_migration_preflight_contracts(tmp_path: Path) -> None:
+    common = str(REPOSITORY_ROOT / "scripts" / "deploy-common.sh")
+    old_sha = "1" * 40
+    new_sha = "2" * 40
+
+    def transition(*arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                "bash",
+                "-c",
+                'source "$1"; shift; lcc_validate_update_transition "$@"',
+                "transition-test",
+                common,
+                *arguments,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    assert transition("stable", "v1.0.0", old_sha, "stable", "v1.0.1", new_sha, "0").returncode == 0
+    assert (
+        transition(
+            "main", f"main-{old_sha}", old_sha, "main", f"main-{new_sha}", new_sha, "0"
+        ).returncode
+        == 0
+    )
+
+    channel_change = transition(
+        "stable", "v1.0.0", old_sha, "main", f"main-{new_sha}", new_sha, "0"
+    )
+    assert channel_change.returncode != 0
+    assert "--confirm-channel-change" in channel_change.stderr
+    assert (
+        transition("stable", "v1.0.0", old_sha, "main", f"main-{new_sha}", new_sha, "1").returncode
+        == 0
+    )
+    assert (
+        transition("main", f"main-{old_sha}", old_sha, "stable", "v1.0.1", new_sha, "1").returncode
+        == 0
+    )
+
+    same = transition("stable", "v1.0.0", old_sha, "stable", "v1.0.0", old_sha, "0")
+    assert same.returncode != 0
+    assert "already active" in same.stderr
+    backward = transition("stable", "v1.0.1", old_sha, "stable", "v1.0.0", new_sha, "0")
+    assert backward.returncode != 0
+    assert "requires a newer vMAJOR.MINOR.PATCH release" in backward.stderr
+    prerelease = transition("stable", "v1.0.0", old_sha, "stable", "v1.0.1-rc.1", new_sha, "0")
+    assert prerelease.returncode != 0
+    assert "vMAJOR.MINOR.PATCH" in prerelease.stderr
+    build_metadata = transition(
+        "stable", "v1.0.0", old_sha, "stable", "v1.0.1+build.1", new_sha, "0"
+    )
+    assert build_metadata.returncode != 0
+
+    revisions = sorted(
+        path.stem
+        for path in (REPOSITORY_ROOT / "backend" / "alembic" / "versions").glob("*.py")
+        if path.name[0].isdigit()
+    )
+    first_revision = revisions[0]
+    head_revision = revisions[-1]
+
+    def migration_relation(current: str, candidate: str) -> str:
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                'source "$1"; lcc_migration_relation "$2" "$2" "$3" "$4"',
+                "migration-test",
+                common,
+                str(REPOSITORY_ROOT),
+                current,
+                candidate,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout.strip()
+
+    assert migration_relation(head_revision, head_revision) == "same"
+    assert migration_relation(first_revision, head_revision) == "forward"
+    assert migration_relation(head_revision, first_revision) == "backward"
+    assert migration_relation("not-a-revision", head_revision) == "divergent"
+
+    legacy_release = tmp_path / "legacy-release"
+    legacy_release.mkdir()
+    legacy_revision = "artifact-sha256-" + "a" * 64
+    (legacy_release / "SOURCE_REVISION").write_text(legacy_revision + "\n")
+    legacy_result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; lcc_release_source_revision "$2"',
+            "legacy-revision-test",
+            common,
+            str(legacy_release),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert legacy_result.stdout.strip() == legacy_revision
+    assert "Legacy release" in legacy_result.stderr
+    (legacy_release / "RELEASE_CHANNEL").write_text("stable\n")
+    rejected_legacy = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; lcc_release_source_revision "$2"',
+            "legacy-revision-test",
+            common,
+            str(legacy_release),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert rejected_legacy.returncode != 0
+
+
+def test_legacy_backup_selection_accepts_only_one_new_file(tmp_path: Path) -> None:
+    common = str(REPOSITORY_ROOT / "scripts" / "deploy-common.sh")
+    backup_directory = tmp_path / "backups"
+    backup_directory.mkdir()
+    old_backup = "lcc-pre-update-old.sqlite3"
+    new_backup = "lcc-pre-update-new.sqlite3"
+    extra_backup = "lcc-pre-update-extra.sqlite3"
+    (backup_directory / old_backup).write_text("old")
+    before = tmp_path / "before"
+    after = tmp_path / "after"
+    before.write_text(f"{old_backup}\n")
+    (backup_directory / new_backup).write_text("new")
+    after.write_text(f"{new_backup}\n{old_backup}\n")
+
+    selected = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; lcc_select_single_new_backup "$2" "$3" "$4"',
+            "backup-selection-test",
+            common,
+            str(backup_directory),
+            str(before),
+            str(after),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert selected.stdout.strip() == str(backup_directory / new_backup)
+
+    after.write_text(f"{extra_backup}\n{new_backup}\n{old_backup}\n")
+    ambiguous = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; lcc_select_single_new_backup "$2" "$3" "$4"',
+            "backup-selection-test",
+            common,
+            str(backup_directory),
+            str(before),
+            str(after),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert ambiguous.returncode != 0
+    assert "exactly one new backup" in ambiguous.stderr
 
 
 def test_python_constraints_cover_direct_production_dependencies() -> None:
@@ -414,12 +759,15 @@ def test_sanitized_release_copy_excludes_local_secrets_and_state(tmp_path: Path)
 @pytest.mark.skipif(os.name != "posix", reason="deployment scripts target Linux")
 def test_deployment_shell_scripts_have_valid_bash_syntax() -> None:
     scripts = [
+        "bootstrap-ubuntu.sh",
         "deploy-common.sh",
+        "generate-production-env.sh",
         "install-ubuntu.sh",
         "lcc-admin",
         "update-ubuntu.sh",
         "uninstall-ubuntu.sh",
         "operational-backup.sh",
+        "package-release.sh",
     ]
     subprocess.run(
         ["bash", "-n", *(str(REPOSITORY_ROOT / "scripts" / item) for item in scripts)],

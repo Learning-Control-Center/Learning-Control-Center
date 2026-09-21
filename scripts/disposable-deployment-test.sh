@@ -47,7 +47,18 @@ rsync -a --delete \
 ln -s "$repository_root/.venv" "$release_one/.venv"
 ln -s "$repository_root/frontend/node_modules" "$release_one/frontend/node_modules"
 printf 'disposable-v1\n' > "$release_one/RELEASE_ID"
-printf '%s\n' "$(git -C "$repository_root" rev-parse HEAD)" > "$release_one/SOURCE_REVISION"
+printf 'main\n' > "$release_one/RELEASE_CHANNEL"
+source_revision="$(git -C "$repository_root" rev-parse HEAD)"
+printf '%s\n' "$source_revision" > "$release_one/SOURCE_REVISION"
+cat > "$release_one/RELEASE_MANIFEST" <<EOF
+metadata_version=1
+channel=main
+release_id=disposable-v1
+source_repository=https://github.com/Learning-Control-Center/Learning-Control-Center.git
+source_ref=refs/heads/main
+source_revision=$source_revision
+source_origin=https://github.com/Learning-Control-Center/Learning-Control-Center.git
+EOF
 npm --prefix "$release_one/frontend" run build
 ln -s "$release_one" "$application_root/current"
 
@@ -109,6 +120,7 @@ stop_backend
 
 cp -a "$release_one" "$release_two"
 printf 'disposable-v2\n' > "$release_two/RELEASE_ID"
+sed -i 's/^release_id=.*/release_id=disposable-v2/' "$release_two/RELEASE_MANIFEST"
 next_link="$application_root/.current.next"
 ln -s "$release_two" "$next_link"
 mv -Tf "$next_link" "$application_root/current"

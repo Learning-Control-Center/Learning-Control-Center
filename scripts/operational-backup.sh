@@ -58,12 +58,33 @@ test "$revision" = "$expected_revision" || {
 checksum="$(sha256sum "$destination" | cut -d' ' -f1)"
 manifest="$destination.manifest"
 release_id="$(tr -d '\r\n' < "$LCC_RELEASE_ROOT/RELEASE_ID")"
-source_revision="unknown"
-if test -f "$LCC_RELEASE_ROOT/SOURCE_REVISION"; then
-    source_revision="$(tr -d '\r\n' < "$LCC_RELEASE_ROOT/SOURCE_REVISION")"
+release_channel="stable"
+if test -f "$LCC_RELEASE_ROOT/RELEASE_CHANNEL"; then
+    release_channel="$(tr -d '\r\n' < "$LCC_RELEASE_ROOT/RELEASE_CHANNEL")"
 fi
-printf 'checksum_sha256=%s\nschema_revision=%s\nrelease_id=%s\nsource_revision=%s\ndatabase_path=%s\n' \
-    "$checksum" "$revision" "$release_id" "$source_revision" "$database_path" >"$manifest"
+test -f "$LCC_RELEASE_ROOT/SOURCE_REVISION" || {
+    echo "The deployed source revision is missing" >&2
+    exit 2
+}
+source_revision="$(tr -d '\r\n' < "$LCC_RELEASE_ROOT/SOURCE_REVISION")"
+[[ "$source_revision" =~ ^[0-9a-f]{40}$ ]] || {
+    echo "The deployed source revision is not a full Git commit SHA" >&2
+    exit 2
+}
+test -f "$LCC_RELEASE_ROOT/RELEASE_MANIFEST" || {
+    echo "The deployed release manifest is missing" >&2
+    exit 2
+}
+source_repository="$(sed -n 's/^source_repository=//p' "$LCC_RELEASE_ROOT/RELEASE_MANIFEST" | head -n1)"
+source_ref="$(sed -n 's/^source_ref=//p' "$LCC_RELEASE_ROOT/RELEASE_MANIFEST" | head -n1)"
+source_origin="$(sed -n 's/^source_origin=//p' "$LCC_RELEASE_ROOT/RELEASE_MANIFEST" | head -n1)"
+test -n "$source_repository" && test -n "$source_ref" && test -n "$source_origin" || {
+    echo "The deployed release manifest lacks source identity" >&2
+    exit 2
+}
+printf 'checksum_sha256=%s\nschema_revision=%s\nchannel=%s\nrelease_id=%s\nsource_repository=%s\nsource_ref=%s\nsource_revision=%s\nsource_origin=%s\ndatabase_path=%s\n' \
+    "$checksum" "$revision" "$release_channel" "$release_id" "$source_repository" \
+    "$source_ref" "$source_revision" "$source_origin" "$database_path" >"$manifest"
 chmod 600 -- "$manifest"
 
 if test "$purpose" = "scheduled"; then
@@ -76,3 +97,4 @@ if test "$purpose" = "scheduled"; then
     done
 fi
 trap - EXIT
+printf '%s\n' "$destination"

@@ -42,6 +42,247 @@ lcc_validate_release_id() {
     test "$release_id" != "current" || lcc_die "Release ID 'current' is reserved."
 }
 
+lcc_validate_release_channel() {
+    case "$1" in
+        stable|main) ;;
+        *) lcc_die "Release channel must be stable or main." ;;
+    esac
+}
+
+lcc_validate_source_revision() {
+    [[ "$1" =~ ^[0-9a-f]{40}$ ]] || \
+        lcc_die "Source revision must be one lowercase 40-character Git commit SHA."
+}
+
+lcc_validate_public_hostname() {
+    local hostname="$1"
+    python3 - "$hostname" <<'PY'
+import re
+import sys
+
+hostname = sys.argv[1]
+labels = hostname.split(".")
+if (
+    len(hostname) > 253
+    or len(labels) < 2
+    or any(
+        not label
+        or len(label) > 63
+        or re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", label) is None
+        for label in labels
+    )
+):
+    raise SystemExit(
+        "Hostname must be a lowercase DNS name without a scheme, port, path, or whitespace"
+    )
+PY
+}
+
+lcc_validate_https_url() {
+    local value="$1"
+    local label="${2:-URL}"
+    python3 - "$value" "$label" <<'PY'
+import sys
+from urllib.parse import urlparse
+
+value, label = sys.argv[1:]
+parsed = urlparse(value)
+if (
+    value != value.strip()
+    or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    or parsed.scheme != "https"
+    or not parsed.hostname
+    or parsed.username is not None
+    or parsed.password is not None
+    or parsed.query
+    or parsed.fragment
+):
+    raise SystemExit(f"{label} must be a public HTTPS URL without credentials, query, or fragment")
+PY
+}
+
+lcc_validate_environment_file_security() {
+    local path="$1"
+    local allow_installed="${2:-0}"
+    local expected_uid="${3:-0}"
+    local expected_group="$LCC_SERVICE_GROUP"
+    python3 - "$path" "$allow_installed" "$expected_uid" "$expected_group" <<'PY'
+import grp
+import os
+import stat
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+allow_installed = sys.argv[2] == "1"
+expected_uid = int(sys.argv[3])
+expected_group_name = sys.argv[4]
+if path.is_symlink():
+    raise SystemExit("Environment file must not be a symbolic link")
+absolute_path = Path(os.path.abspath(path))
+resolved_path = path.resolve(strict=True)
+if resolved_path != absolute_path:
+    raise SystemExit("Environment file path must not contain symbolic links")
+details = path.stat()
+if not stat.S_ISREG(details.st_mode):
+    raise SystemExit("Environment file must be a regular file")
+if details.st_uid != expected_uid:
+    raise SystemExit("Environment file must be owned by the invoking trusted administrator")
+mode = stat.S_IMODE(details.st_mode)
+if allow_installed:
+    if expected_uid != 0:
+        expected_gid = details.st_gid
+    else:
+        try:
+            expected_gid = grp.getgrnam(expected_group_name).gr_gid
+        except KeyError:
+            raise SystemExit("Installed environment group does not exist")
+    if details.st_gid != expected_gid or mode != 0o640:
+        raise SystemExit("Installed environment file must be root:lcc 0640")
+elif mode & 0o077:
+    raise SystemExit("External environment file must not grant group or other permissions")
+for parent in resolved_path.parents:
+    parent_details = parent.stat()
+    parent_mode = stat.S_IMODE(parent_details.st_mode)
+    trusted_owner = parent_details.st_uid in {0, expected_uid}
+    if expected_uid != 0 and not parent_mode & 0o022:
+        # Isolated test roots may run inside a container whose immutable root
+        # directories are mapped to a namespace owner other than UID 0.
+        trusted_owner = True
+    sticky_root_directory = (
+        expected_uid != 0 and bool(parent_mode & stat.S_ISVTX)
+    )
+    if sticky_root_directory:
+        trusted_owner = True
+    if not trusted_owner or (
+        parent_mode & 0o022 and not sticky_root_directory
+    ):
+        raise SystemExit(
+            "Environment file parent directories must not be replaceable by untrusted users"
+        )
+PY
+}
+
+lcc_release_channel() {
+    local release_root="$1"
+    if test -f "$release_root/RELEASE_CHANNEL"; then
+        tr -d '\r\n' < "$release_root/RELEASE_CHANNEL"
+    else
+        printf 'stable\n'
+    fi
+}
+
+lcc_release_source_revision() {
+    local release_root="$1"
+    test -f "$release_root/SOURCE_REVISION" || lcc_die "Release source revision is missing."
+    local revision
+    revision="$(tr -d '\r\n' < "$release_root/SOURCE_REVISION")"
+    if [[ ! "$revision" =~ ^[0-9a-f]{40}$ ]]; then
+        if test ! -f "$release_root/RELEASE_CHANNEL" && \
+            [[ "$revision" =~ ^artifact-sha256-[0-9a-f]{64}$ ]]; then
+            lcc_note "Legacy release uses an artifact-content revision; new releases require Git SHAs."
+        else
+            lcc_die "Release source revision is not a valid immutable identity."
+        fi
+    fi
+    printf '%s\n' "$revision"
+}
+
+lcc_validate_release_manifest() {
+    local release_root="$1"
+    local release_channel="$2"
+    local release_id="$3"
+    local source_repository="$4"
+    local source_ref="$5"
+    local source_revision="$6"
+    local source_origin="$7"
+    local manifest="$release_root/RELEASE_MANIFEST"
+    test -f "$manifest" || lcc_die "Release manifest is missing."
+    if ! { grep -Fqx 'metadata_version=1' "$manifest" && \
+        grep -Fqx "channel=$release_channel" "$manifest" && \
+        grep -Fqx "release_id=$release_id" "$manifest" && \
+        grep -Fqx "source_repository=$source_repository" "$manifest" && \
+        grep -Fqx "source_ref=$source_ref" "$manifest" && \
+        grep -Fqx "source_revision=$source_revision" "$manifest" && \
+        grep -Fqx "source_origin=$source_origin" "$manifest"; }; then
+        lcc_die "Release manifest does not match the selected immutable source identity."
+    fi
+}
+
+lcc_validate_update_transition() {
+    local old_channel="$1"
+    local old_release_id="$2"
+    local old_source_revision="$3"
+    local new_channel="$4"
+    local new_release_id="$5"
+    local new_source_revision="$6"
+    local confirm_channel_change="${7:-0}"
+    if test "$new_release_id" = "$old_release_id" || \
+        test "$new_source_revision" = "$old_source_revision"; then
+        lcc_die "The requested immutable source identity is already active."
+    fi
+    if test "$new_channel" != "$old_channel" && test "$confirm_channel_change" -ne 1; then
+        lcc_die "Changing from $old_channel to $new_channel requires --confirm-channel-change."
+    fi
+    if test "$new_channel" = stable && test "$old_channel" = stable; then
+        /usr/bin/python3 - "$old_release_id" "$new_release_id" <<'PY' || \
+            lcc_die "Stable apply requires a newer vMAJOR.MINOR.PATCH release; use rollback for older releases."
+import re
+import sys
+
+pattern = re.compile(r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
+versions = []
+for value in sys.argv[1:]:
+    match = pattern.fullmatch(value)
+    if match is None:
+        raise SystemExit(1)
+    versions.append(tuple(int(part) for part in match.groups()))
+if versions[1] <= versions[0]:
+    raise SystemExit(1)
+PY
+    fi
+}
+
+lcc_revision_is_ancestor() {
+    local release_directory="$1"
+    local ancestor="$2"
+    local descendant="$3"
+    "$release_directory/.venv/bin/python" - "$release_directory" "$ancestor" "$descendant" <<'PY'
+import sys
+from pathlib import Path
+
+from alembic.config import Config
+from alembic.script import ScriptDirectory
+
+root = Path(sys.argv[1])
+ancestor, descendant = sys.argv[2:]
+config = Config(str(root / "alembic.ini"))
+config.set_main_option("script_location", str(root / "backend" / "alembic"))
+scripts = ScriptDirectory.from_config(config)
+try:
+    tuple(scripts.iterate_revisions(descendant, ancestor))
+except Exception:
+    raise SystemExit(1)
+raise SystemExit(0)
+PY
+}
+
+lcc_migration_relation() {
+    local candidate_release="$1"
+    local current_release="$2"
+    local current_revision="$3"
+    local candidate_revision="$4"
+    if test "$current_revision" = "$candidate_revision"; then
+        printf 'same\n'
+    elif lcc_revision_is_ancestor "$candidate_release" "$current_revision" "$candidate_revision"; then
+        printf 'forward\n'
+    elif lcc_revision_is_ancestor "$current_release" "$candidate_revision" "$current_revision"; then
+        printf 'backward\n'
+    else
+        printf 'divergent\n'
+    fi
+}
+
 lcc_prefixed_path() {
     local root="$1"
     local path="$2"
@@ -102,6 +343,32 @@ lcc_load_environment() {
     done < "$environment_file"
 }
 
+lcc_run_with_deploy_environment() {
+    # Export parsed values inside a subshell so secret values are inherited through the
+    # process environment rather than exposed in a child process's argument vector.
+    (
+        local assignment key
+        for assignment in "${LCC_DEPLOY_ENV_ARGS[@]}"; do
+            key="${assignment%%=*}"
+            export "${key?}"
+        done
+        "$@"
+    )
+}
+
+lcc_select_single_new_backup() {
+    local backup_directory="$1"
+    local before_inventory="$2"
+    local after_inventory="$3"
+    local -a created_backups=()
+    mapfile -t created_backups < <(comm -13 "$before_inventory" "$after_inventory")
+    if test "${#created_backups[@]}" -ne 1; then
+        lcc_note "Legacy backup command did not create exactly one new backup."
+        return 1
+    fi
+    printf '%s/%s\n' "$backup_directory" "${created_backups[0]}"
+}
+
 lcc_validate_environment() {
     local expected_release_root="${1:-$LCC_CURRENT_RELEASE}"
     test "${LCC_ENVIRONMENT:-}" = "production" || lcc_die "LCC_ENVIRONMENT must be production."
@@ -123,8 +390,7 @@ lcc_validate_environment() {
         [[ "$assignment" != *CHANGE_ME* ]] || \
             lcc_die "Replace every CHANGE_ME placeholder before installation."
     done
-    env -i PATH=/usr/bin:/bin "${LCC_DEPLOY_ENV_ARGS[@]}" \
-        python3 - "$expected_release_root" <<'PY'
+    lcc_run_with_deploy_environment /usr/bin/python3 - "$expected_release_root" <<'PY'
 import json
 import os
 import sys
@@ -174,31 +440,11 @@ PY
 }
 
 lcc_public_hostname() {
-    env -i PATH=/usr/bin:/bin "${LCC_DEPLOY_ENV_ARGS[@]}" python3 - <<'PY'
+    lcc_run_with_deploy_environment /usr/bin/python3 - <<'PY'
 import os
 from urllib.parse import urlparse
 print(urlparse(os.environ["LCC_PUBLIC_ORIGIN"]).hostname)
 PY
-}
-
-lcc_source_revision() {
-    local source="$1"
-    local git_root=""
-    git_root="$(git -C "$source" rev-parse --show-toplevel 2>/dev/null || true)"
-    if test -n "$git_root" && test "$(readlink -f "$git_root")" = "$(readlink -f "$source")"; then
-        git -C "$source" rev-parse HEAD
-    else
-        local digest temporary
-        temporary="$(mktemp -d)"
-        if ! lcc_copy_release_source "$source" "$temporary" sanitized; then
-            rm -rf -- "$temporary"
-            return 1
-        fi
-        digest="$(tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
-            -cf - -C "$temporary" . | sha256sum | cut -d' ' -f1)"
-        rm -rf -- "$temporary"
-        printf 'artifact-sha256-%s\n' "$digest"
-    fi
 }
 
 lcc_copy_release_source() {

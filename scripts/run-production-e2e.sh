@@ -50,7 +50,18 @@ mkdir -p -- "$LCC_RELEASE_ROOT"
 ln -s "$repository_root/.venv" "$LCC_RELEASE_ROOT/.venv"
 ln -s "$repository_root/backend" "$LCC_RELEASE_ROOT/backend"
 printf 'production-e2e\n' > "$LCC_RELEASE_ROOT/RELEASE_ID"
-printf '%s\n' "$(git rev-parse HEAD)" > "$LCC_RELEASE_ROOT/SOURCE_REVISION"
+printf 'main\n' > "$LCC_RELEASE_ROOT/RELEASE_CHANNEL"
+source_revision="$(git rev-parse HEAD)"
+printf '%s\n' "$source_revision" > "$LCC_RELEASE_ROOT/SOURCE_REVISION"
+cat > "$LCC_RELEASE_ROOT/RELEASE_MANIFEST" <<EOF
+metadata_version=1
+channel=main
+release_id=production-e2e
+source_repository=https://github.com/Learning-Control-Center/Learning-Control-Center.git
+source_ref=refs/heads/main
+source_revision=$source_revision
+source_origin=https://github.com/Learning-Control-Center/Learning-Control-Center.git
+EOF
 caddy validate --config "$repository_root/deploy/Caddyfile" --adapter caddyfile
 "$repository_root/.venv/bin/uvicorn" app.main:app --host 127.0.0.1 --port 8000 --workers 1 --no-proxy-headers >"$run_directory/backend.log" 2>&1 &
 backend_pid=$!

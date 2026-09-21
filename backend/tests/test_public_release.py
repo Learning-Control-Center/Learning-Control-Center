@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -12,10 +14,13 @@ import tomllib
 from pathlib import Path
 from urllib.parse import unquote
 
+import pytest
+
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 BOOTSTRAP = REPOSITORY_ROOT / "scripts" / "bootstrap-ubuntu.sh"
 PACKAGER = REPOSITORY_ROOT / "scripts" / "package-release.sh"
-RELEASE_ID = "v1.0.0"
+GENERATOR = REPOSITORY_ROOT / "scripts" / "generate-production-env.sh"
+RELEASE_ID = "v1.0.1"
 ARCHIVE_NAME = f"learning-control-center-{RELEASE_ID}.tar.gz"
 CHECKSUM_NAME = f"{ARCHIVE_NAME}.sha256"
 
@@ -29,6 +34,13 @@ def _write(path: Path, content: str | bytes, mode: int = 0o644) -> None:
     path.chmod(mode)
 
 
+def _copy_current(repository: Path, relative_path: str) -> None:
+    source = REPOSITORY_ROOT / relative_path
+    destination = repository / relative_path
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination)
+
+
 def _release_repository(tmp_path: Path) -> Path:
     repository = tmp_path / "release-source"
     repository.mkdir()
@@ -40,24 +52,31 @@ def _release_repository(tmp_path: Path) -> Path:
     with tarfile.open(fileobj=io.BytesIO(source_archive), mode="r:") as bundle:
         bundle.extractall(repository, filter="data")
 
-    shutil.copy2(BOOTSTRAP, repository / "scripts" / "bootstrap-ubuntu.sh")
-    shutil.copy2(PACKAGER, repository / "scripts" / "package-release.sh")
-    shutil.copy2(REPOSITORY_ROOT / "CHANGELOG.md", repository / "CHANGELOG.md")
-    shutil.copy2(REPOSITORY_ROOT / "docs" / "RELEASING.md", repository / "docs" / "RELEASING.md")
-    shutil.copy2(
-        REPOSITORY_ROOT / "docs" / "INSTALLATION.md",
-        repository / "docs" / "INSTALLATION.md",
-    )
-    shutil.copy2(REPOSITORY_ROOT / "docs" / "UPDATES.md", repository / "docs" / "UPDATES.md")
+    for relative_path in (
+        "CHANGELOG.md",
+        "pyproject.toml",
+        "backend/app/main.py",
+        "backend/app/analysis/v1_compat.py",
+        "frontend/package.json",
+        "frontend/package-lock.json",
+        "scripts/bootstrap-ubuntu.sh",
+        "scripts/deploy-common.sh",
+        "scripts/generate-production-env.sh",
+        "scripts/package-release.sh",
+        "docs/INSTALLATION.md",
+        "docs/RELEASING.md",
+        "docs/UPDATES.md",
+    ):
+        _copy_current(repository, relative_path)
 
-    subprocess.run(["git", "init", "--quiet", repository], check=True)
+    subprocess.run(["git", "init", "--quiet", "--initial-branch=main", repository], check=True)
     subprocess.run(["git", "-C", repository, "config", "user.name", "WaqSea"], check=True)
     subprocess.run(
         ["git", "-C", repository, "config", "user.email", "contact@waqsea.com"],
         check=True,
     )
 
-    files: dict[str, str | bytes] = {
+    private_files: dict[str, str | bytes] = {
         "memory-bank/private.md": "private agent context\n",
         "data/lcc.db": b"private database",
         "backups/lcc.sqlite3": b"private backup",
@@ -74,7 +93,7 @@ def _release_repository(tmp_path: Path) -> Path:
         ".abacusai/cache.txt": "private tool state\n",
         "backend/tests/fixtures/private.sqlite3": b"private fixture",
     }
-    for relative_path, content in files.items():
+    for relative_path, content in private_files.items():
         _write(repository / relative_path, content)
 
     _write(
@@ -82,13 +101,25 @@ def _release_repository(tmp_path: Path) -> Path:
         """#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\\n' "$@" > "${LCC_BOOTSTRAP_HANDOFF_LOG:?}"
+while test "$#" -gt 0; do
+    case "$1" in
+        --env-file)
+            stat -c '%a' "$(dirname "$2")" > "${LCC_BOOTSTRAP_ENV_MODE_CAPTURE:?}"
+            stat -c '%a' "$2" >> "${LCC_BOOTSTRAP_ENV_MODE_CAPTURE:?}"
+            cp "$2" "${LCC_BOOTSTRAP_ENV_CAPTURE:?}"
+            chmod 0600 "${LCC_BOOTSTRAP_ENV_CAPTURE:?}"
+            shift 2
+            ;;
+        *) shift ;;
+    esac
+done
 printf 'fake installer invoked\\n'
 """,
         0o755,
     )
     subprocess.run(["git", "-C", repository, "add", "."], check=True)
     subprocess.run(
-        ["git", "-C", repository, "add", "--force", "--", *files],
+        ["git", "-C", repository, "add", "--force", "--", *private_files],
         check=True,
     )
     subprocess.run(
@@ -102,7 +133,7 @@ printf 'fake installer invoked\\n'
     return repository
 
 
-def _package(repository: Path, output_directory: Path) -> tuple[Path, Path]:
+def _package(repository: Path, output_directory: Path) -> tuple[Path, Path, Path]:
     result = subprocess.run(
         [
             PACKAGER,
@@ -119,31 +150,45 @@ def _package(repository: Path, output_directory: Path) -> tuple[Path, Path]:
         capture_output=True,
         text=True,
     )
-    assert "Release identity: v1.0.0" in result.stdout
-    return output_directory / ARCHIVE_NAME, output_directory / CHECKSUM_NAME
+    assert f"Release identity: {RELEASE_ID}" in result.stdout
+    return (
+        output_directory / ARCHIVE_NAME,
+        output_directory / CHECKSUM_NAME,
+        output_directory / "install.sh",
+    )
 
 
-def _bootstrap_environment(tmp_path: Path, asset_root: Path) -> dict[str, str]:
+def _bootstrap_environment(tmp_path: Path, asset_root: Path | None = None) -> dict[str, str]:
     os_release = tmp_path / "os-release"
     os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
-    return {
+    secret_temp = tmp_path / "secret-temp"
+    secret_temp.mkdir(exist_ok=True)
+    environment = {
         **os.environ,
         "LCC_BOOTSTRAP_TESTING": "1",
         "LCC_BOOTSTRAP_OS_RELEASE": str(os_release),
-        "LCC_BOOTSTRAP_ASSET_BASE_URL": asset_root.as_uri(),
         "LCC_BOOTSTRAP_HANDOFF_LOG": str(tmp_path / "handoff.log"),
+        "LCC_BOOTSTRAP_ENV_CAPTURE": str(tmp_path / "generated.env"),
+        "LCC_BOOTSTRAP_ENV_MODE_CAPTURE": str(tmp_path / "generated-env.modes"),
+        "LCC_BOOTSTRAP_SECRET_TMPDIR": str(secret_temp),
     }
+    if asset_root is not None:
+        environment["LCC_BOOTSTRAP_ASSET_BASE_URL"] = asset_root.as_uri()
+    return environment
 
 
-def _bootstrap_command(environment_file: Path, *, dry_run: bool = False) -> list[str]:
+def _stable_command(script: Path = BOOTSTRAP, *, dry_run: bool = False) -> list[str]:
     command = [
-        str(BOOTSTRAP),
+        str(script),
+        "--channel",
+        "stable",
         "--ref",
         RELEASE_ID,
         "--domain",
         "lcc.example.test",
-        "--env-file",
-        str(environment_file),
+        "--timezone",
+        "UTC",
+        "--non-interactive",
     ]
     if dry_run:
         command.append("--dry-run")
@@ -154,14 +199,20 @@ def test_release_packaging_is_deterministic_bounded_and_mode_preserving(
     tmp_path: Path,
 ) -> None:
     repository = _release_repository(tmp_path)
-    first_archive, first_checksum = _package(repository, tmp_path / "first")
-    second_archive, second_checksum = _package(repository, tmp_path / "second")
+    first_archive, first_checksum, first_install = _package(repository, tmp_path / "first")
+    second_archive, second_checksum, second_install = _package(repository, tmp_path / "second")
 
     assert first_archive.read_bytes() == second_archive.read_bytes()
     assert first_checksum.read_text() == second_checksum.read_text()
+    assert first_install.read_bytes() == second_install.read_bytes()
     expected_hash, expected_name = first_checksum.read_text().split()
     assert expected_name == ARCHIVE_NAME
     assert hashlib.sha256(first_archive.read_bytes()).hexdigest() == expected_hash
+    assert stat.S_IMODE(first_install.stat().st_mode) == 0o755
+    launcher = first_install.read_text()
+    assert f'readonly embedded_stable_ref="{RELEASE_ID}"' in launcher
+    assert f'readonly embedded_archive_sha256="{expected_hash}"' in launcher
+    assert 'readonly stable_only_launcher="1"' in launcher
 
     with tarfile.open(first_archive, "r:gz") as bundle:
         members = {member.name: member for member in bundle.getmembers()}
@@ -173,13 +224,16 @@ def test_release_packaging_is_deterministic_bounded_and_mode_preserving(
         f"{prefix}logo.png",
         f"{prefix}frontend/public/logo.png",
         f"{prefix}scripts/bootstrap-ubuntu.sh",
+        f"{prefix}scripts/generate-production-env.sh",
         f"{prefix}scripts/install-ubuntu.sh",
         f"{prefix}RELEASE_ID",
+        f"{prefix}RELEASE_CHANNEL",
         f"{prefix}SOURCE_REVISION",
         f"{prefix}RELEASE_MANIFEST",
     }
     assert expected <= members.keys()
     assert members[f"{prefix}scripts/bootstrap-ubuntu.sh"].mode & stat.S_IXUSR
+    assert members[f"{prefix}scripts/generate-production-env.sh"].mode & stat.S_IXUSR
     assert members[f"{prefix}scripts/install-ubuntu.sh"].mode & stat.S_IXUSR
     forbidden_fragments = (
         "/memory-bank/",
@@ -211,46 +265,43 @@ def test_release_packaging_is_deterministic_bounded_and_mode_preserving(
     )
 
 
-def test_bootstrap_requires_explicit_immutable_ref(tmp_path: Path) -> None:
-    environment_file = tmp_path / "production.env"
-    environment_file.write_text("placeholder\n")
+def test_stable_is_default_but_requires_an_explicit_release_ref(tmp_path: Path) -> None:
     missing = subprocess.run(
-        [BOOTSTRAP, "--domain", "lcc.example.test", "--env-file", environment_file],
+        [BOOTSTRAP, "--non-interactive", "--domain", "lcc.example.test", "--timezone", "UTC"],
         check=False,
         capture_output=True,
         text=True,
     )
     assert missing.returncode != 0
-    assert "--ref is required" in missing.stderr
+    assert "Stable bootstrap requires --ref" in missing.stderr
 
     moving = subprocess.run(
         [
             BOOTSTRAP,
+            "--channel",
+            "stable",
             "--ref",
             "main",
+            "--non-interactive",
             "--domain",
             "lcc.example.test",
-            "--env-file",
-            environment_file,
+            "--timezone",
+            "UTC",
         ],
         check=False,
         capture_output=True,
         text=True,
     )
     assert moving.returncode != 0
-    assert "semantic release tag or full 40-character commit" in moving.stderr
+    assert "semantic release tag" in moving.stderr
 
 
-def test_bootstrap_validates_release_cleans_temp_and_hands_off_without_secrets(
+def test_bootstrap_generates_secure_environment_and_hands_off_without_secrets(
     tmp_path: Path,
 ) -> None:
     repository = _release_repository(tmp_path)
     asset_root = tmp_path / "assets"
-    release_assets = asset_root / RELEASE_ID
-    _package(repository, release_assets)
-    environment_file = tmp_path / "production.env"
-    secret = "never-print-this-production-secret"
-    environment_file.write_text(f"LCC_SECURITY_SECRET={secret}\n")
+    _package(repository, asset_root / RELEASE_ID)
     temporary_root = tmp_path / "bootstrap-temp"
     temporary_root.mkdir()
     environment = {
@@ -258,51 +309,115 @@ def test_bootstrap_validates_release_cleans_temp_and_hands_off_without_secrets(
         "TMPDIR": str(temporary_root),
     }
 
-    dry_run = subprocess.run(
-        _bootstrap_command(environment_file, dry_run=True),
-        check=True,
-        capture_output=True,
-        text=True,
-        env=environment,
-    )
-    assert "Dry run complete" in dry_run.stdout
-    assert secret not in dry_run.stdout + dry_run.stderr
-    assert not (tmp_path / "handoff.log").exists()
-    assert list(temporary_root.iterdir()) == []
-
     installed = subprocess.run(
-        _bootstrap_command(environment_file),
+        _stable_command(),
         check=True,
         capture_output=True,
         text=True,
         env=environment,
     )
     handoff = (tmp_path / "handoff.log").read_text().splitlines()
-    assert handoff[:7] == [
-        "--domain",
-        "lcc.example.test",
-        "--release-id",
-        RELEASE_ID,
-        "--env-file",
-        str(environment_file),
-        "--source",
-    ]
-    assert len(handoff) == 8
-    assert handoff[-1].endswith(f"Learning-Control-Center-{RELEASE_ID}")
-    assert secret not in installed.stdout + installed.stderr + "\n".join(handoff)
-    assert "Verified release: v1.0.0" in installed.stdout
+    generated = (tmp_path / "generated.env").read_text()
+    values = dict(
+        line.split("=", 1) for line in generated.splitlines() if line and not line.startswith("#")
+    )
+    security_secret = values["LCC_SECURITY_SECRET"]
+    bootstrap_token = values["LCC_BOOTSTRAP_TOKEN"]
+    assert security_secret != bootstrap_token
+    assert len(security_secret) >= 32 and len(bootstrap_token) >= 32
+    assert stat.S_IMODE((tmp_path / "generated.env").stat().st_mode) == 0o600
+    assert (tmp_path / "generated-env.modes").read_text().splitlines() == ["700", "600"]
+    assert handoff[:2] == ["--domain", "lcc.example.test"]
+    assert "--channel" in handoff and "stable" in handoff
+    assert "--release-id" in handoff and RELEASE_ID in handoff
+    assert "--source-revision" in handoff
+    assert "--source-repository" in handoff
+    combined_output = installed.stdout + installed.stderr + "\n".join(handoff)
+    assert security_secret not in combined_output
+    assert bootstrap_token not in combined_output
+    assert f"Verified stable release: {RELEASE_ID}" in installed.stdout
     assert list(temporary_root.iterdir()) == []
+    assert list((tmp_path / "secret-temp").iterdir()) == []
+
+
+def test_generated_stable_launcher_is_release_bound_and_rejects_identity_override(
+    tmp_path: Path,
+) -> None:
+    repository = _release_repository(tmp_path)
+    asset_root = tmp_path / "assets"
+    _archive, _checksum, launcher = _package(repository, asset_root / RELEASE_ID)
+    environment = _bootstrap_environment(tmp_path, asset_root)
+    installed = subprocess.run(
+        [
+            launcher,
+            "--domain",
+            "lcc.example.test",
+            "--timezone",
+            "UTC",
+            "--non-interactive",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert f"Verified stable release: {RELEASE_ID}" in installed.stdout
+
+    for arguments in (
+        ["--channel", "main"],
+        ["--ref", "v9.9.9"],
+        ["--commit", "0" * 40],
+        ["--repository-url", "https://example.invalid/repository.git"],
+    ):
+        rejected = subprocess.run(
+            [launcher, *arguments],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+        assert rejected.returncode != 0
+        assert "release-bound install.sh" in rejected.stderr
+
+
+@pytest.mark.skipif(shutil.which("script") is None, reason="PTY helper is unavailable")
+def test_generated_stable_launcher_prompts_only_for_host_timezone_and_confirmation(
+    tmp_path: Path,
+) -> None:
+    repository = _release_repository(tmp_path)
+    asset_root = tmp_path / "assets"
+    _archive, _checksum, launcher = _package(repository, asset_root / RELEASE_ID)
+    environment = _bootstrap_environment(tmp_path, asset_root)
+    result = subprocess.run(
+        ["script", "-qec", shlex.quote(str(launcher)), "/dev/null"],
+        input="lcc.example.test\nEurope/Istanbul\ny\n",
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert "Public hostname" in result.stdout
+    assert "Application timezone" in result.stdout
+    assert "Continue with this stable installation?" in result.stdout
+    assert "LCC_SECURITY_SECRET" not in result.stdout
+    assert "LCC_BOOTSTRAP_TOKEN" not in result.stdout
+    generated = (tmp_path / "generated.env").read_text()
+    secrets = [
+        line.split("=", 1)[1]
+        for line in generated.splitlines()
+        if line.startswith(("LCC_SECURITY_SECRET=", "LCC_BOOTSTRAP_TOKEN="))
+    ]
+    assert all(secret not in result.stdout + result.stderr for secret in secrets)
+    assert (tmp_path / "handoff.log").is_file()
 
 
 def test_bootstrap_rejects_checksum_mismatch(tmp_path: Path) -> None:
     repository = _release_repository(tmp_path)
     asset_root = tmp_path / "assets"
-    archive, _checksum = _package(repository, asset_root / RELEASE_ID)
+    archive, _checksum, _install = _package(repository, asset_root / RELEASE_ID)
     archive.write_bytes(archive.read_bytes() + b"tampered")
-    environment_file = tmp_path / "production.env"
-    environment_file.write_text("placeholder\n")
     result = subprocess.run(
-        _bootstrap_command(environment_file, dry_run=True),
+        _stable_command(dry_run=True),
         check=False,
         capture_output=True,
         text=True,
@@ -312,7 +427,7 @@ def test_bootstrap_rejects_checksum_mismatch(tmp_path: Path) -> None:
     assert "SHA-256 verification failed" in result.stderr
 
 
-def test_bootstrap_rejects_archive_traversal(tmp_path: Path) -> None:
+def test_bootstrap_rejects_archive_traversal_and_duplicate_members(tmp_path: Path) -> None:
     asset_root = tmp_path / "assets"
     release_assets = asset_root / RELEASE_ID
     release_assets.mkdir(parents=True)
@@ -324,10 +439,8 @@ def test_bootstrap_rejects_archive_traversal(tmp_path: Path) -> None:
         bundle.addfile(member, io.BytesIO(payload))
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     (release_assets / CHECKSUM_NAME).write_text(f"{digest}  {ARCHIVE_NAME}\n")
-    environment_file = tmp_path / "production.env"
-    environment_file.write_text("placeholder\n")
     result = subprocess.run(
-        _bootstrap_command(environment_file, dry_run=True),
+        _stable_command(dry_run=True),
         check=False,
         capture_output=True,
         text=True,
@@ -336,6 +449,252 @@ def test_bootstrap_rejects_archive_traversal(tmp_path: Path) -> None:
     assert result.returncode != 0
     assert "unsafe release path" in result.stderr
     assert not (tmp_path / "escape").exists()
+
+    with tarfile.open(archive, "w:gz") as bundle:
+        for _ in range(2):
+            member = tarfile.TarInfo(f"Learning-Control-Center-{RELEASE_ID}/duplicate")
+            member.size = len(payload)
+            bundle.addfile(member, io.BytesIO(payload))
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    (release_assets / CHECKSUM_NAME).write_text(f"{digest}  {ARCHIVE_NAME}\n")
+    duplicate = subprocess.run(
+        _stable_command(dry_run=True),
+        check=False,
+        capture_output=True,
+        text=True,
+        env=_bootstrap_environment(tmp_path, asset_root),
+    )
+    assert duplicate.returncode != 0
+    assert "duplicate release path" in duplicate.stderr
+
+    with tarfile.open(archive, "w:gz") as bundle:
+        member = tarfile.TarInfo(f"Learning-Control-Center-{RELEASE_ID}/unsafe-link")
+        member.type = tarfile.SYMTYPE
+        member.linkname = "/etc/passwd"
+        bundle.addfile(member)
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    (release_assets / CHECKSUM_NAME).write_text(f"{digest}  {ARCHIVE_NAME}\n")
+    unsafe_type = subprocess.run(
+        _stable_command(dry_run=True),
+        check=False,
+        capture_output=True,
+        text=True,
+        env=_bootstrap_environment(tmp_path, asset_root),
+    )
+    assert unsafe_type.returncode != 0
+    assert "unsupported release member type" in unsafe_type.stderr
+
+    with tarfile.open(archive, "w:gz") as bundle:
+        member = tarfile.TarInfo(f"Learning-Control-Center-{RELEASE_ID}/oversized")
+        member.size = len(payload)
+        bundle.addfile(member, io.BytesIO(payload))
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    (release_assets / CHECKSUM_NAME).write_text(f"{digest}  {ARCHIVE_NAME}\n")
+    size_environment = _bootstrap_environment(tmp_path, asset_root)
+    size_environment["LCC_BOOTSTRAP_TEST_MAXIMUM_UNPACKED_BYTES"] = "5"
+    oversized = subprocess.run(
+        _stable_command(dry_run=True),
+        check=False,
+        capture_output=True,
+        text=True,
+        env=size_environment,
+    )
+    assert oversized.returncode != 0
+    assert "maximum unpacked size" in oversized.stderr
+
+
+def test_main_non_interactive_resolves_exact_sha_and_rejects_mismatch(tmp_path: Path) -> None:
+    repository = _release_repository(tmp_path)
+    revision = subprocess.run(
+        ["git", "-C", repository, "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    environment = _bootstrap_environment(tmp_path)
+    environment["LCC_BOOTSTRAP_REPOSITORY_URL"] = str(repository)
+    command = [
+        BOOTSTRAP,
+        "--channel",
+        "main",
+        "--commit",
+        revision,
+        "--domain",
+        "lcc.example.test",
+        "--timezone",
+        "UTC",
+        "--non-interactive",
+    ]
+    installed = subprocess.run(
+        command,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    handoff = (tmp_path / "handoff.log").read_text().splitlines()
+    assert "DEVELOPMENT / UNSTABLE" in installed.stdout
+    assert f"Resolved main revision: {revision}" in installed.stdout
+    channel_index = handoff.index("--channel")
+    assert handoff[channel_index : channel_index + 2] == ["--channel", "main"]
+    assert f"main-{revision}" in handoff
+    assert revision in handoff
+    assert "refs/heads/main" in handoff
+
+    mismatch_command = command.copy()
+    mismatch_command[mismatch_command.index("--commit") + 1] = "0" * 40
+    mismatch = subprocess.run(
+        mismatch_command,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert mismatch.returncode != 0
+    assert "not expected commit" in mismatch.stderr
+
+
+def test_main_requires_explicit_channel_and_valid_non_interactive_contract() -> None:
+    cases = (
+        (["--channel", "main", "--non-interactive"], "requires --commit"),
+        (["--channel", "main", "--ref", RELEASE_ID], "only with --channel stable"),
+        (
+            ["--channel", "stable", "--ref", RELEASE_ID, "--commit", "0" * 40],
+            "only with --channel main",
+        ),
+        (
+            ["--channel", "main", "--asset-base-url", "https://example.test"],
+            "only with --channel stable",
+        ),
+        (
+            [
+                "--channel",
+                "stable",
+                "--ref",
+                RELEASE_ID,
+                "--repository-url",
+                "https://example.test/repo.git",
+            ],
+            "only with --channel main",
+        ),
+    )
+    for arguments, message in cases:
+        result = subprocess.run(
+            [BOOTSTRAP, *arguments],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        assert message in result.stderr
+
+
+@pytest.mark.skipif(shutil.which("script") is None, reason="PTY helper is unavailable")
+def test_interactive_main_requires_exact_confirmation(tmp_path: Path) -> None:
+    repository = _release_repository(tmp_path)
+    environment = _bootstrap_environment(tmp_path)
+    environment["LCC_BOOTSTRAP_REPOSITORY_URL"] = str(repository)
+    command = [BOOTSTRAP, "--channel", "main"]
+    rejected = subprocess.run(
+        ["script", "-qec", shlex.join(str(item) for item in command), "/dev/null"],
+        input="NO\n",
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert rejected.returncode != 0
+    assert "Type INSTALL MAIN to continue" in rejected.stdout
+    assert "Main installation was not confirmed" in rejected.stdout
+    assert not (tmp_path / "handoff.log").exists()
+    assert list((tmp_path / "secret-temp").iterdir()) == []
+    bootstrap_source = (REPOSITORY_ROOT / "scripts" / "bootstrap-ubuntu.sh").read_text()
+    assert bootstrap_source.index("Type INSTALL MAIN to continue") < bootstrap_source.index(
+        'checkout --quiet --detach "$source_revision"'
+    )
+
+    accepted = subprocess.run(
+        ["script", "-qec", shlex.join(str(item) for item in command), "/dev/null"],
+        input="INSTALL MAIN\nlcc.example.test\nUTC\n",
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert "Learning Control Center installation summary" in accepted.stdout
+    assert (tmp_path / "handoff.log").is_file()
+
+
+def test_external_environment_file_must_be_regular_private_and_not_a_symlink(
+    tmp_path: Path,
+) -> None:
+    regular = tmp_path / "operator.env"
+    regular.write_text("safe\n")
+    regular.chmod(0o644)
+    link = tmp_path / "operator-link.env"
+    link.symlink_to(regular)
+    common = REPOSITORY_ROOT / "scripts" / "deploy-common.sh"
+    command = [
+        "bash",
+        "-c",
+        'source "$1"; lcc_validate_environment_file_security "$2" 0 "$(id -u)"',
+        "env-security-test",
+        str(common),
+    ]
+    exposed = subprocess.run([*command, str(regular)], check=False, capture_output=True, text=True)
+    assert exposed.returncode != 0
+    assert "must not grant group or other permissions" in exposed.stderr
+    regular.chmod(0o600)
+    symlinked = subprocess.run([*command, str(link)], check=False, capture_output=True, text=True)
+    assert symlinked.returncode != 0
+    assert "must not be a symbolic link" in symlinked.stderr
+
+    unsafe_parent = tmp_path / "replaceable"
+    unsafe_parent.mkdir(mode=0o777)
+    unsafe_parent.chmod(0o777)
+    nested = unsafe_parent / "operator.env"
+    nested.write_text("safe\n")
+    nested.chmod(0o600)
+    replaceable = subprocess.run(
+        [*command, str(nested)], check=False, capture_output=True, text=True
+    )
+    assert replaceable.returncode != 0
+    assert "parent directories" in replaceable.stderr
+
+
+def test_production_source_urls_require_explicit_credential_free_https() -> None:
+    common = REPOSITORY_ROOT / "scripts" / "deploy-common.sh"
+
+    def validate(url: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                "bash",
+                "-c",
+                'source "$1"; lcc_validate_https_url "$2" "Source"',
+                "source-url-test",
+                str(common),
+                url,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    github = validate("https://github.com/Learning-Control-Center/Learning-Control-Center.git")
+    forgejo = validate(
+        "https://forgejo.waqsea.com/Learning-Control-Center/Learning-Control-Center.git"
+    )
+    assert github.returncode == 0
+    assert forgejo.returncode == 0
+    for rejected in (
+        "http://github.com/Learning-Control-Center/Learning-Control-Center.git",
+        "https://user:token@github.com/Learning-Control-Center/Learning-Control-Center.git",
+        "https://github.com/Learning-Control-Center/Learning-Control-Center.git?ref=main",
+        "https://github.com/Learning-Control-Center/Learning-Control-Center.git\nunsafe",
+    ):
+        result = validate(rejected)
+        assert result.returncode != 0
+        assert "public HTTPS URL without credentials" in result.stderr
 
 
 def test_public_repository_assets_and_metadata_are_consistent() -> None:
@@ -351,14 +710,25 @@ def test_public_repository_assets_and_metadata_are_consistent() -> None:
         REPOSITORY_ROOT / "frontend" / "public" / "logo.png"
     ).read_bytes()
     assert 'href="/logo.png"' in (REPOSITORY_ROOT / "frontend" / "index.html").read_text()
-    assert BOOTSTRAP.stat().st_mode & stat.S_IXUSR
-    assert PACKAGER.stat().st_mode & stat.S_IXUSR
+    for script in (BOOTSTRAP, PACKAGER, GENERATOR):
+        assert script.stat().st_mode & stat.S_IXUSR
 
     agents = (REPOSITORY_ROOT / "AGENTS.md").read_text()
     assert "memory-bank" not in agents
     project = tomllib.loads((REPOSITORY_ROOT / "pyproject.toml").read_text())
+    assert project["project"]["version"] == "1.0.1"
     assert project["project"]["license"] == "GPL-3.0-only"
     assert "contact@waqsea.com" in (REPOSITORY_ROOT / "SECURITY.md").read_text()
+    frontend_package = json.loads((REPOSITORY_ROOT / "frontend" / "package.json").read_text())
+    frontend_lock = json.loads((REPOSITORY_ROOT / "frontend" / "package-lock.json").read_text())
+    assert frontend_package["version"] == "1.0.1"
+    assert frontend_lock["version"] == "1.0.1"
+    assert frontend_lock["packages"][""]["version"] == "1.0.1"
+    assert 'version="1.0.1"' in (REPOSITORY_ROOT / "backend" / "app" / "main.py").read_text()
+    assert (
+        '"appVersion": "1.0.1"'
+        in (REPOSITORY_ROOT / "backend" / "app" / "import_export.py").read_text()
+    )
 
     public_frontend_text = "\n".join(
         (REPOSITORY_ROOT / path).read_text()
@@ -375,22 +745,8 @@ def test_public_repository_assets_and_metadata_are_consistent() -> None:
     assert "font-src 'self'" in caddy_template
 
     changelog = (REPOSITORY_ROOT / "CHANGELOG.md").read_text()
+    assert "## [1.0.1] - Unreleased" in changelog
     assert "## [1.0.0] - 2026-09-21" in changelog
-    assert "Pending publication" not in changelog
-    assert "Initial public release candidate" not in changelog
-
-    ignored_credentials = {
-        ".npmrc",
-        ".pypirc",
-        ".netrc",
-        ".git-credentials",
-        "pip.conf",
-        ".aws/",
-        ".ssh/",
-        ".docker/",
-    }
-    ignore_lines = set((REPOSITORY_ROOT / ".gitignore").read_text().splitlines())
-    assert ignored_credentials <= ignore_lines
 
     required_public_files = [
         "README.md",
@@ -403,6 +759,7 @@ def test_public_repository_assets_and_metadata_are_consistent() -> None:
         "docs/PRODUCT_QA.md",
         "docs/RELEASING.md",
         "scripts/bootstrap-ubuntu.sh",
+        "scripts/generate-production-env.sh",
         "scripts/package-release.sh",
     ]
     assert all((REPOSITORY_ROOT / path).is_file() for path in required_public_files)

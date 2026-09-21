@@ -23,6 +23,7 @@ Operations:
   restore /absolute/backup       Restore offline and restart LCC
   recover-password               Reset the password offline from an interactive TTY
   repair-projections [--full]    Drain capability work offline; optionally enqueue all
+  show-bootstrap-token           Show pending one-time token on /dev/tty only
   finalize-bootstrap             Remove bootstrap token after first-user creation
 EOF
 }
@@ -40,7 +41,7 @@ test -n "$command_name" || { usage; exit 2; }
 shift
 
 case "$command_name" in
-    status|health|logs|backup-status|-h|--help|help) ;;
+    status|health|logs|backup-status|show-bootstrap-token|-h|--help|help) ;;
     *) lcc_acquire_deployment_lock ;;
 esac
 
@@ -80,6 +81,12 @@ case "$command_name" in
         ;;
     status)
         test "$#" -eq 0 || lcc_die "status accepts no arguments."
+        release_id="$(tr -d '\r\n' < "$release_root/RELEASE_ID")"
+        release_channel="$(lcc_release_channel "$release_root")"
+        source_revision="$(lcc_release_source_revision "$release_root")"
+        echo "Channel: $release_channel"
+        echo "Release ID: $release_id"
+        echo "Source revision: $source_revision"
         systemctl status "$LCC_SERVICE_NAME" --no-pager
         ;;
     health)
@@ -146,6 +153,23 @@ case "$command_name" in
         fi
         run_offline "$release_root/.venv/bin/python" -m app.capability_cli \
             "${repair_arguments[@]}"
+        ;;
+    show-bootstrap-token)
+        test "$#" -eq 0 || lcc_die "show-bootstrap-token accepts no arguments."
+        test -n "${LCC_BOOTSTRAP_TOKEN:-}" || lcc_die "Bootstrap token is not configured."
+        case "$LCC_DATABASE_URL" in
+            sqlite:////*) database_path="${LCC_DATABASE_URL#sqlite:///}" ;;
+            *) lcc_die "Configured database is not an absolute SQLite URL." ;;
+        esac
+        test -f "$database_path" || lcc_die "Production database does not exist."
+        user_count="$(sqlite3 -readonly "$database_path" 'SELECT COUNT(*) FROM users;')" || \
+            lcc_die "Unable to verify bootstrap state."
+        test "$user_count" = 0 || \
+            lcc_die "Bootstrap is no longer pending; run finalize-bootstrap instead."
+        exec 3<>/dev/tty || lcc_die "show-bootstrap-token requires an interactive terminal."
+        test -t 3 || lcc_die "show-bootstrap-token requires an interactive terminal."
+        printf 'One-time Learning Control Center bootstrap token:\n%s\n' \
+            "$LCC_BOOTSTRAP_TOKEN" >&3
         ;;
     finalize-bootstrap)
         test "$#" -eq 0 || lcc_die "finalize-bootstrap accepts no arguments."

@@ -2247,7 +2247,7 @@ def _envelope(
         "schemaVersion": schema_version,
         "packageType": package_type,
         "packageId": str(uuid.uuid4()),
-        "appVersion": "1.0.0",
+        "appVersion": "1.0.1",
         "createdAt": epoch_ms_to_rfc3339(now),
         "payload": payload,
     }

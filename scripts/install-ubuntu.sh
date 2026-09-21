@@ -9,7 +9,9 @@ source "$SCRIPT_DIRECTORY/deploy-common.sh"
 
 usage() {
     cat <<'EOF'
-Usage: sudo ./scripts/install-ubuntu.sh --domain HOST --release-id ID --env-file FILE [options]
+Usage: sudo ./scripts/install-ubuntu.sh --domain HOST --channel CHANNEL --release-id ID \
+  --source-revision SHA --source-repository URL --source-ref REF --source-origin URL \
+  --env-file FILE [options]
 
 Options:
   --source DIR          Source checkout/release (default: repository containing this script)
@@ -23,7 +25,12 @@ EOF
 }
 
 domain=""
+release_channel=""
 release_id=""
+declared_source_revision=""
+source_repository=""
+source_ref=""
+source_origin=""
 environment_source=""
 source_root="$REPOSITORY_ROOT"
 install_root="/"
@@ -36,7 +43,12 @@ skip_prerequisites=0
 while test "$#" -gt 0; do
     case "$1" in
         --domain) domain="${2:?Missing --domain value}"; shift 2 ;;
+        --channel) release_channel="${2:?Missing --channel value}"; shift 2 ;;
         --release-id) release_id="${2:?Missing --release-id value}"; shift 2 ;;
+        --source-revision) declared_source_revision="${2:?Missing --source-revision value}"; shift 2 ;;
+        --source-repository) source_repository="${2:?Missing --source-repository value}"; shift 2 ;;
+        --source-ref) source_ref="${2:?Missing --source-ref value}"; shift 2 ;;
+        --source-origin) source_origin="${2:?Missing --source-origin value}"; shift 2 ;;
         --env-file) environment_source="${2:?Missing --env-file value}"; shift 2 ;;
         --source) source_root="${2:?Missing --source value}"; shift 2 ;;
         --replace-env) replace_environment=1; shift ;;
@@ -53,15 +65,59 @@ done
 test -n "$domain" || lcc_die "--domain is required."
 test -n "$release_id" || lcc_die "--release-id is required."
 test -n "$environment_source" || lcc_die "--env-file is required."
+if test "$install_root" != "/"; then
+    release_channel="${release_channel:-stable}"
+    declared_source_revision="${declared_source_revision:-$(git -C "$source_root" rev-parse HEAD)}"
+    source_repository="${source_repository:-https://example.invalid/Learning-Control-Center.git}"
+    source_ref="${source_ref:-refs/tags/$release_id}"
+    source_origin="${source_origin:-https://example.invalid/releases/download}"
+fi
+test -n "$release_channel" || lcc_die "--channel is required."
+test -n "$declared_source_revision" || lcc_die "--source-revision is required."
+test -n "$source_repository" || lcc_die "--source-repository is required."
+test -n "$source_ref" || lcc_die "--source-ref is required."
+test -n "$source_origin" || lcc_die "--source-origin is required."
+lcc_validate_release_channel "$release_channel"
 lcc_validate_release_id "$release_id"
-[[ "$domain" =~ ^[A-Za-z0-9.-]+$ && "$domain" == *.* ]] || \
-    lcc_die "--domain must be a DNS hostname, not a URL."
+lcc_validate_source_revision "$declared_source_revision"
+lcc_validate_public_hostname "$domain"
+case "$release_channel" in
+    stable)
+        if test "$install_root" = "/"; then
+            [[ "$release_id" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]] || \
+                lcc_die "Stable release ID must be a semantic version tag."
+        fi
+        test "$source_ref" = "refs/tags/$release_id" || \
+            lcc_die "Stable source ref must match the release tag."
+        ;;
+    main)
+        test "$release_id" = "main-$declared_source_revision" || \
+            lcc_die "Main release ID must be main-<full-source-SHA>."
+        test "$source_ref" = "refs/heads/main" || lcc_die "Main source ref must be refs/heads/main."
+        ;;
+esac
+if test "$install_root" = "/"; then
+    lcc_validate_https_url "$source_repository" "Source repository"
+    lcc_validate_https_url "$source_origin" "Source origin"
+fi
 source_root="$(readlink -f "$source_root")"
+test ! -L "$environment_source" || lcc_die "Environment source must not be a symbolic link."
+test -e "$environment_source" || lcc_die "Environment source does not exist."
 environment_source="$(readlink -f "$environment_source")"
 test -f "$source_root/pyproject.toml" || lcc_die "Source does not contain pyproject.toml."
 test -f "$source_root/frontend/package-lock.json" || lcc_die "Source lacks frontend lockfile."
 test -f "$source_root/requirements-production.lock" || lcc_die "Source lacks production constraints."
-test -f "$environment_source" || lcc_die "Environment source does not exist."
+expected_environment_owner=0
+if test "$install_root" != "/"; then
+    expected_environment_owner="$(id -u)"
+fi
+allow_installed_environment=0
+expected_environment_target="${install_root%/}$LCC_ENVIRONMENT_FILE"
+if test "$environment_source" = "$(readlink -m -- "$expected_environment_target")"; then
+    allow_installed_environment=1
+fi
+lcc_validate_environment_file_security "$environment_source" "$allow_installed_environment" \
+    "$expected_environment_owner"
 
 if test "$install_root" != "/"; then
     [[ "$install_root" = /* ]] || lcc_die "--root must be absolute."
@@ -193,11 +249,25 @@ if test "$install_root" = "/"; then
     run chown "$LCC_SERVICE_USER:$LCC_SERVICE_GROUP" "$data_directory" "$backup_directory"
 fi
 
-source_revision="$(lcc_source_revision "$source_root")"
+git_source_root="$(git -C "$source_root" rev-parse --show-toplevel 2>/dev/null || true)"
+if test -n "$git_source_root" && test "$(readlink -f "$git_source_root")" = "$source_root"; then
+    source_revision="$(git -C "$source_root" rev-parse HEAD)"
+    test "$source_revision" = "$declared_source_revision" || \
+        lcc_die "Git source HEAD does not match --source-revision."
+else
+    test -f "$source_root/SOURCE_REVISION" || \
+        lcc_die "Artifact source lacks its verified SOURCE_REVISION."
+    source_revision="$(tr -d '\r\n' < "$source_root/SOURCE_REVISION")"
+    test "$source_revision" = "$declared_source_revision" || \
+        lcc_die "Artifact source revision does not match --source-revision."
+fi
 release_is_complete=0
 if test -f "$release_directory/RELEASE_ID" && test -f "$release_directory/SOURCE_REVISION"; then
     if test "$(tr -d '\r\n' < "$release_directory/RELEASE_ID")" = "$release_id" && \
-        test "$(tr -d '\r\n' < "$release_directory/SOURCE_REVISION")" = "$source_revision"; then
+        test "$(tr -d '\r\n' < "$release_directory/SOURCE_REVISION")" = "$source_revision" && \
+        test "$(lcc_release_channel "$release_directory")" = "$release_channel"; then
+        lcc_validate_release_manifest "$release_directory" "$release_channel" "$release_id" \
+            "$source_repository" "$source_ref" "$source_revision" "$source_origin"
         release_is_complete=1
     else
         lcc_die "Release directory already exists with different identity: $release_directory"
@@ -258,7 +328,17 @@ if test "$release_is_complete" -eq 0; then
     fi
     if test "$dry_run" -eq 0; then
         printf '%s\n' "$release_id" > "$release_directory/RELEASE_ID"
+        printf '%s\n' "$release_channel" > "$release_directory/RELEASE_CHANNEL"
         printf '%s\n' "$source_revision" > "$release_directory/SOURCE_REVISION"
+        cat > "$release_directory/RELEASE_MANIFEST" <<EOF
+metadata_version=1
+channel=$release_channel
+release_id=$release_id
+source_repository=$source_repository
+source_ref=$source_ref
+source_revision=$source_revision
+source_origin=$source_origin
+EOF
     fi
     if test "$install_root" = "/"; then
         run chown -R "root:$LCC_SERVICE_GROUP" "$release_directory"
@@ -347,9 +427,28 @@ elif test "$install_root" = "/"; then
     echo "DRY-RUN: caddy fmt/validate, systemctl daemon-reload, enable services"
 fi
 
+if test "$dry_run" -eq 0; then
+    deployment_record="$data_directory/deployment-$release_id.env"
+    cat > "$deployment_record" <<EOF
+channel=$release_channel
+release_id=$release_id
+source_repository=$source_repository
+source_ref=$source_ref
+source_revision=$source_revision
+source_origin=$source_origin
+activated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+    chmod 0600 "$deployment_record"
+    if test "$install_root" = "/"; then
+        chown "$LCC_SERVICE_USER:$LCC_SERVICE_GROUP" "$deployment_record"
+    fi
+fi
+
 cat <<EOF
 
 Learning Control Center release $release_id is installed.
+Channel: $release_channel
+Source revision: $source_revision
 Public URL: https://$domain
 Application service: $LCC_SERVICE_NAME
 Backup timer: $LCC_BACKUP_TIMER_NAME

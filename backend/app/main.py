@@ -104,7 +104,7 @@ def _validate_database_state(db: Session) -> None:
 
 app = FastAPI(
     title="Learning-Control-Center API",
-    version="1.0.0",
+    version="1.0.1",
     openapi_url=None if settings.environment == "production" else "/api/v1/openapi.json",
     docs_url=None if settings.environment == "production" else "/api/v1/docs",
     redoc_url=None,

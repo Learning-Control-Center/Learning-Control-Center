@@ -15,8 +15,9 @@ usage() {
     cat <<'EOF'
 Usage: scripts/package-release.sh --release-id VERSION --output-dir DIR [options]
 
-Create the deterministic public source archive and SHA-256 file uploaded to the
-matching GitHub release. VERSION must be a semantic release tag such as v1.0.0.
+Create the deterministic public source archive, SHA-256 file, and release-bound
+stable install.sh uploaded to the matching release. VERSION must be a semantic
+release tag such as v1.0.1.
 
 Options:
   --release-id VERSION  Required public release identity.
@@ -50,10 +51,10 @@ while (($#)); do
 done
 
 [[ "$release_id" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]] || \
-    die "--release-id must be an explicit semantic release tag such as v1.0.0."
+    die "--release-id must be an explicit semantic release tag such as v1.0.1."
 test -n "$output_directory" || die "--output-dir is required."
 
-for command_name in git tar gzip sha256sum mktemp touch find; do
+for command_name in git tar gzip sha256sum mktemp touch find cut sed grep; do
     command -v "$command_name" >/dev/null || die "Required command is unavailable: $command_name"
 done
 
@@ -133,11 +134,16 @@ find "$staging_root/frontend/src" -type f \
 rm -rf -- "$staging_root/frontend/src/test"
 
 printf '%s\n' "$release_id" > "$staging_root/RELEASE_ID"
+printf 'stable\n' > "$staging_root/RELEASE_CHANNEL"
 printf '%s\n' "$source_commit" > "$staging_root/SOURCE_REVISION"
 cat > "$staging_root/RELEASE_MANIFEST" <<EOF
+metadata_version=1
+channel=stable
 release_id=$release_id
+source_repository=$public_repository
+source_ref=refs/tags/$release_id
 source_revision=$source_commit
-public_repository=$public_repository
+source_origin=https://github.com/Learning-Control-Center/Learning-Control-Center/releases/download
 EOF
 
 required_paths=(
@@ -148,15 +154,18 @@ required_paths=(
     deploy/learning-control-center-backup.timer docs/INSTALLATION.md docs/PRODUCTION_OPERATIONS.md
     docs/UPDATES.md docs/RELEASING.md frontend/index.html frontend/package.json
     frontend/package-lock.json frontend/vite.config.ts frontend/src/main.tsx frontend/public/logo.png
-    scripts/bootstrap-ubuntu.sh scripts/deploy-common.sh scripts/install-ubuntu.sh scripts/lcc-admin
+    scripts/bootstrap-ubuntu.sh scripts/deploy-common.sh scripts/generate-production-env.sh
+    scripts/install-ubuntu.sh scripts/lcc-admin
     scripts/operational-backup.sh scripts/package-release.sh scripts/uninstall-ubuntu.sh
-    scripts/update-ubuntu.sh RELEASE_ID SOURCE_REVISION RELEASE_MANIFEST
+    scripts/update-ubuntu.sh RELEASE_ID RELEASE_CHANNEL SOURCE_REVISION RELEASE_MANIFEST
 )
 for relative_path in "${required_paths[@]}"; do
     test -f "$staging_root/$relative_path" || die "Required release file is missing: $relative_path"
 done
 
 test -x "$staging_root/scripts/bootstrap-ubuntu.sh" || die "Bootstrap script is not executable."
+test -x "$staging_root/scripts/generate-production-env.sh" || \
+    die "Environment generator is not executable."
 test -x "$staging_root/scripts/install-ubuntu.sh" || die "Installer is not executable."
 
 if find "$staging_root" -type l -print -quit | grep -q .; then
@@ -183,11 +192,28 @@ LC_ALL=C tar --sort=name --format=gnu --mtime="@$source_epoch" \
     gzip -n -9 > "$temporary_archive"
 temporary_checksum="$temporary_directory/$checksum_name"
 (cd "$temporary_directory" && sha256sum "$archive_name" > "$checksum_name")
+archive_sha256="$(sha256sum "$temporary_archive" | cut -d' ' -f1)"
+temporary_install="$temporary_directory/install.sh"
+sed \
+    -e "s|^readonly embedded_stable_ref=\"\"$|readonly embedded_stable_ref=\"$release_id\"|" \
+    -e "s|^readonly embedded_archive_sha256=\"\"$|readonly embedded_archive_sha256=\"$archive_sha256\"|" \
+    -e 's|^readonly stable_only_launcher="0"$|readonly stable_only_launcher="1"|' \
+    "$staging_root/scripts/bootstrap-ubuntu.sh" > "$temporary_install"
+chmod 0755 "$temporary_install"
+grep -Fqx "readonly embedded_stable_ref=\"$release_id\"" "$temporary_install" || \
+    die "Failed to bind install.sh to the release identity."
+grep -Fqx "readonly embedded_archive_sha256=\"$archive_sha256\"" "$temporary_install" || \
+    die "Failed to bind install.sh to the release archive checksum."
+grep -Fqx 'readonly stable_only_launcher="1"' "$temporary_install" || \
+    die "Failed to render install.sh as stable-only."
 
-if test -e "$final_archive" || test -e "$final_checksum"; then
-    if test -f "$final_archive" && test -f "$final_checksum" && \
+final_install="$output_directory/install.sh"
+
+if test -e "$final_archive" || test -e "$final_checksum" || test -e "$final_install"; then
+    if test -f "$final_archive" && test -f "$final_checksum" && test -f "$final_install" && \
         cmp -s "$temporary_archive" "$final_archive" && \
-        cmp -s "$temporary_checksum" "$final_checksum"; then
+        cmp -s "$temporary_checksum" "$final_checksum" && \
+        cmp -s "$temporary_install" "$final_install"; then
         note "Existing release assets are byte-identical."
         exit 0
     fi
@@ -196,8 +222,10 @@ fi
 
 install -m 0644 "$temporary_archive" "$final_archive"
 install -m 0644 "$temporary_checksum" "$final_checksum"
+install -m 0755 "$temporary_install" "$final_install"
 
 note "Created $final_archive"
 note "Created $final_checksum"
+note "Created $final_install"
 note "Release identity: $release_id"
 note "Source revision: $source_commit"
