@@ -2,22 +2,28 @@
 
 ## Supported platform
 
-The supported server baseline is **Ubuntu Server 24.04 LTS (amd64 or arm64)**. Installation
-requires root access through `sudo`, a public DNS `A` and/or `AAAA` record for the LCC hostname,
-inbound TCP ports 80 and 443, and outbound HTTPS for dependencies and Caddy certificate issuance.
+The supported server baseline is **Ubuntu Server 24.04 LTS (amd64 or arm64)**. The operator supplies
+only root access through `sudo`, working internet access, a public DNS `A` and/or `AAAA` record for
+the LCC hostname, and available inbound TCP ports 80 and 443. No separate application-prerequisite
+installation step is required on a normal Ubuntu Server image.
 
-Required software is Python 3.12+, `python3-venv`, pip, SQLite CLI, CA certificates, curl, Git,
-tar, rsync, Node.js 22 LTS or 24 LTS with npm, and Caddy 2. Install the Ubuntu packages first:
+The bootstrap checks the OS, architecture, free space, APT/dpkg state, conflicting listeners, and
+existing Caddy ownership. It then installs only missing packages from Ubuntu 24.04's signed
+repositories: `ca-certificates`, `curl`, `python3`, `python3-venv`, `sqlite3`, `rsync`, `tar`,
+`gzip`, `caddy`, and `iproute2`; the explicit `main` channel also installs `git`. Caddy comes from
+Ubuntu's `universe` component. The installer adds no third-party APT repository, imports no external
+signing key, does not use `apt-key`, and never upgrades the whole operating system. When packages
+are missing, provisioning refuses to continue if any enabled package index is not an Ubuntu 24.04
+(Noble) index; temporarily disable third-party APT sources and rerun. This conservative check keeps
+candidate selection inside Ubuntu's signed repositories. Caddy must resolve to the package-owned
+`/usr/bin/caddy`; a shadowing or unmanaged executable is rejected. The source check also requires
+each package index to use the `ubuntu-keyring`-owned
+`/usr/share/keyrings/ubuntu-archive-keyring.gpg`, rather than trusting repository labels alone.
 
-```bash
-sudo apt update
-sudo apt install python3 python3-venv python3-pip sqlite3 ca-certificates curl git rsync tar
-```
-
-Install Node.js and Caddy from their supported upstream channels. See
-[Node.js downloads](https://nodejs.org/en/download) and
-[Caddy's Debian/Ubuntu packages](https://caddyserver.com/docs/install#debian-ubuntu-raspbian).
-The LCC installer validates prerequisites but does not add third-party package repositories.
+Node.js/npm are release-build dependencies, not production-host dependencies. Stable archives and
+public `main` commits carry a verified production frontend whose hash is bound to its build inputs.
+Release creation rebuilds it with `npm ci` from `package-lock.json` and rejects a mismatch. The
+server installs and updates that exact artifact without Node.js.
 
 ## Stable quick install — recommended
 
@@ -39,11 +45,12 @@ The interactive installer asks only for:
 2. the application timezone, defaulting to the detected server timezone or UTC;
 3. confirmation of the non-secret installation summary.
 
-It generates independent strong application and bootstrap secrets in a root-only temporary
-directory, renders a complete production environment, downloads the bounded release archive and
-checksum, requires the published checksum to match the digest embedded in `install.sh`, safely
-extracts the archive, and invokes `scripts/install-ubuntu.sh`. The temporary secrets file is
-removed after handoff. Caddy never receives the application environment.
+It reports missing packages before installing them, generates independent strong application and
+bootstrap secrets in a root-only temporary directory, renders a complete production environment,
+downloads the bounded release archive and checksum, requires the published checksum to match the
+digest embedded in `install.sh`, safely extracts the archive, and invokes
+`scripts/install-ubuntu.sh`. The temporary secrets file is removed after handoff. Caddy never
+receives the application environment.
 
 To review before executing:
 
@@ -128,9 +135,12 @@ sudo scripts/generate-production-env.sh \
 
 ## Canonical installer
 
-`scripts/install-ubuntu.sh` is the only host-mutation layer. Acquisition scripts pass it the
-verified source directory, production environment path, channel, release ID, full source revision,
-repository, source ref, and source origin. It does not fetch releases or prompt humans.
+`scripts/bootstrap-ubuntu.sh` owns human interaction, acquisition verification, and the minimum
+Ubuntu package provisioning needed before verified source can run. `scripts/install-ubuntu.sh` is
+the canonical non-interactive LCC host-mutation layer. Bootstrap passes it the verified source
+directory, production environment path, channel, release ID, full source revision, repository,
+source ref, and source origin. The canonical installer does not fetch releases, prompt humans, or
+modify APT state.
 
 For a manually reviewed stable source tree, the complete contract is:
 
@@ -147,15 +157,26 @@ sudo ./scripts/install-ubuntu.sh \
   --source "$PWD"
 ```
 
-The installer validates Ubuntu and prerequisites; creates the non-login `lcc` account and private
-data/backup directories; stages a per-identity release; installs exact Python constraints; runs
-`npm ci` and a production build; installs hardened systemd and Caddy assets; activates atomically;
-enables Caddy, LCC, and the backup timer; and verifies the public HTTPS health endpoint.
+The installer validates Ubuntu and the provisioned runtime; creates the non-login `lcc` account and
+private data/backup directories; verifies and stages a per-identity release; installs exact Python
+constraints into an isolated virtual environment; uses the packaged frontend; installs hardened
+systemd and Caddy assets; validates Caddy before activation; activates atomically; enables Caddy,
+LCC, and the backup timer; and verifies the public HTTPS health endpoint. Existing administrator
+Caddy configuration is preserved; if the LCC site conflicts, validation fails and the previous
+Caddy files are restored.
 
 A first install is allowed when no active release exists. The same exact identity can be rerun for
 repair. A partial matching `.installing` directory can be resumed safely. A different active
 release is refused and must use the controlled update workflow. For inspection, use `--dry-run`.
 The isolated `--root`/skip options are test-only and must not be used as production substitutes.
+Dry-run reports missing packages, the exact APT plan and trust source, release/channel/domain,
+frontend-artifact policy, and intended host/service actions without changing packages,
+repositories, services, production configuration, or secrets.
+
+Failures name the active phase (OS preflight, package metadata, prerequisite install, acquisition,
+or host installation). Successfully installed shared Ubuntu packages are intentionally retained if
+a later phase fails; correct the reported issue and rerun. The package step and exact-identity
+installer are idempotent.
 
 ## Create the first user
 

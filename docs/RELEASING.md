@@ -34,6 +34,12 @@ remain mandatory before every release.
 6. Confirm `pyproject.toml`, frontend package metadata, API/export version metadata, and changelog all
    identify 1.0.1.
 
+Release packaging requires Node.js 22 LTS or 24 LTS and installs the locked frontend dependency
+graph with `npm ci --ignore-scripts`. The committed production frontend must already verify against
+its source inputs. Packaging rebuilds it in isolation and fails unless the rebuilt manifest is
+byte-identical, then includes that artifact in the release archive. Node.js is never required on
+the production host.
+
 Record the exact clean `main` candidate SHA. Confirm the configured development database hash and
 mtime did not change.
 
@@ -64,7 +70,8 @@ The command produces exactly:
 The archive has top-level directory `Learning-Control-Center-v1.0.1/` and immutable
 `RELEASE_ID`, `RELEASE_CHANNEL`, `SOURCE_REVISION`, and `RELEASE_MANIFEST` files. It excludes Git
 metadata, contributor-only tests, private/runtime state, local environments, databases, and backups;
-preserves executable modes; normalizes ownership/timestamps; and uses deterministic gzip headers.
+preserves executable modes; contains the verified production frontend; normalizes
+ownership/timestamps; and uses deterministic gzip headers.
 
 Package twice into empty directories and require byte-identical archives, checksums, and launchers.
 Then inspect all assets:
@@ -93,7 +100,8 @@ printed or passed on argv.
 5. Run the stable installer test from the canonical GitHub URL.
 6. Run the main-channel installer test and verify the recorded SHA equals the deliberately resolved
    public `main` tip.
-7. Complete a real supported Ubuntu acceptance test: install, HTTPS health, first-user bootstrap,
+7. Complete a real clean Ubuntu Server 24.04 acceptance test: prerequisite provisioning, install,
+   HTTPS health, first-user bootstrap,
    finalization, systemd restart, scheduled/manual backup, update preflight, and preserve-by-default
    uninstall.
 8. Publish release notes from `CHANGELOG.md` and advertise the quick-install command only after the
@@ -115,7 +123,7 @@ curl -fsSL https://raw.githubusercontent.com/Learning-Control-Center/Learning-Co
 ## Updates and rollback
 
 Bootstrap is for fresh install or exact-identity repair, never an implicit update. Existing
-installations use the controlled workflow in [`UPDATES.md`](UPDATES.md). The updater stages/builds
-before stopping services, classifies Alembic compatibility, creates a pre-update backup, and records
-immutable source identity. Code-only rollback is allowed only at the current database schema;
+installations use the controlled workflow in [`UPDATES.md`](UPDATES.md). The updater verifies and
+stages the candidate before stopping services, classifies Alembic compatibility, creates a
+pre-update backup, and records immutable source identity. Code-only rollback is allowed only at the current database schema;
 schema-crossing rollback requires the matching database backup and explicit replacement acceptance.

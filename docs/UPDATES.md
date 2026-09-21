@@ -36,15 +36,18 @@ For `main`, first perform a deliberate shallow fetch of public `refs/heads/main`
 `main-<full-sha>`, source ref `refs/heads/main`, and that exact source revision. The updater verifies
 the checkout SHA; a moving branch name is never the installed identity.
 
-The updater stages and fully builds the candidate before interrupting service. It compares the
-deployed database revision with the candidate Alembic graph and classifies the transition:
+The updater first verifies the Ubuntu runtime prerequisites and the candidate's source-bound
+frontend artifact. It creates a new exact-constrained Python virtual environment but does not run
+Node.js/npm on the production host. Missing prerequisites are an operator-visible preflight failure;
+updates do not silently alter system packages. It then compares the deployed database revision with
+the candidate Alembic graph and classifies the transition:
 
 - same revision: allowed;
 - candidate is a forward descendant: allowed;
 - candidate is backward: refused; use database-aware rollback;
 - divergent or unknown: refused before service stop.
 
-It then stops the timer/application, creates an offline `pre-update` backup, migrates with candidate
+Only after the candidate is fully staged does it stop the timer/application, create an offline `pre-update` backup, migrate with candidate
 code, activates atomically, updates units/Caddy, starts services, checks public HTTPS health, and
 records channel/source/schema/backup identity under `/var/lib/learning-control-center`. Failed
 activation restores the previous release; if migrations changed the database, it also restores the

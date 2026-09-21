@@ -22,6 +22,10 @@ origin. Activation/update records under `/var/lib/learning-control-center` add t
 revisions, and backup lineage. `sudo lcc-admin status` reports the active channel, release ID, and
 full source SHA before the systemd status.
 
+Production releases also contain `frontend/dist/LCC_FRONTEND_ARTIFACT.json`. It binds the served
+static files to the public frontend build inputs and is verified during acquisition, installation,
+and update. Node.js/npm are not installed or used on the production server.
+
 The `lcc` account is a non-login system account. Application releases are read-only to that
 account. Only the data and backup directories are writable. Operational backups contain password
 hashes and authentication/session state and must remain protected.
@@ -44,6 +48,14 @@ sudo systemctl enable learning-control-center.service
 The service runs one Uvicorn worker on `127.0.0.1:8000`. Caddy is the only public TLS endpoint.
 Uvicorn proxy-header rewriting stays disabled; LCC accepts forwarded client addresses only from the
 configured loopback proxy CIDR. Standard output and errors go to journald.
+
+The installation uses Ubuntu's packaged Caddy service and imports only the LCC site file into the
+administrator's main Caddyfile. It does not expose the application environment to Caddy and does
+not execute a PATH-shadowing Caddy binary: production operations use the package-owned
+`/usr/bin/caddy`. Formatting and validation are transactional; either failure restores the prior
+Caddy site and main configuration. The installer does not replace unrelated sites. Review OS
+package updates through the server's normal Ubuntu patching
+policy; LCC installation never performs an OS-wide upgrade.
 
 Useful administrator commands:
 

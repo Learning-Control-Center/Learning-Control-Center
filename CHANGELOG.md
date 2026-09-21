@@ -12,11 +12,14 @@ All notable public changes to Learning Control Center are recorded here. The pro
 - An explicit DEVELOPMENT / UNSTABLE `main` channel that resolves once to an exact Git commit and
   never follows the branch automatically.
 - Installed channel/source metadata and channel-aware update and rollback records.
+- Automatic Ubuntu 24.04 prerequisite provisioning from signed Ubuntu repositories.
 
 ### Changed
 
 - Stable releases now include a deterministic release-bound `install.sh` whose embedded archive
   digest must agree with the published checksum.
+- Production hosts now consume a verified frontend artifact built during release packaging, so
+  Node.js/npm are no longer server dependencies.
 
 ## [1.0.0] - 2026-09-21
 

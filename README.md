@@ -39,19 +39,21 @@ been exercised remain explicitly `Not executed`; see the [product QA record](doc
 
 ## Quick self-hosting — stable release
 
-The supported production baseline is **Ubuntu Server 24.04 LTS** with a DNS hostname pointing to
-the server and inbound ports 80/443 available. The recommended installer is permanently bound to
-one published release archive and its SHA-256 checksum:
+The supported production baseline is **Ubuntu Server 24.04 LTS** with internet access, `sudo`/root,
+a DNS hostname pointing to the server, and inbound ports 80/443 available. The recommended
+installer is permanently bound to one published release archive and its SHA-256 checksum:
 
 ```bash
 curl -fsSL https://github.com/Learning-Control-Center/Learning-Control-Center/releases/download/v1.0.1/install.sh | sudo bash
 ```
 
 This command becomes available when the `v1.0.1` release assets are published. It asks for the
-public hostname, application timezone, and confirmation; generates the production secrets and
-configuration privately; verifies the matching archive; and delegates host changes to the
-canonical installer. For a download-and-review alternative, advanced configuration, or manual
-installation, use the complete [installation guide](docs/INSTALLATION.md).
+public hostname, application timezone, and confirmation; installs the required Ubuntu packages;
+generates the production secrets and configuration privately; verifies the matching archive; and
+delegates LCC host changes to the canonical installer. Node.js/npm are not installed on the server:
+the release contains a source-bound, verified production frontend built during release packaging.
+For a download-and-review alternative, advanced configuration, or manual installation, use the
+complete [installation guide](docs/INSTALLATION.md).
 
 ## Development build — `main` (unstable)
 
