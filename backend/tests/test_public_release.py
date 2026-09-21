@@ -360,6 +360,25 @@ def test_public_repository_assets_and_metadata_are_consistent() -> None:
     assert project["project"]["license"] == "GPL-3.0-only"
     assert "contact@waqsea.com" in (REPOSITORY_ROOT / "SECURITY.md").read_text()
 
+    public_frontend_text = "\n".join(
+        (REPOSITORY_ROOT / path).read_text()
+        for path in (
+            "frontend/index.html",
+            "frontend/src/index.css",
+            "frontend/tailwind.config.js",
+            "deploy/Caddyfile.template",
+        )
+    )
+    assert "fonts.googleapis.com" not in public_frontend_text
+    assert "fonts.gstatic.com" not in public_frontend_text
+    caddy_template = (REPOSITORY_ROOT / "deploy" / "Caddyfile.template").read_text()
+    assert "font-src 'self'" in caddy_template
+
+    changelog = (REPOSITORY_ROOT / "CHANGELOG.md").read_text()
+    assert "## [1.0.0] - 2026-09-21" in changelog
+    assert "Pending publication" not in changelog
+    assert "Initial public release candidate" not in changelog
+
     ignored_credentials = {
         ".npmrc",
         ".pypirc",

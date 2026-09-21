@@ -3,9 +3,9 @@
 All notable public changes to Learning Control Center are recorded here. The project follows
 [Semantic Versioning](https://semver.org/) for published release identities.
 
-## [1.0.0] - Pending publication
+## [1.0.0] - 2026-09-21
 
-Initial public release candidate.
+Initial public release.
 
 ### Added
 
