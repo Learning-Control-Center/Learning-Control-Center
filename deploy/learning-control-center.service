@@ -8,8 +8,9 @@ Type=simple
 User=lcc
 Group=lcc
 WorkingDirectory=/opt/learning-control-center/current
+Environment=LCC_APP_PORT=8000
 EnvironmentFile=/etc/learning-control-center.env
-ExecStart=/opt/learning-control-center/current/.venv/bin/uvicorn app.main:app --app-dir /opt/learning-control-center/current/backend --host 127.0.0.1 --port 8000 --workers 1 --no-proxy-headers
+ExecStart=/opt/learning-control-center/current/.venv/bin/uvicorn app.main:app --app-dir /opt/learning-control-center/current/backend --host 127.0.0.1 --port ${LCC_APP_PORT} --workers 1 --no-proxy-headers
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=90s

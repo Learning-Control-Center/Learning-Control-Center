@@ -95,6 +95,9 @@ def test_release_installation_updates_to_exact_main_and_preserves_repository(
         origin=origin,
     )
     environment, handoff = _environment(tmp_path, root, new_revision)
+    installed_environment = root / "etc" / "learning-control-center.env"
+    installed_environment.parent.mkdir(parents=True)
+    installed_environment.write_text("LCC_APP_PORT=8123\n")
     result = subprocess.run(
         [UPDATER, "--yes"], check=True, capture_output=True, text=True, env=environment
     )
@@ -113,6 +116,7 @@ def test_release_installation_updates_to_exact_main_and_preserves_repository(
         "--non-interactive",
         "--confirm-channel-change",
     ]
+    assert installed_environment.read_text() == "LCC_APP_PORT=8123\n"
 
 
 def test_main_update_is_exact_sha_pinned_and_same_sha_is_noop(tmp_path: Path) -> None:

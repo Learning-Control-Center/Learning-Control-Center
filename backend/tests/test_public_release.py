@@ -73,6 +73,10 @@ def _release_repository(tmp_path: Path) -> Path:
         "scripts/prepare-public-promotion.sh",
         "scripts/update.sh",
         "scripts/update-ubuntu.sh",
+        "deploy/Caddyfile",
+        "deploy/Caddyfile.template",
+        "deploy/learning-control-center.env.example",
+        "deploy/learning-control-center.service",
         "deploy/learning-control-center-update.sh",
         "docs/INSTALLATION.md",
         "docs/PRODUCTION_OPERATIONS.md",
@@ -742,7 +746,7 @@ def test_main_is_default_and_non_interactive_use_requires_exact_commit(tmp_path:
         text=True,
     )
     assert missing.returncode != 0
-    assert "Non-interactive main installation requires --commit" in missing.stderr
+    assert "Direct non-interactive main installation requires --commit" in missing.stderr
 
     moving = subprocess.run(
         [
@@ -793,7 +797,17 @@ def test_piped_main_bootstrap_reexecutes_immutable_stage_before_host_mutation(
         "TMPDIR": str(tmp_path),
     }
     result = subprocess.run(
-        ["bash", "-s", "--", "--dry-run"],
+        [
+            "bash",
+            "-s",
+            "--",
+            "--dry-run",
+            "--non-interactive",
+            "--domain",
+            "lcc.example.test",
+            "--app-port",
+            "8123",
+        ],
         input=BOOTSTRAP.read_text(),
         check=True,
         capture_output=True,
@@ -805,6 +819,11 @@ def test_piped_main_bootstrap_reexecutes_immutable_stage_before_host_mutation(
         revision,
         "https://github.com/Learning-Control-Center/Learning-Control-Center.git",
         "--dry-run",
+        "--non-interactive",
+        "--domain",
+        "lcc.example.test",
+        "--app-port",
+        "8123",
     ]
     assert not list(tmp_path.glob("lcc-bootstrap-stage.*"))
 
@@ -836,6 +855,7 @@ def test_bootstrap_generates_secure_environment_and_hands_off_without_secrets(
     )
     security_secret = values["LCC_SECURITY_SECRET"]
     bootstrap_token = values["LCC_BOOTSTRAP_TOKEN"]
+    assert values["LCC_APP_PORT"] == "8000"
     assert security_secret != bootstrap_token
     assert len(security_secret) >= 32 and len(bootstrap_token) >= 32
     assert stat.S_IMODE((tmp_path / "generated.env").stat().st_mode) == 0o600
@@ -851,6 +871,89 @@ def test_bootstrap_generates_secure_environment_and_hands_off_without_secrets(
     assert f"Verified stable release: {RELEASE_ID}" in installed.stdout
     assert list(temporary_root.iterdir()) == []
     assert list((tmp_path / "secret-temp").iterdir()) == []
+
+
+def test_bootstrap_app_port_noninteractive_selection_and_conflicts(tmp_path: Path) -> None:
+    repository = _release_repository(tmp_path)
+    asset_root = tmp_path / "assets"
+    _archive, _checksum, launcher = _package(repository, asset_root / RELEASE_ID)
+
+    custom_root = tmp_path / "custom"
+    custom_root.mkdir()
+    custom_environment = _bootstrap_environment(custom_root, asset_root)
+    custom = subprocess.run(
+        [*_stable_command(), "--app-port", "8123"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=custom_environment,
+    )
+    assert "LCC_APP_PORT=8123" in (custom_root / "generated.env").read_text()
+    assert "fake installer invoked" in custom.stdout
+
+    occupied_root = tmp_path / "occupied"
+    occupied_root.mkdir()
+    occupied_environment = _bootstrap_environment(occupied_root, asset_root)
+    occupied_environment["LCC_BOOTSTRAP_TEST_OCCUPIED_APP_PORTS"] = "8000"
+    occupied = subprocess.run(
+        _stable_command(),
+        check=False,
+        capture_output=True,
+        text=True,
+        env=occupied_environment,
+    )
+    assert occupied.returncode != 0
+    assert "rerun with --app-port PORT" in occupied.stderr
+    assert "process=test-listener pid=4242" in occupied.stderr
+
+    explicit_root = tmp_path / "explicit-occupied"
+    explicit_root.mkdir()
+    explicit_environment = _bootstrap_environment(explicit_root, asset_root)
+    explicit_environment["LCC_BOOTSTRAP_TEST_OCCUPIED_APP_PORTS"] = "8123"
+    explicit = subprocess.run(
+        [*_stable_command(), "--app-port", "8123"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=explicit_environment,
+    )
+    assert explicit.returncode != 0
+    assert "Explicitly requested internal application port 8123 is already occupied" in (
+        explicit.stderr
+    )
+
+    environment_file = tmp_path / "operator.env"
+    environment_file.write_text("LCC_APP_PORT=8123\n")
+    conflicting_authorities = subprocess.run(
+        [launcher, "--env-file", environment_file, "--app-port", "8124"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert conflicting_authorities.returncode != 0
+    assert "cannot be combined" in conflicting_authorities.stderr
+
+
+@pytest.mark.skipif(shutil.which("script") is None, reason="PTY helper is unavailable")
+def test_piped_style_interactive_app_port_conflict_reads_from_terminal(tmp_path: Path) -> None:
+    repository = _release_repository(tmp_path)
+    asset_root = tmp_path / "assets"
+    _archive, _checksum, launcher = _package(repository, asset_root / RELEASE_ID)
+    environment = _bootstrap_environment(tmp_path, asset_root)
+    environment["LCC_BOOTSTRAP_TEST_OCCUPIED_APP_PORTS"] = "8000"
+    pipeline = f"cat {shlex.quote(str(launcher))} | bash"
+    result = subprocess.run(
+        ["script", "-qec", pipeline, "/dev/null"],
+        input="\nlcc.example.test\nEurope/Istanbul\ny\n",
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert "Internal application port [8001]" in result.stdout
+    assert "Listener: 127.0.0.1:8000" in result.stdout
+    assert "Internal endpoint: 127.0.0.1:8001" in result.stdout
+    assert "LCC_APP_PORT=8001" in (tmp_path / "generated.env").read_text()
 
 
 def test_generated_stable_launcher_is_release_bound_and_rejects_identity_override(
@@ -929,6 +1032,9 @@ def test_release_bound_launcher_rerun_delegates_updates_and_handles_version_orde
         revision="1" * 40,
         legacy_v1=True,
     )
+    older_installed_environment = older_root / "etc" / "learning-control-center.env"
+    older_installed_environment.parent.mkdir(parents=True)
+    older_installed_environment.write_text("LCC_APP_PORT=8123\n")
     (tmp_path / "older").mkdir(exist_ok=True)
     older_environment = _bootstrap_environment(tmp_path / "older", asset_root)
     older_environment.update(
@@ -949,11 +1055,15 @@ def test_release_bound_launcher_rerun_delegates_updates_and_handles_version_orde
     assert RELEASE_ID in update_arguments
     assert target_revision in update_arguments
     assert "canonical update engine" in updated.stdout
+    assert older_installed_environment.read_text() == "LCC_APP_PORT=8123\n"
 
     same_root = tmp_path / "same-root"
     _write_active_release(
         same_root, release_id=RELEASE_ID, channel="stable", revision=target_revision
     )
+    installed_environment = same_root / "etc" / "learning-control-center.env"
+    installed_environment.parent.mkdir(parents=True)
+    installed_environment.write_text("LCC_APP_PORT=8123\n")
     (tmp_path / "same").mkdir(exist_ok=True)
     same_environment = _bootstrap_environment(tmp_path / "same", asset_root)
     same_environment["LCC_BOOTSTRAP_INSTALL_ROOT"] = str(same_root)
@@ -965,6 +1075,17 @@ def test_release_bound_launcher_rerun_delegates_updates_and_handles_version_orde
         env=same_environment,
     )
     assert same.stdout.strip().endswith("Learning Control Center is already up to date.")
+    assert installed_environment.read_text() == "LCC_APP_PORT=8123\n"
+    rejected_port_change = subprocess.run(
+        [launcher, "--non-interactive", "--app-port", "8124"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=same_environment,
+    )
+    assert rejected_port_change.returncode != 0
+    assert "sudo lcc-admin app-port set 8124" in rejected_port_change.stderr
+    assert installed_environment.read_text() == "LCC_APP_PORT=8123\n"
 
     newer_root = tmp_path / "newer-root"
     _write_active_release(newer_root, release_id="v1.0.2", channel="stable", revision="2" * 40)

@@ -39,6 +39,15 @@ export LCC_ALLOWED_HOSTS='["localhost"]'
 export LCC_TRUSTED_PROXY_CIDRS='["127.0.0.0/8","::1/128"]'
 export LCC_PUBLIC_HOST=localhost:8443
 export LCC_HTTP_PORT=8080
+LCC_APP_PORT="$(python3 - <<'PY'
+import socket
+
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+    listener.bind(("127.0.0.1", 0))
+    print(listener.getsockname()[1])
+PY
+)"
+export LCC_APP_PORT
 export LCC_FRONTEND_ROOT="$repository_root/frontend/dist"
 export LCC_E2E_BASE_URL=https://localhost:8443
 export XDG_DATA_HOME="$run_directory/caddy-data"
@@ -63,7 +72,7 @@ source_revision=$source_revision
 source_origin=https://github.com/Learning-Control-Center/Learning-Control-Center.git
 EOF
 caddy validate --config "$repository_root/deploy/Caddyfile" --adapter caddyfile
-"$repository_root/.venv/bin/uvicorn" app.main:app --host 127.0.0.1 --port 8000 --workers 1 --no-proxy-headers >"$run_directory/backend.log" 2>&1 &
+"$repository_root/.venv/bin/uvicorn" app.main:app --host 127.0.0.1 --port "$LCC_APP_PORT" --workers 1 --no-proxy-headers >"$run_directory/backend.log" 2>&1 &
 backend_pid=$!
 caddy run --config "$repository_root/deploy/Caddyfile" --adapter caddyfile >"$run_directory/caddy.log" 2>&1 &
 caddy_pid=$!
@@ -94,7 +103,7 @@ unset backend_pid
 cd "$repository_root"
 "$repository_root/.venv/bin/python" -m app.ops restore --from "$post_e2e_backup"
 "$repository_root/.venv/bin/python" -c 'import os, sqlite3; path=os.environ["LCC_DATABASE_URL"].removeprefix("sqlite:///"); connection=sqlite3.connect(path); assert connection.execute("SELECT COUNT(*) FROM auth_sessions WHERE revoked_at IS NULL").fetchone()[0] == 0; connection.close()'
-"$repository_root/.venv/bin/uvicorn" app.main:app --host 127.0.0.1 --port 8000 --workers 1 --no-proxy-headers >"$run_directory/rejected-restart.log" 2>&1 &
+"$repository_root/.venv/bin/uvicorn" app.main:app --host 127.0.0.1 --port "$LCC_APP_PORT" --workers 1 --no-proxy-headers >"$run_directory/rejected-restart.log" 2>&1 &
 rejected_pid=$!
 for _attempt in $(seq 1 100); do
     if ! kill -0 "$rejected_pid" 2>/dev/null; then
@@ -110,7 +119,7 @@ fi
 wait "$rejected_pid" || true
 
 unset LCC_BOOTSTRAP_TOKEN
-"$repository_root/.venv/bin/uvicorn" app.main:app --host 127.0.0.1 --port 8000 --workers 1 --no-proxy-headers >"$run_directory/restarted.log" 2>&1 &
+"$repository_root/.venv/bin/uvicorn" app.main:app --host 127.0.0.1 --port "$LCC_APP_PORT" --workers 1 --no-proxy-headers >"$run_directory/restarted.log" 2>&1 &
 backend_pid=$!
 for _attempt in $(seq 1 60); do
     if curl --silent --fail --insecure https://localhost:8443/api/v1/health >/dev/null; then

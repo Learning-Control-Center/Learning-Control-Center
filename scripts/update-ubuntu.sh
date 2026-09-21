@@ -30,10 +30,12 @@ test -r "$LCC_ENVIRONMENT_FILE" || lcc_die "Missing $LCC_ENVIRONMENT_FILE."
 test -L "$LCC_CURRENT_RELEASE" || lcc_die "No active LCC release is installed."
 lcc_load_environment "$LCC_ENVIRONMENT_FILE"
 lcc_validate_environment "$LCC_CURRENT_RELEASE"
+app_port="$(lcc_effective_app_port)"
 old_release="$(readlink -f "$LCC_CURRENT_RELEASE")"
 old_release_id="$(tr -d '\r\n' < "$old_release/RELEASE_ID")"
 old_release_channel="$(lcc_release_channel "$old_release")"
 old_source_revision="$(lcc_release_source_revision "$old_release")"
+lcc_require_configured_app_port_safe
 
 atomic_activate() {
     local release_directory="$1"
@@ -44,16 +46,14 @@ atomic_activate() {
 
 render_caddy() {
     local release_directory="$1"
-    local hostname temporary
-    hostname="$(lcc_public_hostname)"
+    local temporary
     temporary="$(mktemp)"
-    sed -e "s|@@LCC_PUBLIC_HOST@@|$hostname|g" \
-        -e "s|@@LCC_FRONTEND_ROOT@@|$LCC_CURRENT_RELEASE/frontend/dist|g" \
-        "$release_directory/deploy/Caddyfile.template" > "$temporary"
+    lcc_render_caddy_site \
+        "$release_directory" "$LCC_CURRENT_RELEASE/frontend/dist" "$temporary"
     install -m 0644 "$temporary" "$LCC_CADDY_SITE"
     rm -f -- "$temporary"
     "$LCC_CADDY_BINARY" fmt --overwrite "$LCC_CADDY_SITE"
-    "$LCC_CADDY_BINARY" validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    "$LCC_CADDY_BINARY" validate --config "$LCC_CADDY_MAIN" --adapter caddyfile
 }
 
 install_units() {
@@ -199,6 +199,7 @@ recover_original_installation() {
     (
         set -e
         systemctl start "$LCC_SERVICE_NAME"
+        lcc_wait_for_internal_health "$app_port" 60 0.5
         systemctl start "$LCC_BACKUP_TIMER_NAME"
         systemctl reload caddy.service
         lcc_wait_for_health 60 0.5
@@ -335,6 +336,10 @@ stop_for_transition() {
 
 start_and_verify() {
     systemctl start "$LCC_SERVICE_NAME"
+    if ! lcc_wait_for_internal_health "$app_port" 60 0.5; then
+        journalctl -u "$LCC_SERVICE_NAME" -n 80 --no-pager >&2 || true
+        return 1
+    fi
     systemctl reload caddy.service
     if ! lcc_wait_for_health 60 0.5; then
         journalctl -u "$LCC_SERVICE_NAME" -n 80 --no-pager >&2 || true
@@ -478,6 +483,9 @@ elif test "$action" = "rollback"; then
     lcc_validate_release_id "$target_id"
     target_release="$LCC_APPLICATION_ROOT/releases/$target_id"
     test -x "$target_release/.venv/bin/python" || lcc_die "Target release is not installed."
+    rollback_app_port_mode="$(lcc_app_port_rollback_mode "$target_release")"
+    legacy_environment_adjustment=0
+    test "$rollback_app_port_mode" != legacy-remove-key || legacy_environment_adjustment=1
     current_head="$(database_revision)"
     target_head="$(release_head "$target_release")"
     if test "$target_head" != "$current_head"; then
@@ -490,8 +498,10 @@ elif test "$action" = "rollback"; then
     fi
     transition_started=0
     pre_rollback_backup=""
+    legacy_environment_backup=""
     rollback_failed_rollback() {
         status=$?
+        environment_restore_failed=0
         test "$transition_started" -eq 1 || exit "$status"
         trap - EXIT
         set +e
@@ -499,13 +509,29 @@ elif test "$action" = "rollback"; then
         systemctl stop "$LCC_BACKUP_TIMER_NAME"
         systemctl stop "$LCC_BACKUP_SERVICE_NAME"
         systemctl stop "$LCC_SERVICE_NAME"
+        if test "$legacy_environment_adjustment" -eq 1 && \
+            test -n "$legacy_environment_backup" && test -f "$legacy_environment_backup"; then
+            if lcc_install_environment_file \
+                "$legacy_environment_backup" "$LCC_ENVIRONMENT_FILE"; then
+                lcc_load_environment "$LCC_ENVIRONMENT_FILE"
+            else
+                lcc_note "CRITICAL: could not restore LCC_APP_PORT in the production environment."
+                environment_restore_failed=1
+            fi
+        fi
         restore_required=0
         test "$target_head" = "$current_head" || restore_required=1
         recover_original_installation "$pre_rollback_backup" "$restore_required"
         recovery_status=$?
+        if test "$environment_restore_failed" -ne 0; then
+            recovery_status=1
+        fi
         if test "$recovery_status" -ne 0; then
             lcc_note "Automatic rollback recovery failed; manual database-aware recovery is required."
             exit 1
+        fi
+        if test -n "$legacy_environment_backup"; then
+            rm -f -- "$legacy_environment_backup"
         fi
         exit "$status"
     }
@@ -514,6 +540,18 @@ elif test "$action" = "rollback"; then
     transition_started=1
     if ! pre_rollback_backup="$(create_offline_backup "$old_release" pre-rollback)"; then
         lcc_die "Pre-rollback backup was not created."
+    fi
+    if test "$legacy_environment_adjustment" -eq 1; then
+        legacy_environment_backup="$(mktemp /run/lcc-rollback-environment.XXXXXXXX)"
+        cp -a -- "$LCC_ENVIRONMENT_FILE" "$legacy_environment_backup"
+        chown root:root "$legacy_environment_backup"
+        chmod 0600 "$legacy_environment_backup"
+        legacy_environment_without_port="$(mktemp /run/lcc-rollback-environment-next.XXXXXXXX)"
+        lcc_render_environment_without_app_port \
+            "$LCC_ENVIRONMENT_FILE" "$legacy_environment_without_port"
+        lcc_install_environment_file "$legacy_environment_without_port" "$LCC_ENVIRONMENT_FILE"
+        rm -f -- "$legacy_environment_without_port"
+        lcc_note "Removed LCC_APP_PORT for compatibility with legacy rollback target $target_id."
     fi
     atomic_activate "$target_release"
     install_units "$target_release"
@@ -542,6 +580,9 @@ activated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
     chmod 0600 "$rollback_record"
     chown "$LCC_SERVICE_USER:$LCC_SERVICE_GROUP" "$rollback_record"
+    if test -n "$legacy_environment_backup"; then
+        rm -f -- "$legacy_environment_backup"
+    fi
     trap - EXIT
     echo "Rolled back to $target_id; pre-rollback backup: $pre_rollback_backup"
 else

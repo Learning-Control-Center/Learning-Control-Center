@@ -40,7 +40,7 @@ been exercised remain explicitly `Not executed`; see the [product QA record](doc
 ## Quick install or update
 
 The supported production baseline is **Ubuntu Server 24.04 LTS** with internet access, `sudo`/root,
-a DNS hostname pointing to the server, and inbound ports 80/443 available. The canonical command
+a DNS hostname pointing to the server, and inbound public ports 80/443 available. The canonical command
 installs or updates from the latest validated public `main`:
 
 ```bash
@@ -52,6 +52,10 @@ uses a minimal stage zero to resolve `refs/heads/main` and re-run the bootstrap 
 commit before APT or other host mutation. It displays the exact 40-character SHA, checks out and
 verifies that commit, installs required packages, and generates production configuration privately.
 Every installed identity is `main-<full-sha>`; it is never merely the moving branch name.
+
+Uvicorn remains private on IPv4 loopback. A fresh install uses internal port `8000` when available;
+if it is occupied, the interactive installer reports the listener and asks for another port. For
+automation, pass `--app-port PORT` to the bootstrap. Public HTTPS remains on Caddy ports 80/443.
 
 Rerunning the command explicitly checks `main` again. The same SHA is a clean no-op; a changed SHA
 is shown and confirmed before the canonical backup/migration/activation workflow runs. An existing
@@ -80,6 +84,13 @@ Both commands use the recorded repository, resolve its public `main` to one exac
 to the same safe update engine. A release-channel installation requires confirmation before its
 one-time migration to `main`. See [updates, rollback, and uninstall](docs/UPDATES.md) for the
 database-aware update and rollback contract.
+
+Inspect or safely change the private loopback port without changing the public URL:
+
+```bash
+sudo lcc-admin app-port
+sudo lcc-admin app-port set 8123
+```
 
 ## Pinned releases
 

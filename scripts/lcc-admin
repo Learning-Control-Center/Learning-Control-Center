@@ -18,6 +18,9 @@ Operations:
   update [--yes] [--dry-run]
                                  Resolve and run the canonical installed updater
   health                         Check the public HTTPS health endpoint
+  app-port                       Show the internal loopback application port
+  app-port set PORT [--dry-run] [--yes]
+                                 Safely validate or change the internal port
   logs [LINES]                   Show recent application journal entries
   backup                         Run one SQLite-safe operational backup
   backup-status                  Show timer state, schedule, retention, and recent files
@@ -44,6 +47,11 @@ shift
 
 case "$command_name" in
     status|health|logs|backup-status|show-bootstrap-token|update|-h|--help|help) ;;
+    app-port)
+        if test "${1:-}" = set; then
+            lcc_acquire_deployment_lock
+        fi
+        ;;
     *) lcc_acquire_deployment_lock ;;
 esac
 
@@ -96,6 +104,56 @@ case "$command_name" in
         curl --fail --silent --show-error --max-time 10 \
             "$LCC_PUBLIC_ORIGIN/api/v1/health"
         printf '\n'
+        ;;
+    app-port)
+        if test "$#" -eq 0; then
+            current_app_port="$(lcc_effective_app_port)"
+            echo "Internal application port: $current_app_port"
+            echo "Bind address: 127.0.0.1"
+            if lcc_app_port_is_explicit; then
+                echo "Configuration: explicit (LCC_APP_PORT)"
+            else
+                echo "Configuration: legacy default 8000"
+            fi
+            exit 0
+        fi
+        test "$1" = set || lcc_die "app-port accepts no arguments or: set PORT [--dry-run] [--yes]"
+        shift
+        test "$#" -ge 1 || lcc_die "app-port set requires PORT."
+        requested_app_port="$(lcc_validate_app_port "$1")"
+        shift
+        app_port_dry_run=0
+        app_port_assume_yes=0
+        while test "$#" -gt 0; do
+            case "$1" in
+                --dry-run) app_port_dry_run=1 ;;
+                --yes) app_port_assume_yes=1 ;;
+                *) lcc_die "Unknown app-port set option: $1" ;;
+            esac
+            shift
+        done
+        current_app_port="$(lcc_effective_app_port)"
+        if test "$requested_app_port" = "$current_app_port"; then
+            echo "Internal application port is already $current_app_port; no changes were made."
+            exit 0
+        fi
+        if ! lcc_app_port_is_available "$requested_app_port"; then
+            lcc_describe_app_port_listener "$requested_app_port"
+            lcc_die "Internal application port $requested_app_port is already occupied."
+        fi
+        echo "Internal application port: $current_app_port -> $requested_app_port"
+        echo "Bind address remains: 127.0.0.1"
+        if test "$app_port_dry_run" -eq 0 && test "$app_port_assume_yes" -eq 0; then
+            exec 3<>/dev/tty || \
+                lcc_die "Interactive confirmation requires a controlling terminal; use --yes for deliberate automation."
+            printf 'Apply this internal application-port change? [y/N]: ' >&3
+            IFS= read -r answer <&3 || lcc_die "Unable to read app-port confirmation."
+            case "${answer,,}" in
+                y|yes) ;;
+                *) lcc_die "App-port change cancelled." ;;
+            esac
+        fi
+        lcc_apply_app_port_change "$requested_app_port" "$app_port_dry_run"
         ;;
     logs)
         lines="${1:-100}"

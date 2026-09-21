@@ -114,10 +114,12 @@ Reconfirm no secret is printed or passed on argv.
 5. Run the canonical main-first installer test and verify the recorded SHA equals the deliberately
    resolved public `main` tip.
 6. Run the exact versioned release installer test and verify its archive/checksum binding.
-7. Complete a real clean Ubuntu Server 24.04 acceptance test: prerequisite provisioning, install,
-   HTTPS health, first-user bootstrap,
-   finalization, systemd restart, scheduled/manual backup, update preflight, and preserve-by-default
-   uninstall.
+7. Complete a real clean Ubuntu Server 24.04 acceptance test: prerequisite provisioning, default
+   and custom internal-port installs, actual systemd environment override/ExecStart expansion,
+   loopback-only listener, selected Caddy upstream, HTTPS health, first-user bootstrap,
+   `lcc-admin app-port` query/change/failure recovery, restart/reboot persistence, same-SHA no-op,
+   changed-main update persistence, scheduled/manual backup, update preflight, and
+   preserve-by-default uninstall.
 8. Confirm the versioned release assets are downloadable and byte-identical across intended hosts,
    then publish release notes from `CHANGELOG.md`. The normal quick-install URL remains the public
    `main` bootstrap rather than a Release redirect.

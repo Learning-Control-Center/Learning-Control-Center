@@ -163,6 +163,7 @@ fi
 
 lcc_load_environment "$environment_source"
 lcc_validate_environment "$current_release"
+app_port="$(lcc_effective_app_port)"
 test "$(lcc_public_hostname)" = "$domain" || \
     lcc_die "--domain must match LCC_PUBLIC_ORIGIN and LCC_ALLOWED_HOSTS."
 test "$LCC_DATABASE_URL" = "sqlite:///$database_file" || \
@@ -192,6 +193,15 @@ if test "$skip_prerequisites" -eq 0; then
     fi
 fi
 lcc_verify_frontend_artifact "$source_root"
+if test "$install_root" = "/" && test "$dry_run" -eq 0 && \
+    ! lcc_app_port_is_available "$app_port"; then
+    if test -L "$current_release" && lcc_app_port_owned_by_service "$app_port"; then
+        lcc_note "Internal application port $app_port is already owned by the active LCC service."
+    else
+        lcc_describe_app_port_listener "$app_port"
+        lcc_die "Internal application port $app_port is already occupied."
+    fi
+fi
 
 if test "$install_root" = "/"; then
     python3 - "$LCC_SERVICE_USER" "$LCC_SERVICE_GROUP" "$LCC_DATA_DIRECTORY" <<'PY'
@@ -400,9 +410,7 @@ cleanup_caddy_temporary_files() {
     fi
 }
 trap cleanup_caddy_temporary_files EXIT
-sed -e "s|@@LCC_PUBLIC_HOST@@|$domain|g" \
-    -e "s|@@LCC_FRONTEND_ROOT@@|$current_release/frontend/dist|g" \
-    "$asset_release/deploy/Caddyfile.template" > "$rendered_caddy"
+lcc_render_caddy_site "$asset_release" "$current_release/frontend/dist" "$rendered_caddy"
 run install -m 0644 "$rendered_caddy" "$caddy_site"
 
 if test ! -e "$caddy_main"; then
@@ -438,6 +446,10 @@ if test "$install_root" = "/" && test "$dry_run" -eq 0; then
     if test "$start_services" -eq 1; then
         systemctl reload-or-restart caddy.service
         systemctl restart "$LCC_SERVICE_NAME"
+        if ! lcc_wait_for_internal_health "$app_port" 120 0.5; then
+            journalctl -u "$LCC_SERVICE_NAME" -n 80 --no-pager >&2 || true
+            lcc_die "Installation completed, but LCC did not become healthy on internal port $app_port."
+        fi
         if ! lcc_wait_for_health 120 0.5; then
             journalctl -u "$LCC_SERVICE_NAME" -n 80 --no-pager >&2 || true
             lcc_die "Installation completed, but the public HTTPS health check failed."
@@ -468,6 +480,7 @@ fi
 cat <<EOF
 
 Learning Control Center release $release_id is installed.
+Internal application endpoint: 127.0.0.1:$app_port
 Channel: $release_channel
 Source revision: $source_revision
 Public URL: https://$domain

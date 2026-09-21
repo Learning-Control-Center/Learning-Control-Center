@@ -8,7 +8,7 @@ source "$SCRIPT_DIRECTORY/deploy-common.sh"
 
 usage() {
     cat <<'EOF'
-Usage: generate-production-env.sh --domain HOST --timezone ZONE --output FILE [--root DIR]
+Usage: generate-production-env.sh --domain HOST --timezone ZONE --output FILE [--app-port PORT] [--root DIR]
 
 Generate one complete Learning Control Center production environment file. Secrets
 are created inside this process and are never accepted as command-line arguments.
@@ -20,6 +20,7 @@ EOF
 domain=""
 timezone=""
 output_file=""
+app_port="$LCC_APP_PORT_DEFAULT"
 install_root="/"
 
 while test "$#" -gt 0; do
@@ -27,6 +28,7 @@ while test "$#" -gt 0; do
         --domain) domain="${2:?Missing --domain value}"; shift 2 ;;
         --timezone) timezone="${2:?Missing --timezone value}"; shift 2 ;;
         --output) output_file="${2:?Missing --output value}"; shift 2 ;;
+        --app-port) app_port="${2:?Missing --app-port value}"; shift 2 ;;
         --root) install_root="${2:?Missing --root value}"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) usage >&2; lcc_die "Unknown option: $1" ;;
@@ -37,6 +39,7 @@ test -n "$domain" || lcc_die "--domain is required."
 test -n "$timezone" || lcc_die "--timezone is required."
 test -n "$output_file" || lcc_die "--output is required."
 lcc_validate_public_hostname "$domain"
+app_port="$(lcc_validate_app_port "$app_port")"
 [[ "$output_file" = /* ]] || lcc_die "--output must be an absolute path."
 test ! -e "$output_file" || lcc_die "Refusing to replace existing environment file: $output_file"
 
@@ -52,7 +55,7 @@ database_file="$(lcc_prefixed_path "$install_root" "$LCC_DATABASE_FILE")"
 backup_directory="$(lcc_prefixed_path "$install_root" "$LCC_BACKUP_DIRECTORY_DEFAULT")"
 
 python3 - "$domain" "$timezone" "$output_file" "$current_release" \
-    "$database_file" "$backup_directory" <<'PY'
+    "$database_file" "$backup_directory" "$app_port" <<'PY'
 import json
 import os
 import secrets
@@ -60,7 +63,7 @@ import sys
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-domain, timezone, output, release_root, database, backups = sys.argv[1:]
+domain, timezone, output, release_root, database, backups, app_port = sys.argv[1:]
 try:
     ZoneInfo(timezone)
 except Exception as exc:
@@ -90,6 +93,7 @@ lines = [
     f"LCC_DATABASE_URL=sqlite:///{database}",
     f"LCC_BACKUP_DIRECTORY={backups}",
     f"LCC_RELEASE_ROOT={release_root}",
+    f"LCC_APP_PORT={app_port}",
     f"LCC_PUBLIC_ORIGIN={origin}",
     f"LCC_ALLOWED_ORIGINS='{json.dumps([origin], separators=(',', ':'))}'",
     f"LCC_ALLOWED_HOSTS='{json.dumps([domain], separators=(',', ':'))}'",

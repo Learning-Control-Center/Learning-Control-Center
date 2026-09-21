@@ -59,6 +59,12 @@ start services, check public HTTPS health, and record channel/source/schema/back
 activation restores the previous release; if migrations changed the database, it also restores the
 exact pre-update backup before old code restarts.
 
+The configured internal application port is persisted in
+`/etc/learning-control-center.env`. Bootstrap reruns, exact-SHA no-ops, changed-SHA updates,
+`update.sh`, `lcc-admin update`, service restarts, and reboots preserve it. Updates do not regenerate
+the environment or reset a custom port to 8000. An older environment without `LCC_APP_PORT`
+continues to resolve to the legacy default 8000 without being rewritten.
+
 The main-first resolver and release-bound bootstrap acquire and verify their candidate, then
 delegate the complete immutable identity to `scripts/update-ubuntu.sh apply`. That script remains
 the sole backup/migration/staging/activation engine. It recognizes v1.0.0's legacy
@@ -106,6 +112,11 @@ Schema-crossing rollback loses application changes made after the selected backu
 restored sessions. A new `pre-rollback` backup of the current code/database pairing is created
 first. Deployment records retain previous/target channel, release ID, source SHA, schema revisions,
 backup path, and activation time.
+
+A historical release that predates configurable ports cannot honor a custom non-8000 port, so that
+rollback is refused before services stop. At effective port 8000, rollback may transactionally
+remove the new key for an old strict environment parser; failed activation restores the current
+environment and key before recovery.
 
 ## Uninstall
 

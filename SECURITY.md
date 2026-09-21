@@ -15,9 +15,12 @@ reproducibility, affected versions, and available maintainer capacity.
 
 ## Supported versions
 
-Security fixes are prepared for the current published release line. Operators should use deliberate
-tagged releases, review release notes, keep Ubuntu and Caddy patched, and follow the controlled
-update procedure in [`docs/UPDATES.md`](docs/UPDATES.md).
+Security fixes are prepared for the current published code line. Normal installation and update
+resolve validated public `main` to one exact immutable commit SHA before installation. Tags and
+Releases remain optional immutable snapshots for pinned deployments and review. Operators should
+deliberately choose when to invoke the controlled update procedure in
+[`docs/UPDATES.md`](docs/UPDATES.md), review relevant changes, and keep Ubuntu and Caddy patched;
+LCC does not update itself in the background.
 
 ## Deployment responsibility
 

@@ -396,7 +396,8 @@ test('production host, origin, and docs boundaries fail closed', async () => {
       })
     ).status(),
   ).toBe(403)
-  const backend = await request.newContext({ baseURL: 'http://127.0.0.1:8000' })
+  const appPort = process.env.LCC_APP_PORT ?? '8000'
+  const backend = await request.newContext({ baseURL: `http://127.0.0.1:${appPort}` })
   expect((await backend.get('/api/v1/health', { headers: { Host: 'attacker.example' } })).status()).toBe(
     400,
   )

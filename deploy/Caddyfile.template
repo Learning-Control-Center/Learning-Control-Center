@@ -9,7 +9,7 @@
 		-Server
 	}
 	handle /api/* {
-		reverse_proxy 127.0.0.1:8000
+		reverse_proxy 127.0.0.1:@@LCC_APP_PORT@@
 	}
 	handle {
 		root * @@LCC_FRONTEND_ROOT@@

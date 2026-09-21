@@ -65,6 +65,7 @@ with socket.socket() as handle:
     print(handle.getsockname()[1])
 PY
 )"
+export LCC_APP_PORT="$port"
 export LCC_ENVIRONMENT=production
 export LCC_DATABASE_URL="sqlite:///$database_path"
 export LCC_BACKUP_DIRECTORY="$backup_directory"

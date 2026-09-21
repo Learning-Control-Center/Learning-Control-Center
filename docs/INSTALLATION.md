@@ -4,7 +4,8 @@
 
 The supported server baseline is **Ubuntu Server 24.04 LTS (amd64 or arm64)**. The operator supplies
 only root access through `sudo`, working internet access, a public DNS `A` and/or `AAAA` record for
-the LCC hostname, and available inbound TCP ports 80 and 443. No separate application-prerequisite
+the LCC hostname, and available inbound public TCP ports 80 and 443. The internal loopback
+application port is separate and defaults to 8000. No separate application-prerequisite
 installation step is required on a normal Ubuntu Server image.
 
 The bootstrap checks the OS, architecture, free space, APT/dpkg state, conflicting listeners, and
@@ -50,11 +51,17 @@ alongside the installed SHA, confirmed, and delegated to the canonical updater. 
 release-channel installation shows its current channel/release and target main SHA, then requires
 explicit confirmation before migration. Main never advances in the background.
 
-The interactive installer asks only for:
+When internal port 8000 is free, the interactive installer asks only for:
 
 1. the public DNS hostname;
 2. the application timezone, defaulting to the detected server timezone or UTC;
 3. confirmation of the non-secret installation summary.
+
+The summary includes `127.0.0.1:<internal-port>`. If 8000 is occupied, the installer safely reports
+the listener address and process/PID when available, then reads an alternate port from the
+controlling terminal. This works with the canonical `curl | sudo bash` pipeline because prompts use
+`/dev/tty`, not the script-input pipe. The suggested alternate is never selected silently. An
+explicitly requested occupied port fails, and the installer never stops the conflicting service.
 
 It reports missing packages before installing them, generates independent strong application and
 bootstrap secrets in a root-only temporary directory, renders a complete production environment,
@@ -102,6 +109,10 @@ normal update-discovery mechanism.
 For automation, identities must remain explicit:
 
 ```bash
+# Canonical piped main bootstrap; stage zero resolves and pins the exact main SHA
+curl -fsSL https://raw.githubusercontent.com/Learning-Control-Center/Learning-Control-Center/main/scripts/bootstrap-ubuntu.sh |
+  sudo bash -s -- --non-interactive --domain lcc.example.com --app-port 8123
+
 # Explicit pinned release bootstrap
 sudo scripts/bootstrap-ubuntu.sh \
   --channel stable --ref v1.0.1 \
@@ -110,10 +121,15 @@ sudo scripts/bootstrap-ubuntu.sh \
 # Canonical main, asserting the expected current remote tip
 sudo scripts/bootstrap-ubuntu.sh \
   --commit 0123456789abcdef0123456789abcdef01234567 \
-  --domain lcc.example.com --timezone UTC --non-interactive
+  --domain lcc.example.com --timezone UTC --app-port 8123 --non-interactive
 ```
 
-Non-interactive main refuses to run without `--commit`, and fails if fetched public `main` differs.
+Direct non-interactive main execution refuses to run without `--commit`, and fails if fetched
+public `main` differs. The canonical piped command does not require a caller-supplied commit because
+its minimal stage zero resolves `main`, downloads the bootstrap from that exact SHA, and passes the
+pinned identity to the re-executed script before host mutation.
+If the default internal port is occupied, non-interactive installation fails with instructions to
+provide `--app-port PORT`.
 Stable rejects `--commit`/`--repository-url`; main rejects `--ref`/`--asset-base-url`. Neither mode
 accepts a moving identity as the installed identity. Secrets are never accepted on argv.
 
@@ -142,6 +158,10 @@ matching repair). It is strictly parsed and must contain every required producti
 installer never silently replaces an existing installed environment; replacement is a separate
 advanced `install-ubuntu.sh --replace-env` operation.
 
+`LCC_APP_PORT` in that file is the authoritative internal port. It accepts canonical decimal values
+from 1024 through 65535; the bind address remains fixed at `127.0.0.1`. `--env-file` and
+`--app-port` cannot be combined. Existing files without the key retain the legacy default 8000.
+
 The tracked `deploy/learning-control-center.env.example` documents all settings and systemd/Pydantic
 list quoting. A complete standard file can also be rendered without placing secrets in arguments:
 
@@ -150,6 +170,7 @@ sudo install -d -m 0700 /run/lcc-config
 sudo scripts/generate-production-env.sh \
   --domain lcc.example.com \
   --timezone UTC \
+  --app-port 8123 \
   --output /run/lcc-config/learning-control-center.env
 ```
 

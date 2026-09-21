@@ -46,7 +46,9 @@ sudo systemctl status learning-control-center.service
 sudo systemctl enable learning-control-center.service
 ```
 
-The service runs one Uvicorn worker on `127.0.0.1:8000`. Caddy is the only public TLS endpoint.
+The service runs one Uvicorn worker on `127.0.0.1:LCC_APP_PORT`; the default is 8000. Caddy is the
+only public TLS endpoint on ports 80/443. The internal port is stored in the root-owned production
+environment and is never a configurable bind address.
 Uvicorn proxy-header rewriting stays disabled; LCC accepts forwarded client addresses only from the
 configured loopback proxy CIDR. Standard output and errors go to journald.
 
@@ -64,6 +66,8 @@ Useful administrator commands:
 sudo lcc-admin status
 sudo lcc-admin health
 sudo lcc-admin logs 200
+sudo lcc-admin app-port
+sudo lcc-admin app-port set 8123
 sudo /opt/learning-control-center/update.sh
 # Exact thin alias to the same updater:
 sudo lcc-admin update
@@ -75,6 +79,14 @@ release. Normal updates resolve the recorded repository's public `main` to one e
 release-channel installation migrates to main only after the operator confirms the displayed
 channel and immutable target. Exact pinned releases remain available through their version-bound
 installers. The complete safety and rollback contract is in [`UPDATES.md`](UPDATES.md).
+
+`lcc-admin app-port` reports the effective port and whether it is explicit or the legacy 8000
+default. `lcc-admin app-port set PORT` validates and probes the new loopback port, stages the
+environment and Caddy site, validates the complete Caddy configuration, restarts only LCC, checks
+internal health, reloads Caddy, and checks public HTTPS health. `--dry-run` performs validation
+without mutation; `--yes` enables deliberate automation. Any activation failure restores the old
+environment, Caddy site, service port, and health path. Recovery artifacts are retained with a
+prominent path only if automatic rollback itself cannot complete.
 
 Startup holds an exclusive database-operation lock, upgrades the configured database to Alembic
 head, verifies the production bootstrap/single-user invariant, recovers projection work, backfills

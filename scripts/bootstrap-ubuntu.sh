@@ -34,6 +34,8 @@ expected_commit=""
 domain=""
 timezone=""
 environment_file=""
+app_port=""
+app_port_was_set=0
 asset_base_url="$github_asset_base"
 repository_url="$github_repository"
 asset_base_was_set=0
@@ -62,10 +64,11 @@ Channels:
 Options:
   --channel stable|main     Installation channel (default: main)
   --ref VERSION            Stable semantic release tag, for example v1.0.1
-  --commit FULL_SHA        Expected current main tip; required for non-interactive main
+  --commit FULL_SHA        Expected main tip; required for direct non-interactive main
   --domain HOST            Public DNS hostname (prompted interactively when omitted)
   --timezone ZONE          IANA application timezone (detected/prompted when omitted)
   --env-file FILE          Advanced root-owned production environment file
+  --app-port PORT          Internal loopback application port (default: 8000)
   --asset-base-url URL     Explicit HTTPS stable release mirror
   --repository-url URL     Explicit HTTPS main Git repository
   --confirm-channel-change Confirm an explicit non-interactive channel change
@@ -527,6 +530,7 @@ while test "$#" -gt 0; do
         --domain) domain="${2:?Missing --domain value}"; shift 2 ;;
         --timezone) timezone="${2:?Missing --timezone value}"; shift 2 ;;
         --env-file) environment_file="${2:?Missing --env-file value}"; shift 2 ;;
+        --app-port) app_port="${2:?Missing --app-port value}"; app_port_was_set=1; shift 2 ;;
         --asset-base-url) asset_base_url="${2:?Missing --asset-base-url value}"; asset_base_was_set=1; shift 2 ;;
         --repository-url)
             test "$stable_only_launcher" = 0 || die "This release-bound install.sh does not accept --repository-url."
@@ -538,6 +542,10 @@ while test "$#" -gt 0; do
         *) usage >&2; die "Unknown argument: $1" ;;
     esac
 done
+
+if test "$app_port_was_set" -eq 1 && test -n "$environment_file"; then
+    die "--app-port cannot be combined with --env-file; the environment file is the configuration authority."
+fi
 
 if test "$stable_only_launcher" = 1; then
     test -n "$embedded_stable_ref" && test -n "$embedded_archive_sha256" || \
@@ -575,8 +583,9 @@ case "$channel" in
             [[ "$expected_commit" =~ ^[0-9a-f]{40}$ ]] || \
                 die "--commit must be one lowercase 40-character Git commit SHA."
         fi
-        if test "$non_interactive" -eq 1 && test -z "$expected_commit"; then
-            die "Non-interactive main installation requires --commit with the expected current main tip."
+        if test "$non_interactive" -eq 1 && test -z "$expected_commit" && \
+            test "$bootstrap_from_stdin" -ne 1; then
+            die "Direct non-interactive main installation requires --commit; the canonical piped bootstrap pins main during stage zero."
         fi
         ;;
     *) die "--channel must be stable or main." ;;
@@ -651,6 +660,9 @@ done
 verify_host_shape
 verify_apt_state
 verify_existing_lcc_shape
+if test "$existing_installation" -eq 1 && test "$app_port_was_set" -eq 1; then
+    die "--app-port cannot change an existing installation; use: sudo lcc-admin app-port set $app_port"
+fi
 verify_existing_caddy
 provision_prerequisites
 verify_provisioned_commands
@@ -917,6 +929,41 @@ fi
 source "$source_root/scripts/deploy-common.sh"
 lcc_verify_frontend_artifact "$source_root"
 
+bootstrap_app_port_is_available() {
+    local candidate="$1"
+    if test "$test_mode" = 1; then
+        case ",${LCC_BOOTSTRAP_TEST_OCCUPIED_APP_PORTS:-}," in
+            *",$candidate,"*) return 1 ;;
+            *) return 0 ;;
+        esac
+    fi
+    lcc_app_port_is_available "$candidate"
+}
+
+bootstrap_describe_app_port_listener() {
+    local candidate="$1"
+    if test "$test_mode" = 1; then
+        printf 'Listener: 127.0.0.1:%s (process=test-listener pid=4242)\n' "$candidate" >&2
+        return
+    fi
+    lcc_describe_app_port_listener "$candidate"
+}
+
+bootstrap_find_available_app_port() {
+    local candidate
+    if test "$test_mode" != 1; then
+        lcc_find_available_app_port 8001
+        return
+    fi
+    for ((candidate = 8001; candidate <= 65535; candidate++)); do
+        if bootstrap_app_port_is_available "$candidate"; then
+            printf '%s\n' "$candidate"
+            return
+        fi
+    done
+    return 1
+}
+
 if test -z "$environment_file" && test -f "$environment_target"; then
     environment_file="$environment_target"
     note "Reusing the existing production environment for this matching install."
@@ -936,6 +983,11 @@ if test -n "$environment_file"; then
     lcc_validate_environment_file_security "$environment_file" "$allow_installed" "$expected_owner"
     lcc_load_environment "$environment_file"
     lcc_validate_environment "$current_release"
+    selected_app_port="$(lcc_effective_app_port)"
+    if ! bootstrap_app_port_is_available "$selected_app_port"; then
+        bootstrap_describe_app_port_listener "$selected_app_port"
+        die "Internal application port $selected_app_port from the production environment is already occupied."
+    fi
     configured_domain="$(lcc_public_hostname)"
     if test -n "$domain" && test "$domain" != "$configured_domain"; then
         die "--domain does not match the supplied production environment."
@@ -946,6 +998,37 @@ if test -n "$environment_file"; then
     fi
     timezone="$LCC_APP_TIMEZONE"
 else
+    selected_app_port="${app_port:-$LCC_APP_PORT_DEFAULT}"
+    selected_app_port="$(lcc_validate_app_port "$selected_app_port")"
+    if ! bootstrap_app_port_is_available "$selected_app_port"; then
+        bootstrap_describe_app_port_listener "$selected_app_port"
+        if test "$app_port_was_set" -eq 1; then
+            die "Explicitly requested internal application port $selected_app_port is already occupied."
+        fi
+        if test "$non_interactive" -eq 1; then
+            die "Default internal application port 8000 is occupied; rerun with --app-port PORT."
+        fi
+        if ! { true >&3; } 2>/dev/null; then
+            exec 3<>/dev/tty || die "Interactive app-port selection requires a controlling terminal."
+        fi
+        suggested_app_port="$(bootstrap_find_available_app_port)" || \
+            die "No available internal application port was found in range 8001-65535."
+        while true; do
+            printf 'Internal application port [%s]: ' "$suggested_app_port" >&3
+            IFS= read -r selected_input <&3 || \
+                die "Unable to read the internal application port from the terminal."
+            selected_input="${selected_input:-$suggested_app_port}"
+            if ! selected_app_port="$(lcc_validate_app_port "$selected_input")"; then
+                continue
+            fi
+            if bootstrap_app_port_is_available "$selected_app_port"; then
+                break
+            fi
+            bootstrap_describe_app_port_listener "$selected_app_port"
+            printf 'Internal application port %s is occupied; choose another port.\n' \
+                "$selected_app_port" >&3
+        done
+    fi
     if test "$non_interactive" -eq 0; then
         exec 3<>/dev/tty || die "Interactive installation requires a controlling terminal."
         if test -z "$domain"; then
@@ -985,6 +1068,7 @@ else
         "$source_root/scripts/generate-production-env.sh"
         --domain "$domain"
         --timezone "$timezone"
+        --app-port "$selected_app_port"
         --output "$environment_file"
     )
     if test "$install_root" != "/"; then
@@ -998,8 +1082,8 @@ if test "$non_interactive" -eq 0; then
         exec 3<>/dev/tty || die "Interactive installation requires a controlling terminal."
     fi
     printf '\nLearning Control Center installation summary\n' >&3
-    printf '  Channel: %s\n  Release: %s\n  Source SHA: %s\n  Public URL: https://%s\n  Timezone: %s\n' \
-        "$channel" "$release_id" "$source_revision" "$domain" "$timezone" >&3
+    printf '  Channel: %s\n  Release: %s\n  Source SHA: %s\n  Public URL: https://%s\n  Internal endpoint: 127.0.0.1:%s\n  Timezone: %s\n' \
+        "$channel" "$release_id" "$source_revision" "$domain" "$selected_app_port" "$timezone" >&3
     if test "$channel" = stable; then
         printf 'Continue with this stable installation? [y/N]: ' >&3
         IFS= read -r confirmation <&3 || die "Unable to read confirmation from the terminal."

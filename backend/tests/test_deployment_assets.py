@@ -169,6 +169,23 @@ def test_isolated_installer_is_idempotent_and_renders_non_secret_caddy(tmp_path:
     assert "--replace-env" in refused_environment_replacement.stderr
 
 
+def test_isolated_installer_preserves_custom_internal_app_port(tmp_path: Path) -> None:
+    test_root = tmp_path / "installed-root"
+    environment_file = _production_environment(test_root, tmp_path / "production.env")
+    environment_file.write_text(
+        environment_file.read_text().replace("LCC_APP_PORT=8000", "LCC_APP_PORT=8123")
+    )
+    first = _install(test_root, environment_file)
+    second = _install(test_root, environment_file)
+    assert first.returncode == 0 and second.returncode == 0
+    installed_environment = test_root / "etc" / "learning-control-center.env"
+    assert "LCC_APP_PORT=8123" in installed_environment.read_text()
+    caddy_site = (
+        test_root / "etc" / "caddy" / "Caddyfile.d" / "learning-control-center.caddy"
+    ).read_text()
+    assert "reverse_proxy 127.0.0.1:8123" in caddy_site
+
+
 def test_installer_recovers_only_marked_partial_matching_release(tmp_path: Path) -> None:
     test_root = tmp_path / "installed-root"
     environment_file = _production_environment(test_root, tmp_path / "production.env")
@@ -437,6 +454,7 @@ def test_environment_generator_creates_complete_private_independent_secrets(
     assert values["LCC_ENVIRONMENT"] == "production"
     assert values["LCC_PUBLIC_ORIGIN"] == "https://lcc.example.test"
     assert values["LCC_APP_TIMEZONE"] == "Europe/Istanbul"
+    assert values["LCC_APP_PORT"] == "8000"
     assert values["LCC_SECURITY_SECRET"] != values["LCC_BOOTSTRAP_TOKEN"]
     assert len(values["LCC_SECURITY_SECRET"]) >= 32
     assert len(values["LCC_BOOTSTRAP_TOKEN"]) >= 32
@@ -502,6 +520,9 @@ def test_units_admin_and_update_assets_encode_production_safety() -> None:
     ).read_text()
     assert "--workers 1 --no-proxy-headers" in service
     assert "EnvironmentFile=/etc/learning-control-center.env" in service
+    assert "Environment=LCC_APP_PORT=8000" in service
+    assert "--host 127.0.0.1 --port ${LCC_APP_PORT}" in service
+    assert "0.0.0.0" not in service
     assert "UMask=0077" in service and "NoNewPrivileges=true" in service
     assert "ReadWritePaths=/var/lib/learning-control-center" in service
     assert "ProtectSystem=strict" in backup_service
@@ -549,6 +570,8 @@ def test_units_admin_and_update_assets_encode_production_safety() -> None:
         'run mv -Tf "$next_link"'
     )
     assert "the previous configuration was restored" in common
+    assert "lcc_apply_app_port_change" in common
+    assert "app-port set PORT" in admin
 
 
 @pytest.mark.parametrize("failing_operation", ["fmt", "validate"])

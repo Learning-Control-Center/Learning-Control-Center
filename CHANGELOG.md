@@ -16,6 +16,8 @@ All notable public changes to Learning Control Center are recorded here. The pro
 - A persistent installed updater, also available through `lcc-admin update`, that resolves the
   recorded repository's current `main` revision and migrates pinned-release installations only
   after confirmation.
+- Configurable loopback-only application ports with install-time conflict handling, explicit
+  non-interactive selection, update persistence, and transactional `lcc-admin app-port` changes.
 
 ### Changed
 
