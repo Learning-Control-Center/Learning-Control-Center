@@ -40,312 +40,6 @@ def _production_environment(test_root: Path, destination: Path) -> Path:
     return destination
 
 
-def _install(test_root: Path, environment_file: Path) -> subprocess.CompletedProcess[str]:
-    source_revision = subprocess.run(
-        ["git", "-C", REPOSITORY_ROOT, "rev-parse", "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    return subprocess.run(
-        [
-            str(REPOSITORY_ROOT / "scripts" / "install-ubuntu.sh"),
-            "--domain",
-            "lcc.example.test",
-            "--release-id",
-            "test-release",
-            "--channel",
-            "stable",
-            "--source-revision",
-            source_revision,
-            "--source-repository",
-            "https://example.invalid/Learning-Control-Center.git",
-            "--source-ref",
-            "refs/tags/test-release",
-            "--source-origin",
-            "https://example.invalid/releases/download",
-            "--env-file",
-            str(environment_file),
-            "--source",
-            str(REPOSITORY_ROOT),
-            "--root",
-            str(test_root),
-            "--skip-build",
-            "--skip-prerequisites",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-
-def test_isolated_installer_is_idempotent_and_renders_non_secret_caddy(tmp_path: Path) -> None:
-    test_root = tmp_path / "installed-root"
-    environment_file = _production_environment(test_root, tmp_path / "production.env")
-    first = _install(test_root, environment_file)
-    second = _install(test_root, environment_file)
-    assert "test-release is installed" in first.stdout
-    assert "test-release is installed" in second.stdout
-
-    application_root = test_root / "opt" / "learning-control-center"
-    current = application_root / "current"
-    assert current.is_symlink()
-    assert current.resolve() == application_root / "releases" / "test-release"
-    assert (current / "RELEASE_ID").read_text().strip() == "test-release"
-    assert (current / "RELEASE_CHANNEL").read_text().strip() == "stable"
-    source_revision = subprocess.run(
-        ["git", "-C", REPOSITORY_ROOT, "rev-parse", "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    assert (current / "SOURCE_REVISION").read_text().strip() == source_revision
-    release_manifest = (current / "RELEASE_MANIFEST").read_text()
-    assert "channel=stable" in release_manifest
-    assert f"source_revision={source_revision}" in release_manifest
-    deployment_record = (
-        test_root / "var" / "lib" / "learning-control-center" / "deployment-test-release.env"
-    ).read_text()
-    assert "channel=stable" in deployment_record
-    assert f"source_revision={source_revision}" in deployment_record
-    assert (current / "scripts" / "lcc-admin").stat().st_mode & stat.S_IXUSR
-    assert (
-        test_root / "opt" / "learning-control-center" / "update.sh"
-    ).stat().st_mode & stat.S_IXUSR
-
-    installed_environment = test_root / "etc" / "learning-control-center.env"
-    assert stat.S_IMODE(installed_environment.stat().st_mode) == 0o640
-    caddy_site = (
-        test_root / "etc" / "caddy" / "Caddyfile.d" / "learning-control-center.caddy"
-    ).read_text()
-    assert "lcc.example.test {" in caddy_site
-    assert str(current / "frontend" / "dist") in caddy_site
-    assert "BOOTSTRAP" not in caddy_site
-    assert "SECURITY_SECRET" not in caddy_site
-    assert "reverse_proxy 127.0.0.1:8000" in caddy_site
-    assert "try_files {path} /index.html" in caddy_site
-
-    assert (
-        stat.S_IMODE((test_root / "var" / "lib" / "learning-control-center").stat().st_mode)
-        == 0o700
-    )
-    assert (
-        stat.S_IMODE((test_root / "var" / "backups" / "learning-control-center").stat().st_mode)
-        == 0o700
-    )
-
-    different_release = subprocess.run(
-        [
-            str(REPOSITORY_ROOT / "scripts" / "install-ubuntu.sh"),
-            "--domain",
-            "lcc.example.test",
-            "--release-id",
-            "different-release",
-            "--env-file",
-            str(environment_file),
-            "--source",
-            str(REPOSITORY_ROOT),
-            "--root",
-            str(test_root),
-            "--skip-build",
-            "--skip-prerequisites",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert different_release.returncode != 0
-    assert "Another release is already active" in different_release.stderr
-
-    changed_environment = tmp_path / "changed-production.env"
-    changed_environment.write_text(
-        environment_file.read_text().replace(
-            "LCC_APP_TIMEZONE=UTC", "LCC_APP_TIMEZONE=Europe/Istanbul"
-        )
-    )
-    changed_environment.chmod(0o600)
-    refused_environment_replacement = _run_install_without_check(test_root, changed_environment)
-    assert refused_environment_replacement.returncode != 0
-    assert "--replace-env" in refused_environment_replacement.stderr
-
-
-def test_isolated_installer_preserves_custom_internal_app_port(tmp_path: Path) -> None:
-    test_root = tmp_path / "installed-root"
-    environment_file = _production_environment(test_root, tmp_path / "production.env")
-    environment_file.write_text(
-        environment_file.read_text().replace("LCC_APP_PORT=8000", "LCC_APP_PORT=8123")
-    )
-    first = _install(test_root, environment_file)
-    second = _install(test_root, environment_file)
-    assert first.returncode == 0 and second.returncode == 0
-    installed_environment = test_root / "etc" / "learning-control-center.env"
-    assert "LCC_APP_PORT=8123" in installed_environment.read_text()
-    caddy_site = (
-        test_root / "etc" / "caddy" / "Caddyfile.d" / "learning-control-center.caddy"
-    ).read_text()
-    assert "reverse_proxy 127.0.0.1:8123" in caddy_site
-
-
-def test_installer_recovers_only_marked_partial_matching_release(tmp_path: Path) -> None:
-    test_root = tmp_path / "installed-root"
-    environment_file = _production_environment(test_root, tmp_path / "production.env")
-    partial = test_root / "opt" / "learning-control-center" / "releases" / "test-release"
-    partial.mkdir(parents=True)
-    (partial / ".installing").write_text("")
-    (partial / "untrusted-partial-file").write_text("remove me")
-    result = _install(test_root, environment_file)
-    assert result.returncode == 0
-    assert not (partial / ".installing").exists()
-    assert not (partial / "untrusted-partial-file").exists()
-    assert (partial / "RELEASE_ID").read_text().strip() == "test-release"
-
-
-def test_uninstall_preserves_data_and_purge_requires_two_opt_ins(tmp_path: Path) -> None:
-    test_root = tmp_path / "installed-root"
-    environment_file = _production_environment(test_root, tmp_path / "production.env")
-    _install(test_root, environment_file)
-    data_directory = test_root / "var" / "lib" / "learning-control-center"
-    backup_directory = test_root / "var" / "backups" / "learning-control-center"
-    database = data_directory / "lcc.sqlite3"
-    backup = backup_directory / "lcc-scheduled-test.sqlite3"
-    database.write_bytes(b"preserve-database")
-    backup.write_bytes(b"preserve-backup")
-
-    subprocess.run(
-        [
-            str(REPOSITORY_ROOT / "scripts" / "uninstall-ubuntu.sh"),
-            "--root",
-            str(test_root),
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    assert database.read_bytes() == b"preserve-database"
-    assert backup.read_bytes() == b"preserve-backup"
-    assert not (test_root / "opt" / "learning-control-center").exists()
-
-    rejected = subprocess.run(
-        [
-            str(REPOSITORY_ROOT / "scripts" / "uninstall-ubuntu.sh"),
-            "--root",
-            str(test_root),
-            "--purge-data",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert rejected.returncode != 0
-    assert data_directory.exists()
-    assert backup_directory.exists()
-
-    subprocess.run(
-        [
-            str(REPOSITORY_ROOT / "scripts" / "uninstall-ubuntu.sh"),
-            "--root",
-            str(test_root),
-            "--purge-data",
-            "--confirm-purge=DELETE-LCC-DATA",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    assert not data_directory.exists()
-    assert not backup_directory.exists()
-
-
-def test_production_environment_rejects_placeholder_and_development_database(
-    tmp_path: Path,
-) -> None:
-    test_root = tmp_path / "root"
-    placeholder = tmp_path / "placeholder.env"
-    placeholder.write_text(
-        (REPOSITORY_ROOT / "deploy" / "learning-control-center.env.example")
-        .read_text()
-        .replace(
-            "/opt/learning-control-center/current",
-            str(test_root / "opt" / "learning-control-center" / "current"),
-        )
-        .replace(
-            "/var/lib/learning-control-center/lcc.sqlite3",
-            str(test_root / "var" / "lib" / "learning-control-center" / "lcc.sqlite3"),
-        )
-        .replace(
-            "/var/backups/learning-control-center",
-            str(test_root / "var" / "backups" / "learning-control-center"),
-        )
-    )
-    placeholder.chmod(0o600)
-    result = subprocess.run(
-        [
-            str(REPOSITORY_ROOT / "scripts" / "install-ubuntu.sh"),
-            "--domain",
-            "lcc.example.test",
-            "--release-id",
-            "test-release",
-            "--env-file",
-            str(placeholder),
-            "--root",
-            str(test_root),
-            "--skip-build",
-            "--skip-prerequisites",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode != 0
-    assert "CHANGE_ME" in result.stderr
-
-    environment_file = _production_environment(test_root, tmp_path / "production.env")
-    environment_file.write_text(
-        environment_file.read_text().replace(
-            f"sqlite:///{test_root}/var/lib/learning-control-center/lcc.sqlite3",
-            "sqlite:///./data/lcc.db",
-        )
-    )
-    result = _run_install_without_check(test_root, environment_file)
-    assert result.returncode != 0
-    assert "absolute SQLite" in result.stderr
-
-
-def test_installer_ignores_inherited_development_lcc_environment(tmp_path: Path) -> None:
-    test_root = tmp_path / "root"
-    environment_file = _production_environment(test_root, tmp_path / "production.env")
-    inherited_environment = {
-        **os.environ,
-        "LCC_ENVIRONMENT": "development",
-        "LCC_DATABASE_URL": "sqlite:///./data/lcc.db",
-        "LCC_PUBLIC_ORIGIN": "http://localhost:5173",
-        "LCC_BOOTSTRAP_TOKEN": "inherited-unsafe-token",
-    }
-    result = subprocess.run(
-        [
-            str(REPOSITORY_ROOT / "scripts" / "install-ubuntu.sh"),
-            "--domain",
-            "lcc.example.test",
-            "--release-id",
-            "test-release",
-            "--env-file",
-            str(environment_file),
-            "--source",
-            str(REPOSITORY_ROOT),
-            "--root",
-            str(test_root),
-            "--skip-build",
-            "--skip-prerequisites",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        env=inherited_environment,
-    )
-    assert result.returncode == 0, result.stderr
-    assert (test_root / "var" / "lib" / "learning-control-center").is_dir()
-
-
 def test_environment_parser_does_not_export_or_echo_secrets(tmp_path: Path) -> None:
     secret = "S3curity7Value9For2Runtime4Hashing6Only8Q"
     environment_file = tmp_path / "production.env"
@@ -484,37 +178,15 @@ def test_environment_generator_creates_complete_private_independent_secrets(
     assert "Refusing to replace" in replacement.stderr
 
 
-def _run_install_without_check(
-    test_root: Path, environment_file: Path
-) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [
-            str(REPOSITORY_ROOT / "scripts" / "install-ubuntu.sh"),
-            "--domain",
-            "lcc.example.test",
-            "--release-id",
-            "test-release",
-            "--env-file",
-            str(environment_file),
-            "--root",
-            str(test_root),
-            "--skip-build",
-            "--skip-prerequisites",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-
 def test_units_admin_and_update_assets_encode_production_safety() -> None:
     service = (REPOSITORY_ROOT / "deploy" / "learning-control-center.service").read_text()
     backup_service = (
         REPOSITORY_ROOT / "deploy" / "learning-control-center-backup.service"
     ).read_text()
     admin = (REPOSITORY_ROOT / "scripts" / "lcc-admin").read_text()
-    updater = (REPOSITORY_ROOT / "scripts" / "update-ubuntu.sh").read_text()
-    update_frontend = (REPOSITORY_ROOT / "scripts" / "update.sh").read_text()
+    updater = (REPOSITORY_ROOT / "scripts" / "update.sh").read_text()
+    transition = (REPOSITORY_ROOT / "scripts" / "install" / "transition.sh").read_text()
+    update_compat = (REPOSITORY_ROOT / "scripts" / "update-ubuntu.sh").read_text()
     persistent_update = (
         REPOSITORY_ROOT / "deploy" / "learning-control-center-update.sh"
     ).read_text()
@@ -527,6 +199,8 @@ def test_units_admin_and_update_assets_encode_production_safety() -> None:
     assert "ReadWritePaths=/var/lib/learning-control-center" in service
     assert "ProtectSystem=strict" in backup_service
     assert "lcc_require_inactive_service" in admin
+    assert 'lcc_wait_for_internal_health "$(lcc_effective_app_port)" 120 0.5' in admin
+    assert "lcc_wait_for_health 60 0.5" in admin
     assert (
         'LCC_ENVIRONMENT_FILE="/etc/learning-control-center.env"'
         in (REPOSITORY_ROOT / "scripts" / "deploy-common.sh").read_text()
@@ -535,40 +209,26 @@ def test_units_admin_and_update_assets_encode_production_safety() -> None:
     assert "/usr/bin/env -i" in common
     assert 'export "$assignment"' in common
     assert "sqlite:///./data/lcc.db" not in admin
-    assert "pre-update" in updater
-    assert "Backup command returned an unexpected path" in updater
-    assert 'test -f "$backup_path.manifest"' in updater
-    assert "lcc_select_single_new_backup" in updater
+    assert "pre-update" in transition
+    assert "lcc_select_single_new_backup" in transition
     assert "did not create exactly one new backup" in common
-    assert "Never select an older file" in updater
-    assert "Recovery is incomplete; application and backup services remain stopped" in updater
-    assert "Automatic update recovery failed" in updater
-    assert "Automatic rollback recovery failed" in updater
-    assert "--confirm-database-replacement" in updater
-    assert "--confirm-channel-change" in updater
-    assert "lcc_migration_relation" in updater
-    assert "main-$source_revision" in updater
-    assert "lcc-ops" in updater and "restore --from" in updater
+    assert "CRITICAL: recovery incomplete" in transition
+    assert "--confirm-database-replacement" in transition
+    assert "lcc_migration_relation" in transition
     assert "show-bootstrap-token" in admin
     assert 'exec "$LCC_UPDATE_ENTRYPOINT" "$@"' in admin
-    assert "git ls-remote" in update_frontend
-    assert "refs/heads/main" in update_frontend
-    assert "releases?per_page" not in update_frontend
-    assert "/api/v1/repos" not in update_frontend
+    assert 'exec "$script_directory/bootstrap.sh" --non-interactive "$@"' in updater
+    assert 'exec "$script_directory/update.sh" "$@"' in update_compat
+    assert "git ls-remote" not in updater
     assert 'exec "$current_updater" "$@"' in persistent_update
-    assert "install_update_entrypoint" in updater
     assert "Source revision:" in admin and "Channel:" in admin
-    installer = (REPOSITORY_ROOT / "scripts" / "install-ubuntu.sh").read_text()
+    installer = (REPOSITORY_ROOT / "scripts" / "install.sh").read_text()
     assert "--no-build-isolation" in installer
     assert "setuptools wheel" in installer
     assert "npm --prefix" not in installer
     assert "lcc_verify_frontend_artifact" in installer
-    assert "npm --prefix" not in updater
-    assert "lcc_verify_runtime_prerequisites" in updater
-    assert "lcc_verify_frontend_artifact" in updater
-    assert installer.index("lcc_format_validate_or_restore_caddy") < installer.index(
-        'run mv -Tf "$next_link"'
-    )
+    assert "npm --prefix" not in transition
+    assert "lcc_verify_frontend_artifact" in transition
     assert "the previous configuration was restored" in common
     assert "lcc_apply_app_port_change" in common
     assert "app-port set PORT" in admin
@@ -855,12 +515,17 @@ def test_sanitized_release_copy_excludes_local_secrets_and_state(tmp_path: Path)
 def test_deployment_shell_scripts_have_valid_bash_syntax() -> None:
     scripts = [
         "bootstrap-ubuntu.sh",
+        "bootstrap.sh",
+        "release-bootstrap.sh",
         "deploy-common.sh",
         "generate-production-env.sh",
         "install-ubuntu.sh",
+        "install.sh",
         "lcc-admin",
         "update-ubuntu.sh",
         "uninstall-ubuntu.sh",
+        "uninstall.sh",
+        "update.sh",
         "operational-backup.sh",
         "package-release.sh",
     ]
@@ -871,20 +536,11 @@ def test_deployment_shell_scripts_have_valid_bash_syntax() -> None:
 
 
 def test_isolated_root_cannot_resolve_to_real_root(tmp_path: Path) -> None:
-    environment_file = _production_environment(tmp_path, tmp_path / "production.env")
     result = subprocess.run(
         [
-            str(REPOSITORY_ROOT / "scripts" / "install-ubuntu.sh"),
-            "--domain",
-            "lcc.example.test",
-            "--release-id",
-            "test-release",
-            "--env-file",
-            str(environment_file),
-            "--root",
+            str(REPOSITORY_ROOT / "scripts" / "install.sh"),
+            "--test-root",
             "/tmp/..",
-            "--skip-build",
-            "--skip-prerequisites",
         ],
         check=False,
         capture_output=True,

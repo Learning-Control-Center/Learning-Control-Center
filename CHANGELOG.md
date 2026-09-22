@@ -12,12 +12,17 @@ All notable public changes to Learning Control Center are recorded here. The pro
 - A canonical current-`main` channel that resolves validated public code once to an exact Git
   commit on every explicit install/update and never follows the moving branch automatically.
 - Installed channel/source metadata and channel-aware update and rollback records.
-- Automatic Ubuntu 24.04 prerequisite provisioning from signed Ubuntu repositories.
+- Ubuntu 24.04 prerequisite provisioning through the host's configured authenticated APT policy,
+  limited to named missing LCC dependencies.
 - A persistent installed updater, also available through `lcc-admin update`, that resolves the
   recorded repository's current `main` revision and migrates pinned-release installations only
   after confirmation.
 - Configurable loopback-only application ports with install-time conflict handling, explicit
   non-interactive selection, update persistence, and transactional `lcc-admin app-port` changes.
+- Generic `bootstrap.sh`, `install.sh`, `update.sh`, and `uninstall.sh` entry points, with the
+  historical Ubuntu names retained as thin compatibility forwarders.
+- A gateway-independent Core with managed Caddy or an explicit same-host external proxy mode,
+  and a shared V1 migration, update, rollback, and uninstall transition.
 
 ### Changed
 
@@ -27,8 +32,11 @@ All notable public changes to Learning Control Center are recorded here. The pro
   Node.js/npm are no longer server dependencies.
 - Re-running the main bootstrap now installs, safely updates through the canonical engine, reports
   an exact-SHA no-op, or explicitly confirms release-to-main migration as appropriate.
-- Ubuntu prerequisite provisioning now isolates source, package-list, cache, and candidate
-  selection to trusted Noble repositories without disabling unrelated third-party APT sources.
+- Ubuntu prerequisite provisioning no longer reconstructs APT repository provenance, isolates
+  package lists, or compares `SIGNED_BY` metadata. APT authenticates and selects packages under
+  the host administrator's policy; unrelated third-party repositories are left untouched.
+- Normal install/update acquisition uses the public GitHub SHA-addressed bootstrap and source
+  archive without requiring Git on the production host.
 
 ## [1.0.0] - 2026-09-21
 

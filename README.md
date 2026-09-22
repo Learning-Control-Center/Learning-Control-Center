@@ -39,78 +39,56 @@ been exercised remain explicitly `Not executed`; see the [product QA record](doc
 
 ## Quick install or update
 
-The supported production baseline is **Ubuntu Server 24.04 LTS** with internet access, `sudo`/root,
-a DNS hostname pointing to the server, and inbound public ports 80/443 available. The canonical command
-installs or updates from the latest validated public `main`:
+On **Ubuntu Server 24.04 LTS (amd64)** with systemd, root access, and internet access, run:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Learning-Control-Center/Learning-Control-Center/main/scripts/bootstrap-ubuntu.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/Learning-Control-Center/Learning-Control-Center/main/scripts/bootstrap.sh | sudo bash
 ```
 
-On a fresh host it asks for the public hostname, application timezone, and confirmation, then
-uses a minimal stage zero to resolve `refs/heads/main` and re-run the bootstrap from that immutable
-commit before APT or other host mutation. It displays the exact 40-character SHA, checks out and
-verifies that commit, installs required packages, and generates production configuration privately.
-Every installed identity is `main-<full-sha>`; it is never merely the moving branch name.
-Missing OS prerequisites use an isolated, signed Ubuntu 24.04 APT view. Existing third-party
-repositories remain enabled and untouched; LCC does not perform a system-wide upgrade.
+This resolves public GitHub `main` once to a full commit SHA, downloads the bootstrap and source
+archive at that exact SHA over HTTPS, validates/extracts the source, and installs LCC. It installs
+only missing named prerequisites through the host's configured APT policy. Third-party repositories
+are left untouched; there is no system-wide upgrade, Git requirement, or Node.js requirement on
+the production host. The source identity is recorded in the immutable release.
 
-Uvicorn remains private on IPv4 loopback. A fresh install uses internal port `8000` when available;
-if it is occupied, the interactive installer reports the listener and asks for another port. For
-automation, pass `--app-port PORT` to the bootstrap. Public HTTPS remains on Caddy ports 80/443.
+The default gateway is managed Caddy, which needs a DNS hostname pointing at this host and ports
+80/443 available. Choose `--gateway external` for a same-host reverse proxy that you configure
+yourself: Core may be healthy and installation successful while public HTTPS is still pending.
+The backend binds only to `127.0.0.1`, on port 8000 by default. An occupied default port prompts
+for another; automation supplies `--app-port PORT` explicitly.
 
-Rerunning the command explicitly checks `main` again. The same SHA is a clean no-op; a changed SHA
-is shown and confirmed before the canonical backup/migration/activation workflow runs. An existing
-release-channel installation is changed to `main` only after explicit confirmation. LCC never
-follows `main` automatically in the background.
+For non-interactive installation, pass arguments to Bash after `-s --`:
 
-Like every `curl | sudo bash` workflow, the initial stage-zero bytes trust HTTPS and the named
-GitHub repository. Operators who do not want that trust model should use the download-and-review
-procedure in the installation guide.
+```bash
+curl -fsSL https://raw.githubusercontent.com/Learning-Control-Center/Learning-Control-Center/main/scripts/bootstrap.sh |
+  sudo bash -s -- --non-interactive --domain lcc.example.com --gateway caddy
+```
 
-Node.js/npm are not installed on the server: supported `main` commits and release archives contain
-a source-bound, verified production frontend. For review-first and manual alternatives, see the
-complete [installation guide](docs/INSTALLATION.md).
+Rerunning the command at the same SHA is a no-op. A changed SHA is confirmed, staged, backed up,
+migration-checked, activated, health-checked, and rolled back on failure. There is no background
+update. Existing V1 installations migrate through this **new** bootstrap, avoiding the old
+installed updater's prerequisite path. The old `*-ubuntu.sh` names are compatibility entry points.
+See the [installation guide](docs/INSTALLATION.md) for the gateway, port, migration, and review
+paths. Public-main V2 and real ACME acceptance remain pending publication and real-server testing.
 
 ## Update an installed server
 
-Every v1.0.1-or-newer installation provides two equivalent entrypoints:
-
 ```bash
 sudo /opt/learning-control-center/update.sh
-# Thin administrator alias for the same updater:
+# Equivalent administrator entry point:
 sudo lcc-admin update
 ```
 
-Both commands use the recorded repository, resolve its public `main` to one exact SHA, and delegate
-to the same safe update engine. A release-channel installation requires confirmation before its
-one-time migration to `main`. See [updates, rollback, and uninstall](docs/UPDATES.md) for the
-database-aware update and rollback contract.
-
-Inspect or safely change the private loopback port without changing the public URL:
-
-```bash
-sudo lcc-admin app-port
-sudo lcc-admin app-port set 8123
-```
+Both resolve public GitHub `main` to an exact SHA and use the same deployment transition. See
+[updates, rollback, and uninstall](docs/UPDATES.md) for recovery details. Inspect or change the
+private loopback port with `sudo lcc-admin app-port` and `sudo lcc-admin app-port set 8123`.
 
 ## Pinned releases
 
-Git tags and Releases are immutable version snapshots for release history, reproducible archive
-distribution, rollback/reference, and intentionally pinned deployments. They are not the normal
-installation or update-discovery channel.
-
-To install or update to one exact release, use its versioned launcher:
-
-```bash
-curl -fsSL https://github.com/Learning-Control-Center/Learning-Control-Center/releases/download/v1.0.1/install.sh | sudo bash
-```
-
-That launcher remains permanently bound to v1.0.1: it installs or updates older stable versions,
-does nothing when v1.0.1 is active, and refuses to downgrade a newer stable installation.
-It remains on the release channel until the operator deliberately runs the main-first installer or
-updater and confirms migration. Release archives retain their bounded-download, SHA-256, safe
-extraction, and embedded-digest protections.
+Tags and Releases are optional immutable snapshots, not normal install/update dependencies.
+Historical `v1.0.0` assets remain immutable. Future version-bound release installers support a
+fresh pinned installation from their embedded version, commit and archive digest; existing
+installations update through the public-main path. See [releasing](docs/RELEASING.md).
 
 Production administration uses systemd and `lcc-admin`:
 
@@ -128,7 +106,7 @@ LCC is a modular monolith:
 - React 19, TypeScript, Vite, and Tailwind CSS provide the browser application.
 - FastAPI, Pydantic, SQLAlchemy 2, and Alembic provide the server and migration boundary.
 - SQLite is the single source of truth for the single-user installation.
-- Caddy serves the production frontend and proxies `/api` to one Uvicorn worker.
+- Managed Caddy or an operator-owned same-host reverse proxy serves the frontend and proxies `/api` to one Uvicorn worker.
 - systemd owns the application process and scheduled operational backups.
 
 Canonical facts and immutable history are persisted. Capability, availability, Roadmap, Analysis,

@@ -117,6 +117,22 @@ lcc_app_port_owned_by_service 8000
     )
     assert ambiguous.returncode != 0
 
+    shared = _run_common(
+        """
+systemctl() {
+    if test "$1" = is-active; then return 0; fi
+    if test "$1" = show; then printf '4242\\n'; return 0; fi
+    return 1
+}
+ss() {
+    printf 'LISTEN 0 128 0.0.0.0:80 0.0.0.0:* '
+    printf 'users:(("caddy",pid=4242,fd=3),("other",pid=9000,fd=4))\\n'
+}
+lcc_app_port_owned_by_service 80 caddy.service
+"""
+    )
+    assert shared.returncode != 0
+
 
 def test_environment_generator_and_caddy_renderer_use_custom_app_port(tmp_path: Path) -> None:
     root = tmp_path / "root"
@@ -162,7 +178,9 @@ def test_static_systemd_unit_uses_environment_override_without_shell() -> None:
     assert "/bin/sh" not in unit and "/bin/bash" not in unit
 
 
-def _admin_fixture(tmp_path: Path, app_port: str | None) -> tuple[Path, Path, dict[str, str]]:
+def _admin_fixture(
+    tmp_path: Path, app_port: str | None, gateway: str | None = None
+) -> tuple[Path, Path, dict[str, str]]:
     install_root = tmp_path / "installed-root"
     application_root = install_root / "opt" / "learning-control-center"
     release = application_root / "releases" / "test-release"
@@ -173,9 +191,18 @@ def _admin_fixture(tmp_path: Path, app_port: str | None) -> tuple[Path, Path, di
     (runtime / "python").symlink_to(sys.executable)
     current = application_root / "current"
     current.symlink_to(release)
+    if gateway is not None:
+        (release / "INSTALLER_V2_CORE").write_text("1\n")
+        (release / "RELEASE_ID").write_text("main-" + "a" * 40 + "\n")
+        (release / "RELEASE_CHANNEL").write_text("main\n")
+        (release / "SOURCE_REVISION").write_text("a" * 40 + "\n")
+        state = install_root / "etc/learning-control-center.deployment"
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text(f"format_version=1\ngateway={gateway}\n")
+        state.chmod(0o600)
 
     environment = install_root / "etc" / "learning-control-center.env"
-    environment.parent.mkdir(parents=True)
+    environment.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         [
             GENERATOR,
@@ -217,6 +244,9 @@ def _admin_fixture(tmp_path: Path, app_port: str | None) -> tuple[Path, Path, di
         'LCC_ENVIRONMENT_FILE="/etc/learning-control-center.env"': (
             f'LCC_ENVIRONMENT_FILE="{environment}"'
         ),
+        'LCC_DEPLOYMENT_STATE_FILE="/etc/learning-control-center.deployment"': (
+            f'LCC_DEPLOYMENT_STATE_FILE="{install_root / "etc/learning-control-center.deployment"}"'
+        ),
         'local lock_file="${1:-/run/lock/learning-control-center-deployment.lock}"': (
             f'local lock_file="${{1:-{tmp_path / "deployment.lock"}}}"'
         ),
@@ -226,6 +256,15 @@ def _admin_fixture(tmp_path: Path, app_port: str | None) -> tuple[Path, Path, di
         common = common.replace(old, new)
     (scripts / "deploy-common.sh").write_text(common)
     shutil.copy2(REPOSITORY_ROOT / "scripts" / "lcc-admin", scripts / "lcc-admin")
+    if gateway is not None:
+        administrator = scripts / "lcc-admin"
+        administrator.write_text(
+            administrator.read_text().replace(
+                'gateway_mode="$(lcc_read_gateway_state)"',
+                'gateway_mode="$(lcc_read_gateway_state '
+                f'"$LCC_DEPLOYMENT_STATE_FILE" "{os.getuid()}")"',
+            )
+        )
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -277,6 +316,71 @@ def test_lcc_admin_reports_explicit_and_legacy_ports_and_same_port_is_a_noop(
     )
     assert "already 8000; no changes were made" in unchanged.stdout
     assert legacy_environment.read_text() == before
+
+
+def test_v2_external_admin_requires_acknowledgement_and_reports_separate_health(
+    tmp_path: Path,
+) -> None:
+    admin, environment, process_environment = _admin_fixture(tmp_path, "8123", "external")
+    fake_bin = Path(process_environment["PATH"].split(":", 1)[0])
+    fake_systemctl = fake_bin / "systemctl"
+    fake_systemctl.write_text(
+        '#!/usr/bin/env bash\nif test "$1" = status; then echo "service active"; fi\nexit 0\n'
+    )
+    fake_systemctl.chmod(0o755)
+    fake_curl = fake_bin / "curl"
+    fake_curl.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [[ "$*" = *https://* ]] && test "${FAIL_PUBLIC:-0}" = 1; then exit 7; fi\n'
+        'echo \'{"status":"ok"}\'\n'
+    )
+    fake_curl.chmod(0o755)
+    before = environment.read_bytes()
+    refused = subprocess.run(
+        [admin, "app-port", "set", "8124", "--yes"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=process_environment,
+    )
+    assert refused.returncode != 0
+    assert "--ack-external-proxy" in refused.stderr
+    assert environment.read_bytes() == before
+    status = subprocess.run(
+        [admin, "status"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**process_environment, "FAIL_PUBLIC": "1"},
+    )
+    assert status.returncode == 0, status.stderr
+    assert "Gateway mode: external" in status.stdout
+    assert "Internal Core health: healthy" in status.stdout
+    assert "Public gateway/TLS: pending/unhealthy" in status.stdout
+    internal = subprocess.run(
+        [admin, "health", "--internal"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**process_environment, "FAIL_PUBLIC": "1"},
+    )
+    assert internal.returncode == 0
+    public_pending = subprocess.run(
+        [admin, "health", "--public"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**process_environment, "FAIL_PUBLIC": "1"},
+    )
+    assert public_pending.returncode != 0
+    public_ready = subprocess.run(
+        [admin, "health", "--public"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=process_environment,
+    )
+    assert public_ready.returncode == 0
 
 
 def _transaction_fixture(tmp_path: Path) -> dict[str, Path]:

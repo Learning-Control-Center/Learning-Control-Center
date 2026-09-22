@@ -15,6 +15,7 @@ LCC_APPLICATION_ROOT="/opt/learning-control-center"
 LCC_CURRENT_RELEASE="/opt/learning-control-center/current"
 LCC_UPDATE_ENTRYPOINT="/opt/learning-control-center/update.sh"
 LCC_ENVIRONMENT_FILE="/etc/learning-control-center.env"
+LCC_DEPLOYMENT_STATE_FILE="/etc/learning-control-center.deployment"
 LCC_APP_PORT_DEFAULT="8000"
 LCC_DATA_DIRECTORY="/var/lib/learning-control-center"
 LCC_DATABASE_FILE="/var/lib/learning-control-center/lcc.sqlite3"
@@ -22,11 +23,9 @@ LCC_BACKUP_DIRECTORY_DEFAULT="/var/backups/learning-control-center"
 LCC_CADDY_SITE="/etc/caddy/Caddyfile.d/learning-control-center.caddy"
 LCC_CADDY_MAIN="/etc/caddy/Caddyfile"
 LCC_CADDY_IMPORT="import /etc/caddy/Caddyfile.d/*.caddy"
+LCC_V2_CADDY_IMPORT="import /etc/caddy/Caddyfile.d/learning-control-center.caddy"
 LCC_CADDY_BINARY="/usr/bin/caddy"
 LCC_GITHUB_REPOSITORY="https://github.com/Learning-Control-Center/Learning-Control-Center.git"
-LCC_GITHUB_ASSET_ORIGIN="https://github.com/Learning-Control-Center/Learning-Control-Center/releases/download"
-LCC_FORGEJO_REPOSITORY="https://forgejo.waqsea.com/Learning-Control-Center/Learning-Control-Center.git"
-LCC_FORGEJO_ASSET_ORIGIN="https://forgejo.waqsea.com/Learning-Control-Center/Learning-Control-Center/releases/download"
 
 lcc_die() {
     echo "ERROR: $*" >&2
@@ -37,6 +36,58 @@ lcc_note() {
     echo "==> $*" >&2
 }
 
+lcc_validate_gateway_mode() {
+    case "$1" in
+        caddy|external) ;;
+        *) lcc_die "Gateway must be caddy or external." ;;
+    esac
+}
+
+lcc_read_gateway_state() {
+    local state_file="${1:-$LCC_DEPLOYMENT_STATE_FILE}" expected_owner="${2:-0}"
+    local version="" mode="" key value count=0
+    test -f "$state_file" && test ! -L "$state_file" ||
+        lcc_die "V2 deployment state is missing or unsafe: $state_file"
+    test "$(stat -c %u "$state_file")" = "$expected_owner" &&
+        test "$(stat -c %a "$state_file")" = 600 ||
+        lcc_die "V2 deployment state must be root-owned with mode 0600."
+    while IFS='=' read -r key value || test -n "$key"; do
+        count=$((count + 1))
+        case "$key" in
+            format_version) test -z "$version" || lcc_die "Duplicate deployment state version."; version="$value" ;;
+            gateway) test -z "$mode" || lcc_die "Duplicate deployment gateway."; mode="$value" ;;
+            *) lcc_die "Unknown deployment state key: $key" ;;
+        esac
+    done < "$state_file"
+    test "$count" -eq 2 && test "$version" = 1 || lcc_die "Unknown V2 deployment state format."
+    lcc_validate_gateway_mode "$mode"
+    printf '%s\n' "$mode"
+}
+
+lcc_write_gateway_state() {
+    local mode="$1" state_file="${2:-$LCC_DEPLOYMENT_STATE_FILE}"
+    local owner="${3:-0}" parent temporary
+    lcc_validate_gateway_mode "$mode"
+    parent="$(dirname -- "$state_file")"
+    test -d "$parent" && test ! -L "$parent" || lcc_die "Deployment state parent is unsafe."
+    test ! -e "$state_file" && test ! -L "$state_file" || {
+        test "$(lcc_read_gateway_state "$state_file" "$owner")" = "$mode" ||
+            lcc_die "Changing gateway mode requires a future explicit migration command."
+        return 0
+    }
+    temporary="$(mktemp "$parent/.learning-control-center.deployment.XXXXXXXX")"
+    if ! printf 'format_version=1\ngateway=%s\n' "$mode" > "$temporary" ||
+        ! chown "$owner" "$temporary" || ! chmod 0600 "$temporary"; then
+        rm -f -- "$temporary"
+        lcc_die "Unable to prepare deployment state safely."
+    fi
+    if ! ln -- "$temporary" "$state_file"; then
+        rm -f -- "$temporary"
+        lcc_die "Deployment state appeared or could not be created safely."
+    fi
+    rm -f -- "$temporary"
+}
+
 lcc_acquire_deployment_lock() {
     local lock_file="${1:-/run/lock/learning-control-center-deployment.lock}"
     exec 9>"$lock_file"
@@ -45,8 +96,8 @@ lcc_acquire_deployment_lock() {
 
 lcc_validate_release_id() {
     local release_id="$1"
-    [[ "$release_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || \
-        lcc_die "Release ID must contain only letters, numbers, dots, underscores, and hyphens."
+    [[ "$release_id" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$ ]] || \
+        lcc_die "Release ID must contain only letters, numbers, dots, underscores, plus signs, and hyphens."
     test "$release_id" != "current" || lcc_die "Release ID 'current' is reserved."
 }
 
@@ -116,19 +167,6 @@ PY
 lcc_validate_source_revision() {
     [[ "$1" =~ ^[0-9a-f]{40}$ ]] || \
         lcc_die "Source revision must be one lowercase 40-character Git commit SHA."
-}
-
-lcc_validate_source_metadata() {
-    local channel="$1"
-    local repository="$2"
-    local origin="$3"
-    case "$channel|$repository|$origin" in
-        "stable|$LCC_GITHUB_REPOSITORY|$LCC_GITHUB_ASSET_ORIGIN"|\
-        "stable|$LCC_FORGEJO_REPOSITORY|$LCC_FORGEJO_ASSET_ORIGIN"|\
-        "main|$LCC_GITHUB_REPOSITORY|$LCC_GITHUB_REPOSITORY"|\
-        "main|$LCC_FORGEJO_REPOSITORY|$LCC_FORGEJO_REPOSITORY") ;;
-        *) lcc_die "Source repository/origin do not identify a supported GitHub or Forgejo channel source." ;;
-    esac
 }
 
 lcc_validate_public_hostname() {
@@ -247,7 +285,11 @@ PY
 
 lcc_describe_app_port_listener() {
     local port listeners
-    port="$(lcc_validate_app_port "$1")"
+    if test "$1" = 80 || test "$1" = 443; then
+        port="$1"
+    else
+        port="$(lcc_validate_app_port "$1")"
+    fi
     command -v ss >/dev/null 2>&1 || return 0
     listeners="$(ss -H -ltnp "sport = :$port" 2>/dev/null || true)"
     /usr/bin/python3 - "$port" "$listeners" <<'PY'
@@ -268,14 +310,25 @@ PY
 }
 
 lcc_app_port_owned_by_service() {
-    local port service_name main_pid listeners
-    port="$(lcc_validate_app_port "$1")"
+    local port service_name main_pid listeners listener
+    if test "$1" = 80 || test "$1" = 443; then
+        port="$1"
+    else
+        port="$(lcc_validate_app_port "$1")"
+    fi
     service_name="${2:-$LCC_SERVICE_NAME}"
     systemctl is-active --quiet "$service_name" || return 1
     main_pid="$(systemctl show --property MainPID --value "$service_name" 2>/dev/null || true)"
     [[ "$main_pid" =~ ^[1-9][0-9]*$ ]] || return 1
     listeners="$(ss -H -ltnp "sport = :$port" 2>/dev/null || true)"
-    test -n "$listeners" && printf '%s\n' "$listeners" | grep -Eq "pid=${main_pid},"
+    test -n "$listeners" || return 1
+    while IFS= read -r listener; do
+        [[ "$listener" == *"pid=$main_pid,"* ]] || return 1
+        if printf '%s\n' "$listener" | grep -Eo 'pid=[0-9]+' |
+            grep -Fvx "pid=$main_pid" | grep -q .; then
+            return 1
+        fi
+    done <<< "$listeners"
 }
 
 lcc_require_configured_app_port_safe() {
@@ -728,6 +781,7 @@ lcc_copy_release_source() {
         --include=/.env.example --exclude='.env*' --exclude=.git \
         --exclude=.venv --exclude=venv --exclude=node_modules \
         --exclude=data --exclude=backups --exclude=tmp --exclude=memory-bank \
+        --exclude=AGENTS.md --exclude=.agents --exclude=.codex \
         --exclude=__pycache__ --exclude='*.py[cod]' --exclude='*.egg-info' \
         --exclude=.mypy_cache --exclude=.pytest_cache --exclude=.ruff_cache \
         --exclude=.coverage --exclude=htmlcov --exclude=coverage --exclude=test-results \
@@ -789,7 +843,7 @@ lcc_validate_staged_caddy_site() (
     local candidate_site="$1"
     local main_path="${2:-$LCC_CADDY_MAIN}"
     local caddy_binary="${3:-$LCC_CADDY_BINARY}"
-    local site_directory expected_import staging_directory="" staged_site_directory staged_main
+    local site_directory expected_import staged_import staging_directory="" staged_site_directory staged_main
     # Invoked indirectly by the EXIT trap below.
     # shellcheck disable=SC2329
     cleanup_staged_caddy_validation() {
@@ -803,8 +857,12 @@ lcc_validate_staged_caddy_site() (
     site_directory="$(dirname -- "$LCC_CADDY_SITE")"
     expected_import="import $site_directory/*.caddy"
     test -f "$main_path" || lcc_die "Caddy main configuration is missing: $main_path"
-    grep -Fqx "$expected_import" "$main_path" || \
-        lcc_die "Caddy main configuration no longer contains the managed LCC site import."
+    if grep -Fqx "$LCC_V2_CADDY_IMPORT" "$main_path"; then
+        expected_import="$LCC_V2_CADDY_IMPORT"
+    else
+        grep -Fqx "$expected_import" "$main_path" || \
+            lcc_die "Caddy main configuration no longer contains the managed LCC site import."
+    fi
     staging_directory="$(mktemp -d "${LCC_TRANSACTION_DIRECTORY_PARENT:-/run}/lcc-caddy-validation.XXXXXXXX")"
     chmod 0700 "$staging_directory"
     staged_site_directory="$staging_directory/Caddyfile.d"
@@ -815,8 +873,13 @@ lcc_validate_staged_caddy_site() (
     fi
     install -m 0644 "$candidate_site" \
         "$staged_site_directory/$(basename -- "$LCC_CADDY_SITE")"
+    if test "$expected_import" = "$LCC_V2_CADDY_IMPORT"; then
+        staged_import="import $staged_site_directory/$(basename -- "$LCC_CADDY_SITE")"
+    else
+        staged_import="import $staged_site_directory/*.caddy"
+    fi
     awk -v managed_import="$expected_import" \
-        -v staged_import="import $staged_site_directory/*.caddy" '
+        -v staged_import="$staged_import" '
         $0 == managed_import { print staged_import; next }
         { print }
     ' "$main_path" > "$staged_main"
@@ -922,6 +985,8 @@ lcc_apply_app_port_change() (
     transaction_parent="${LCC_TRANSACTION_DIRECTORY_PARENT:-/run}"
     transaction_directory="$(mktemp -d "$transaction_parent/lcc-app-port.XXXXXXXX")"
     chmod 0700 "$transaction_directory"
+    # Invoked indirectly by the EXIT trap below.
+    # shellcheck disable=SC2329
     cleanup_unactivated_app_port_change() {
         local original_status=$?
         rm -rf -- "$transaction_directory"
@@ -946,6 +1011,10 @@ lcc_apply_app_port_change() (
     lcc_validate_environment "$LCC_CURRENT_RELEASE"
     lcc_render_caddy_site \
         "$release_root" "$LCC_CURRENT_RELEASE/frontend/dist" "$rendered_caddy"
+    if test -f "$LCC_DEPLOYMENT_STATE_FILE" &&
+        test "$(lcc_read_gateway_state)" = caddy; then
+        sed -i '1i# Managed by Learning Control Center Installer V2' "$rendered_caddy"
+    fi
     lcc_validate_staged_caddy_site \
         "$rendered_caddy" "$LCC_CADDY_MAIN" "$LCC_CADDY_BINARY"
 
@@ -976,7 +1045,7 @@ lcc_apply_app_port_change() (
             >/dev/null || recovery_failed=1
         systemctl restart "$LCC_SERVICE_NAME" || recovery_failed=1
         lcc_load_environment "$LCC_ENVIRONMENT_FILE"
-        lcc_wait_for_internal_health "$old_port" 60 0.5 || recovery_failed=1
+        lcc_wait_for_internal_health "$old_port" 120 0.5 || recovery_failed=1
         systemctl reload caddy.service || recovery_failed=1
         lcc_wait_for_health 60 0.5 || recovery_failed=1
         if test "$recovery_failed" -ne 0; then
@@ -997,7 +1066,7 @@ lcc_apply_app_port_change() (
         "$LCC_CADDY_SITE" "$LCC_CADDY_MAIN" "$caddy_backup_directory"
     lcc_install_environment_file "$staged_environment" "$LCC_ENVIRONMENT_FILE"
     systemctl restart "$LCC_SERVICE_NAME"
-    lcc_wait_for_internal_health "$requested_port" 60 0.5 || {
+    lcc_wait_for_internal_health "$requested_port" 120 0.5 || {
         journalctl -u "$LCC_SERVICE_NAME" -n 80 --no-pager >&2 || true
         lcc_die "LCC did not become healthy on internal application port $requested_port."
     }
@@ -1010,4 +1079,66 @@ lcc_apply_app_port_change() (
     rm -rf -- "$transaction_directory"
     echo "Internal application port changed from $old_port to $requested_port."
     echo "Uvicorn remains bound to 127.0.0.1; public HTTPS remains at $LCC_PUBLIC_ORIGIN."
+)
+
+lcc_apply_external_app_port_change() (
+    set -euo pipefail
+    local requested_port="$1" dry_run="${2:-0}" old_port transaction_directory=""
+    local staged_environment transaction_active=0
+    old_port="$(lcc_effective_app_port)"
+    requested_port="$(lcc_validate_app_port "$requested_port")"
+    test "$requested_port" != "$old_port" || {
+        echo "Internal application port is already $old_port; no changes were made."
+        exit 0
+    }
+    lcc_app_port_is_available "$requested_port" || {
+        lcc_describe_app_port_listener "$requested_port"
+        lcc_die "Internal application port $requested_port is already occupied."
+    }
+    transaction_directory="$(mktemp -d "${LCC_TRANSACTION_DIRECTORY_PARENT:-/run}/lcc-external-port.XXXXXXXX")"
+    chmod 0700 "$transaction_directory"
+    trap 'rm -rf -- "$transaction_directory"' EXIT
+    cp -a -- "$LCC_ENVIRONMENT_FILE" "$transaction_directory/environment.previous"
+    staged_environment="$transaction_directory/environment.next"
+    lcc_render_environment_with_app_port "$LCC_ENVIRONMENT_FILE" "$staged_environment" "$requested_port"
+    chmod 0600 "$staged_environment"
+    lcc_load_environment "$staged_environment"
+    lcc_validate_environment "$LCC_CURRENT_RELEASE"
+    # Invoked indirectly by the EXIT trap below.
+    # shellcheck disable=SC2329
+    cleanup_external_port_change() {
+        local original_status=$? recovery_failed=0
+        trap - EXIT
+        if test "$transaction_active" -eq 1; then
+            lcc_note "External-mode Core port failed; restoring internal port $old_port."
+            set +e
+            lcc_install_environment_file \
+                "$transaction_directory/environment.previous" "$LCC_ENVIRONMENT_FILE" || recovery_failed=1
+            systemctl restart "$LCC_SERVICE_NAME" || recovery_failed=1
+            lcc_load_environment "$LCC_ENVIRONMENT_FILE"
+            lcc_wait_for_internal_health "$old_port" 120 0.5 || recovery_failed=1
+        fi
+        if test "$recovery_failed" -eq 0; then
+            rm -rf -- "$transaction_directory"
+        else
+            lcc_note "CRITICAL: Core port recovery needs operator attention; protected backup remains at $transaction_directory"
+        fi
+        exit "$original_status"
+    }
+    trap cleanup_external_port_change EXIT
+    if test "$dry_run" -eq 1; then
+        echo "Dry run passed: external-mode internal port can change from $old_port to $requested_port."
+        exit 0
+    fi
+    lcc_app_port_is_available "$requested_port" || lcc_die "Requested port became occupied before activation."
+    transaction_active=1
+    lcc_install_environment_file "$staged_environment" "$LCC_ENVIRONMENT_FILE"
+    systemctl restart "$LCC_SERVICE_NAME"
+    lcc_wait_for_internal_health "$requested_port" 120 0.5 ||
+        lcc_die "Core did not become healthy on port $requested_port."
+    transaction_active=0
+    rm -rf -- "$transaction_directory"
+    trap - EXIT
+    echo "Internal Core port changed from $old_port to $requested_port."
+    echo "External proxy routing to 127.0.0.1:$requested_port requires operator coordination; public gateway/TLS is pending until verified."
 )

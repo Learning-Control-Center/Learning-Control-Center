@@ -16,11 +16,18 @@ reproducibility, affected versions, and available maintainer capacity.
 ## Supported versions
 
 Security fixes are prepared for the current published code line. Normal installation and update
-resolve validated public `main` to one exact immutable commit SHA before installation. Tags and
+resolve GitHub public `main` to one exact commit SHA, then request the pinned bootstrap/source
+archive over HTTPS from that SHA before host mutation. GitHub is the chosen source-host trust
+boundary; this does not claim provider-independent cryptographic authenticity. Private Forgejo
+is development infrastructure, not a normal production source. Tags and
 Releases remain optional immutable snapshots for pinned deployments and review. Operators should
 deliberately choose when to invoke the controlled update procedure in
 [`docs/UPDATES.md`](docs/UPDATES.md), review relevant changes, and keep Ubuntu and Caddy patched;
-LCC does not update itself in the background.
+LCC does not update itself in the background. Ubuntu packages use the host's configured APT
+authentication, candidate selection, and pinning policy; LCC never bypasses package authentication
+or edits repository/key definitions to install itself. Production secrets are root-controlled, the
+application service runs unprivileged and binds only to loopback, and public traffic needs HTTPS
+through managed Caddy or an explicitly configured same-host reverse proxy.
 
 ## Deployment responsibility
 

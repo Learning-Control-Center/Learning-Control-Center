@@ -1,152 +1,53 @@
-# Public release process
+# Public promotion and optional release snapshots
 
-Canonical public repository:
+Normal installation and update use public GitHub `main` selected to one full commit SHA. Tags and
+Releases are optional immutable snapshots; the historical `v1.0.0` release assets are never
+rewritten. Private Forgejo holds development `dev` and may mirror sanitized `main`, but it is
+not an installer source.
 
-`https://github.com/Learning-Control-Center/Learning-Control-Center.git`
+## Promote validated source
 
-Explicit Forgejo mirror:
-
-`https://forgejo.waqsea.com/Learning-Control-Center/Learning-Control-Center.git`
-
-This is the preparation workflow for v1.0.1; it does not claim that its tag or remote releases
-already exist.
-
-## Trust and branch model
-
-`dev` is private development history. It intentionally contains private agent context, so its
-ancestry must never become reachable from public `main`. `main` contains only application source,
-public documentation, deployment tooling, tests, and public assets. Public history must contain no
-`AGENTS.md`, `memory-bank/`, private author email, internal refs, databases, backups, or secrets.
-
-Normal merge, fast-forward, rebase, and pull-request merges from `dev` into `main` are prohibited.
-Public promotion uses a sanitized tree transfer into an isolated clone of the existing public
-`main` history. Push only explicitly selected public refs. Never use `--all`, `--mirror`, wildcard
-branch refspecs, or push `dev` to the public GitHub repository.
-
-## Validate and promote the candidate
-
-1. Complete implementation and focused tests on `dev`.
-2. Run backend/frontend, deployment, bootstrap, packaging, ShellCheck, Gitleaks, documentation-link,
-   disposable-deployment, and diff/line-ending checks.
-3. Review exact changes, dependency locks, migrations, update/rollback behavior, and release notes.
-4. Create an isolated public candidate outside the private repository:
-
-   ```bash
-   scripts/prepare-public-promotion.sh \
-     --source-ref dev \
-     --public-base main \
-     --output-dir /tmp/lcc-public-candidate
-   ```
-
-5. Review the candidate diff and prove that its only ref is `main`, its ancestry starts from the
-   existing sanitized public `main`, and neither private path nor private metadata is reachable.
-   The command refuses an already-unsafe public base and runs current-tree and reachable-history
-   secret scans before declaring the candidate ready.
-6. In a fresh clone of the candidate, repeat the path, metadata, secret, link, shell, and focused
-   application checks. Only after review should the local public `main` ref be replaced with the
-   exact candidate SHA. Do not merge `dev` or connect its ancestry.
-7. Confirm `pyproject.toml`, frontend package metadata, API/export version metadata, and changelog all
-   identify 1.0.1.
-
-Release packaging requires Node.js 22 LTS or 24 LTS and installs the locked frontend dependency
-graph with `npm ci --ignore-scripts`. The committed production frontend must already verify against
-its source inputs. Packaging rebuilds it in isolation and fails unless the rebuilt manifest is
-byte-identical, then includes that artifact in the release archive. Node.js is never required on
-the production host.
-
-Record the exact clean `main` candidate SHA. Confirm the configured development database hash and
-mtime did not change.
-
-## Tag and deterministic assets
-
-Only after validation succeeds, create the annotated tag on the exact public candidate:
+Development changes live on private `dev`. After validation, prepare a sanitized candidate from
+existing public `main` without merging private ancestry:
 
 ```bash
-git tag -a v1.0.1 -m "Learning Control Center v1.0.1"
+scripts/prepare-public-promotion.sh \
+  --source-ref dev --public-base main --output-dir /tmp/lcc-public-candidate
 ```
 
-Do not sign unless an appropriate signing key is deliberately configured. Package the tagged tree
-outside the repository:
+Review the isolated candidate, its complete diff, privacy/history checks, tests, frontend artifact,
+and public documentation. An actual local-main ref change and any remote publication are separate,
+explicitly approved operations. Never merge, fast-forward, rebase, or push private `dev` to GitHub.
+Neither `AGENTS.md` nor `memory-bank/` may be at the public tip or in its reachable history. The
+public candidate must include the generic `bootstrap.sh`, `install.sh`, `update.sh`, `uninstall.sh`,
+Ubuntu adapter, gateway assets, and compatibility wrappers. Candidate validation does not prove
+that GitHub has already served the new bootstrap; test that separately after publication.
+
+## Optional versioned release
+
+Only after a sanitized public commit has been deliberately published and a release tag has been
+created by the release operator, package that exact tagged commit. The repository must be clean:
 
 ```bash
 scripts/package-release.sh \
-  --release-id v1.0.1 \
-  --source-ref v1.0.1 \
-  --output-dir /tmp/lcc-v1.0.1-release
+  --repository /path/to/sanitized/public/checkout \
+  --source-ref vNEXT --release-id vNEXT --output-dir /tmp/lcc-release-assets
 ```
 
-The command produces exactly:
+`vNEXT` above is a placeholder, not an existing release. The packager verifies the tracked
+frontend artifact, rebuilds from `package-lock.json`, rejects a mismatch, and creates a
+byte-deterministic archive and checksum. It removes private/runtime paths and checks required
+source, scripts, deployment assets, metadata, symlinks, and executable modes. It renders a small
+version-bound `install.sh` with the exact tag, source commit, and archive SHA-256 embedded. This
+installer downloads only that GitHub release archive over HTTPS, verifies the embedded digest,
+validates member safety and layout, and hands off to the generic installer. A V2 pinned release
+installer is intended for a **fresh** host; an existing installation uses the public-main update
+path. Its version and source cannot be overridden on the command line. Release publication is
+not part of normal main-first installation or update discovery.
 
-- `install.sh` — deterministic stable-only launcher with embedded `v1.0.1` and archive SHA-256;
-- `learning-control-center-v1.0.1.tar.gz` — deterministic public release tree;
-- `learning-control-center-v1.0.1.tar.gz.sha256` — published archive checksum.
-
-The archive has top-level directory `Learning-Control-Center-v1.0.1/` and immutable
-`RELEASE_ID`, `RELEASE_CHANNEL`, `SOURCE_REVISION`, and `RELEASE_MANIFEST` files. It excludes Git
-metadata, contributor-only tests, private/runtime state, local environments, databases, and backups;
-preserves executable modes; contains the verified production frontend; normalizes
-ownership/timestamps; and uses deterministic gzip headers.
-
-Package twice into empty directories and require byte-identical archives, checksums, and launchers.
-Then inspect all assets:
-
-```bash
-cd /tmp/lcc-v1.0.1-release
-sha256sum --check learning-control-center-v1.0.1.tar.gz.sha256
-tar -tzf learning-control-center-v1.0.1.tar.gz
-grep -E '^readonly (embedded_stable_ref|embedded_archive_sha256|stable_only_launcher)=' install.sh
-```
-
-Exercise the bound `install.sh` against local assets through the dry-run/test seam. Exercise the
-explicit pinned-release bootstrap and both interactive and commit-asserted main acquisition.
-Reconfirm no secret is printed or passed on argv.
-
-## Publication order
-
-1. Reconfirm clean sanitized `main`, exact tag target, intended refs, Gitleaks/history results, and
-   all three asset hashes.
-2. Explicitly push only `main` and `refs/tags/v1.0.1` to Forgejo; create the Forgejo release and
-   upload the three assets without renaming them.
-3. Explicitly push only `main` and `refs/tags/v1.0.1` to GitHub; create the GitHub release and upload
-   the same three byte-identical assets.
-4. Re-download every asset from each host and verify hashes, archive member safety, embedded
-   `install.sh` identity/digest, and exact tag/source revision.
-5. Run the canonical main-first installer test and verify the recorded SHA equals the deliberately
-   resolved public `main` tip.
-6. Run the exact versioned release installer test and verify its archive/checksum binding.
-7. Complete a real clean Ubuntu Server 24.04 acceptance test: prerequisite provisioning, default
-   and custom internal-port installs, actual systemd environment override/ExecStart expansion,
-   loopback-only listener, selected Caddy upstream, HTTPS health, first-user bootstrap,
-   `lcc-admin app-port` query/change/failure recovery, restart/reboot persistence, same-SHA no-op,
-   changed-main update persistence, scheduled/manual backup, update preflight, and
-   preserve-by-default uninstall.
-8. Confirm the versioned release assets are downloadable and byte-identical across intended hosts,
-   then publish release notes from `CHANGELOG.md`. The normal quick-install URL remains the public
-   `main` bootstrap rather than a Release redirect.
-
-The normal install-or-update command is:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Learning-Control-Center/Learning-Control-Center/main/scripts/bootstrap-ubuntu.sh | sudo bash
-```
-
-A release-specific launcher remains available for optional pinned installs and updates:
-
-```bash
-curl -fsSL https://github.com/Learning-Control-Center/Learning-Control-Center/releases/download/v1.0.1/install.sh | sudo bash
-```
-
-## Updates and rollback
-
-Every installed v1.0.1-or-newer server has `/opt/learning-control-center/update.sh`; `lcc-admin update`
-delegates to it without duplicating policy. The updater resolves the recorded repository's
-`refs/heads/main` to an exact SHA and never queries release APIs for a latest version. Release-bound
-launchers still detect existing installations and hand their exact immutable candidate to the same
-canonical engine. The engine verifies and stages the candidate before stopping services,
-classifies Alembic compatibility, creates a pre-update backup, and records immutable source
-identity. Code-only rollback is allowed only at the current database schema; schema-crossing
-rollback requires the matching database backup and explicit replacement acceptance.
-
-The three byte-identical release assets must still be uploaded to both explicit hosts for pinned
-installation, release history, and rollback/reference. There is no automatic host fallback:
-GitHub-backed installs continue with GitHub, and Forgejo-backed installs continue with Forgejo.
+Review assets and private-path exclusions, then upload only the intended files to the explicit
+GitHub release. Do not claim a tag or release exists until it has actually been created. An
+optional private Forgejo mirror does not change the canonical installer source. Read-only smoke
+checks of the published asset URLs, digest, archive layout, pinned fresh install, and normal
+public-main install must follow publication. Public ACME and real-server lifecycle acceptance are
+separate gates from local/disposable packaging and test TLS.

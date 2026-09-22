@@ -166,29 +166,42 @@ EOF
 required_paths=(
     CHANGELOG.md README.md LICENSE SECURITY.md logo.png alembic.ini pyproject.toml
     requirements-production.lock backend/app/main.py backend/alembic/env.py
-    deploy/Caddyfile.template deploy/learning-control-center.env.example
+    deploy/Caddyfile.template deploy/examples/installer-v2-external-nginx.conf
+    deploy/learning-control-center.env.example
     deploy/learning-control-center-update.sh
     deploy/learning-control-center.service deploy/learning-control-center-backup.service
     deploy/learning-control-center-backup.timer docs/INSTALLATION.md docs/PRODUCTION_OPERATIONS.md
     docs/UPDATES.md docs/RELEASING.md frontend/index.html frontend/package.json
     frontend/package-lock.json frontend/vite.config.ts frontend/src/main.tsx frontend/public/logo.png
     frontend/dist/index.html frontend/dist/LCC_FRONTEND_ARTIFACT.json
-    scripts/bootstrap-ubuntu.sh scripts/deploy-common.sh scripts/generate-production-env.sh
+    scripts/bootstrap.sh scripts/bootstrap-ubuntu.sh scripts/deploy-common.sh
+    scripts/release-bootstrap.sh
+    scripts/install.sh scripts/install/gateway.sh scripts/install/transition.sh
+    scripts/install/platforms/ubuntu-24.04.sh
+    scripts/generate-production-env.sh
     scripts/frontend-artifact.py scripts/install-ubuntu.sh scripts/lcc-admin
     scripts/operational-backup.sh scripts/package-release.sh scripts/prepare-public-promotion.sh
-    scripts/uninstall-ubuntu.sh
+    scripts/uninstall.sh scripts/uninstall-ubuntu.sh
     scripts/update.sh scripts/update-ubuntu.sh RELEASE_ID RELEASE_CHANNEL SOURCE_REVISION RELEASE_MANIFEST
 )
 for relative_path in "${required_paths[@]}"; do
     test -f "$staging_root/$relative_path" || die "Required release file is missing: $relative_path"
 done
 
+test -x "$staging_root/scripts/bootstrap.sh" || die "V2 bootstrap script is not executable."
+test -x "$staging_root/scripts/release-bootstrap.sh" || die "Release bootstrap template is not executable."
+test -x "$staging_root/scripts/install.sh" || die "V2 Core installer is not executable."
+test -x "$staging_root/scripts/install/gateway.sh" || die "V2 gateway layer is not executable."
+test -r "$staging_root/scripts/install/transition.sh" || die "V2 transition layer is not readable."
+test -x "$staging_root/scripts/install/platforms/ubuntu-24.04.sh" || \
+    die "V2 Ubuntu platform adapter is not executable."
 test -x "$staging_root/scripts/bootstrap-ubuntu.sh" || die "Bootstrap script is not executable."
 test -x "$staging_root/scripts/generate-production-env.sh" || \
     die "Environment generator is not executable."
 test -x "$staging_root/scripts/install-ubuntu.sh" || die "Installer is not executable."
 test -x "$staging_root/scripts/update.sh" || die "User-facing updater is not executable."
 test -x "$staging_root/scripts/update-ubuntu.sh" || die "Canonical updater is not executable."
+test -x "$staging_root/scripts/uninstall.sh" || die "V2 generic uninstaller is not executable."
 test -x "$staging_root/scripts/prepare-public-promotion.sh" || \
     die "Public promotion tool is not executable."
 test -x "$staging_root/deploy/learning-control-center-update.sh" || \
@@ -227,17 +240,18 @@ temporary_checksum="$temporary_directory/$checksum_name"
 archive_sha256="$(sha256sum "$temporary_archive" | cut -d' ' -f1)"
 temporary_install="$temporary_directory/install.sh"
 sed \
-    -e "s|^readonly embedded_stable_ref=\"\"$|readonly embedded_stable_ref=\"$release_id\"|" \
-    -e "s|^readonly embedded_archive_sha256=\"\"$|readonly embedded_archive_sha256=\"$archive_sha256\"|" \
-    -e 's|^readonly stable_only_launcher="0"$|readonly stable_only_launcher="1"|' \
-    "$staging_root/scripts/bootstrap-ubuntu.sh" > "$temporary_install"
+    -e "s|@LCC_RELEASE_ID@|$release_id|g" \
+    -e "s|@LCC_SOURCE_SHA@|$source_commit|g" \
+    -e "s|@LCC_ARCHIVE_SHA256@|$archive_sha256|g" \
+    "$staging_root/scripts/release-bootstrap.sh" > "$temporary_install"
 chmod 0755 "$temporary_install"
-grep -Fqx "readonly embedded_stable_ref=\"$release_id\"" "$temporary_install" || \
+grep -Fqx "readonly release_id='$release_id'" "$temporary_install" || \
     die "Failed to bind install.sh to the release identity."
-grep -Fqx "readonly embedded_archive_sha256=\"$archive_sha256\"" "$temporary_install" || \
+grep -Fqx "readonly source_sha='$source_commit'" "$temporary_install" || \
+    die "Failed to bind install.sh to the source commit."
+grep -Fqx "readonly archive_sha256='$archive_sha256'" "$temporary_install" || \
     die "Failed to bind install.sh to the release archive checksum."
-grep -Fqx 'readonly stable_only_launcher="1"' "$temporary_install" || \
-    die "Failed to render install.sh as stable-only."
+! grep -q '@LCC_' "$temporary_install" || die "Release installer has unresolved placeholders."
 
 final_install="$output_directory/install.sh"
 

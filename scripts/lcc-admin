@@ -17,9 +17,9 @@ Process lifecycle (delegates to systemd):
 Operations:
   update [--yes] [--dry-run]
                                  Resolve and run the canonical installed updater
-  health                         Check the public HTTPS health endpoint
+  health [--internal|--public]   Check Core loopback or public HTTPS health
   app-port                       Show the internal loopback application port
-  app-port set PORT [--dry-run] [--yes]
+  app-port set PORT [--dry-run] [--yes] [--ack-external-proxy]
                                  Safely validate or change the internal port
   logs [LINES]                   Show recent application journal entries
   backup                         Run one SQLite-safe operational backup
@@ -38,6 +38,16 @@ test -r "$LCC_ENVIRONMENT_FILE" || lcc_die "Missing $LCC_ENVIRONMENT_FILE."
 test -L "$LCC_CURRENT_RELEASE" || lcc_die "Missing active release symlink."
 release_root="$(readlink -f "$LCC_CURRENT_RELEASE")"
 test -x "$release_root/.venv/bin/python" || lcc_die "Active production runtime is incomplete."
+core_only=0
+gateway_mode=legacy
+if test -f "$release_root/INSTALLER_V2_CORE"; then
+    test "$(cat "$release_root/INSTALLER_V2_CORE")" = 1 || lcc_die "Unknown V2 Core identity."
+    core_only=1
+    gateway_mode=core-only
+    if test -e "$LCC_DEPLOYMENT_STATE_FILE" || test -L "$LCC_DEPLOYMENT_STATE_FILE"; then
+        gateway_mode="$(lcc_read_gateway_state)"
+    fi
+fi
 lcc_load_environment "$LCC_ENVIRONMENT_FILE"
 lcc_validate_environment "$LCC_CURRENT_RELEASE"
 
@@ -97,10 +107,63 @@ case "$command_name" in
         echo "Channel: $release_channel"
         echo "Release ID: $release_id"
         echo "Source revision: $source_revision"
+        if test "$core_only" -eq 1; then
+            if test -x "$LCC_UPDATE_ENTRYPOINT"; then
+                echo "Updater: $LCC_UPDATE_ENTRYPOINT"
+            else
+                echo "Updater: unavailable"
+            fi
+            echo "Gateway mode: $gateway_mode"
+            if systemctl is-active --quiet "$LCC_SERVICE_NAME"; then
+                echo "Core service: active"
+            else
+                echo "Core service: inactive/failed"
+            fi
+            if lcc_wait_for_internal_health "$(lcc_effective_app_port)" 1 0; then
+                echo "Internal Core health: healthy"
+            else
+                echo "Internal Core health: unhealthy"
+            fi
+            if test "$gateway_mode" = caddy; then
+                if systemctl is-active --quiet caddy.service; then
+                    echo "Managed Caddy service: active"
+                else
+                    echo "Managed Caddy service: inactive/failed"
+                fi
+                if "$LCC_CADDY_BINARY" validate --config "$LCC_CADDY_MAIN" --adapter caddyfile \
+                    >/dev/null 2>&1; then
+                    echo "Managed Caddy configuration: valid"
+                else
+                    echo "Managed Caddy configuration: invalid/unavailable"
+                fi
+            fi
+            if test "$gateway_mode" = core-only; then
+                echo "Public gateway/TLS: pending (no gateway selected)"
+            elif lcc_wait_for_health 1 0; then
+                echo "Public HTTPS health: healthy"
+            else
+                echo "Public gateway/TLS: pending/unhealthy"
+            fi
+        fi
         systemctl status "$LCC_SERVICE_NAME" --no-pager
         ;;
     health)
-        test "$#" -eq 0 || lcc_die "health accepts no arguments."
+        test "$#" -le 1 || lcc_die "health accepts only --internal or --public."
+        health_scope="${1:---public}"
+        case "$health_scope" in --internal|--public) ;; *) lcc_die "health accepts only --internal or --public." ;; esac
+        if test "$core_only" -eq 1 && test "$#" -eq 0 && test "$gateway_mode" = core-only; then
+            health_scope=--internal
+        fi
+        if test "$health_scope" = --internal; then
+            port="$(lcc_effective_app_port)"
+            curl --fail --silent --show-error --max-time 10 \
+                --header "Host: $(lcc_public_hostname)" \
+                "http://127.0.0.1:$port/api/v1/health"
+            printf '\n'
+            if test "$gateway_mode" = core-only; then echo 'Public gateway/TLS: pending'; fi
+            exit 0
+        fi
+        test "$gateway_mode" != core-only || lcc_die "Public gateway/TLS is pending; Core-only installation has no configured gateway."
         curl --fail --silent --show-error --max-time 10 \
             "$LCC_PUBLIC_ORIGIN/api/v1/health"
         printf '\n'
@@ -117,21 +180,30 @@ case "$command_name" in
             fi
             exit 0
         fi
-        test "$1" = set || lcc_die "app-port accepts no arguments or: set PORT [--dry-run] [--yes]"
+        test "$1" = set || lcc_die "app-port accepts no arguments or: set PORT [--dry-run] [--yes] [--ack-external-proxy]"
+        test "$gateway_mode" != core-only || lcc_die "Core-only app-port changes require a configured gateway mode; no changes made."
         shift
         test "$#" -ge 1 || lcc_die "app-port set requires PORT."
         requested_app_port="$(lcc_validate_app_port "$1")"
         shift
         app_port_dry_run=0
         app_port_assume_yes=0
+        external_ack=0
         while test "$#" -gt 0; do
             case "$1" in
                 --dry-run) app_port_dry_run=1 ;;
                 --yes) app_port_assume_yes=1 ;;
+                --ack-external-proxy) external_ack=1 ;;
                 *) lcc_die "Unknown app-port set option: $1" ;;
             esac
             shift
         done
+        test "$external_ack" -eq 0 || test "$gateway_mode" = external ||
+            lcc_die "--ack-external-proxy applies only to external gateway mode."
+        if test "$gateway_mode" = external && test "$app_port_dry_run" -eq 0 &&
+            test "$app_port_assume_yes" -eq 1 && test "$external_ack" -eq 0; then
+            lcc_die "External mode requires --ack-external-proxy with --yes; update your reverse proxy after changing the upstream."
+        fi
         current_app_port="$(lcc_effective_app_port)"
         if test "$requested_app_port" = "$current_app_port"; then
             echo "Internal application port is already $current_app_port; no changes were made."
@@ -143,17 +215,29 @@ case "$command_name" in
         fi
         echo "Internal application port: $current_app_port -> $requested_app_port"
         echo "Bind address remains: 127.0.0.1"
+        if test "$gateway_mode" = external; then
+            echo "External proxy coordination: you must update its upstream after this change."
+            echo "Public HTTPS may be pending until operator routing is updated."
+        fi
         if test "$app_port_dry_run" -eq 0 && test "$app_port_assume_yes" -eq 0; then
             exec 3<>/dev/tty || \
                 lcc_die "Interactive confirmation requires a controlling terminal; use --yes for deliberate automation."
-            printf 'Apply this internal application-port change? [y/N]: ' >&3
+            if test "$gateway_mode" = external; then
+                printf 'Change Core port and coordinate the external proxy yourself? [y/N]: ' >&3
+            else
+                printf 'Apply this internal application-port change? [y/N]: ' >&3
+            fi
             IFS= read -r answer <&3 || lcc_die "Unable to read app-port confirmation."
             case "${answer,,}" in
                 y|yes) ;;
                 *) lcc_die "App-port change cancelled." ;;
             esac
         fi
-        lcc_apply_app_port_change "$requested_app_port" "$app_port_dry_run"
+        if test "$gateway_mode" = external; then
+            lcc_apply_external_app_port_change "$requested_app_port" "$app_port_dry_run"
+        else
+            lcc_apply_app_port_change "$requested_app_port" "$app_port_dry_run"
+        fi
         ;;
     logs)
         lines="${1:-100}"
@@ -201,7 +285,15 @@ case "$command_name" in
             lcc_die "The lcc service user cannot read the restore source."
         run_offline "$release_root/.venv/bin/lcc-ops" restore --from "$restore_source"
         systemctl start "$LCC_SERVICE_NAME"
-        lcc_wait_for_health || lcc_die "Restore succeeded, but the public health check failed."
+        if test "$core_only" -eq 1; then
+            lcc_wait_for_internal_health "$(lcc_effective_app_port)" 120 0.5 ||
+                lcc_die "Restore succeeded, but internal Core health failed."
+            if test "$gateway_mode" = caddy; then
+                lcc_wait_for_health 60 0.5 || lcc_die "Restore succeeded, but managed public HTTPS health failed."
+            fi
+        else
+            lcc_wait_for_health 60 0.5 || lcc_die "Restore succeeded, but the public health check failed."
+        fi
         ;;
     recover-password)
         test "$#" -eq 0 || lcc_die "recover-password accepts no arguments."
@@ -253,8 +345,19 @@ case "$command_name" in
         resume_backup_timer
         trap - EXIT
         systemctl start "$LCC_SERVICE_NAME"
-        lcc_wait_for_health || lcc_die "Bootstrap was finalized, but the public health check failed."
-        echo "Bootstrap token removed; production restart and HTTPS health check passed."
+        if test "$core_only" -eq 1; then
+            lcc_wait_for_internal_health "$(lcc_effective_app_port)" 120 0.5 ||
+                lcc_die "Bootstrap was finalized, but internal Core health failed."
+            if test "$gateway_mode" = caddy; then
+                lcc_wait_for_health 60 0.5 || lcc_die "Bootstrap was finalized, but managed public HTTPS health failed."
+                echo "Bootstrap token removed; Core and managed public HTTPS health passed."
+            else
+                echo "Bootstrap token removed; Core restart and internal health passed. Public gateway/TLS may be pending."
+            fi
+        else
+            lcc_wait_for_health 60 0.5 || lcc_die "Bootstrap was finalized, but the public health check failed."
+            echo "Bootstrap token removed; production restart and HTTPS health check passed."
+        fi
         ;;
     -h|--help|help)
         usage

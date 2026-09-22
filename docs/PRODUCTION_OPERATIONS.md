@@ -14,6 +14,7 @@ repository-root `start.sh` or `stop.sh` helpers in production; they run developm
 | SQLite database | `/var/lib/learning-control-center/lcc.sqlite3` |
 | Operational backups | `/var/backups/learning-control-center` |
 | Caddy site | `/etc/caddy/Caddyfile.d/learning-control-center.caddy` |
+| Gateway mode | `/etc/learning-control-center.deployment` (root-owned) |
 | Administrator command | `/usr/local/sbin/lcc-admin` |
 | Persistent update entrypoint | `/opt/learning-control-center/update.sh` |
 
@@ -46,13 +47,13 @@ sudo systemctl status learning-control-center.service
 sudo systemctl enable learning-control-center.service
 ```
 
-The service runs one Uvicorn worker on `127.0.0.1:LCC_APP_PORT`; the default is 8000. Caddy is the
-only public TLS endpoint on ports 80/443. The internal port is stored in the root-owned production
+The service runs one Uvicorn worker on `127.0.0.1:LCC_APP_PORT`; the default is 8000. Managed Caddy
+or an explicitly selected same-host external proxy provides public TLS. The internal port is stored in the root-owned production
 environment and is never a configurable bind address.
 Uvicorn proxy-header rewriting stays disabled; LCC accepts forwarded client addresses only from the
 configured loopback proxy CIDR. Standard output and errors go to journald.
 
-The installation uses a compatible package-managed Caddy service and imports only the LCC site
+Managed gateway mode uses a compatible package-managed Caddy service and imports only the LCC site
 file into the administrator's main Caddyfile. It does not expose the application environment to
 Caddy and does not execute a PATH-shadowing Caddy binary: production operations use the
 package-owned `/usr/bin/caddy`. Formatting and validation are transactional; either failure
@@ -60,9 +61,12 @@ restores the prior Caddy site and main configuration. The installer does not rep
 sites. Review OS package updates through the server's normal Ubuntu patching policy; LCC never
 performs an OS-wide upgrade.
 
-When LCC must provision a missing prerequisite, its APT refresh and package selection use only
-validated Ubuntu Noble sources and temporary package metadata. Other configured repositories and
-their keys are left untouched, even if an unrelated repository is temporarily unreachable.
+When LCC must provision a missing prerequisite, normal host APT authenticates and selects named
+packages under the administrator's configured repository/pinning policy. The installer leaves
+repository definitions and keys untouched. If metadata refresh is incomplete, it reports that
+fact and lets the named package install and capability checks determine whether to proceed.
+In external gateway mode LCC does not edit or reload the operator's proxy; public status stays
+pending until its HTTPS route is verified.
 
 Useful administrator commands:
 
@@ -79,15 +83,17 @@ sudo lcc-admin update
 
 The persistent update entrypoint delegates through the active `current` release, so an atomic
 release switch also switches the implementation it invokes without leaving a path to an obsolete
-release. Normal updates resolve the recorded repository's public `main` to one exact SHA. A
+release. Normal updates resolve GitHub public `main` to one exact SHA. A
 release-channel installation migrates to main only after the operator confirms the displayed
 channel and immutable target. Exact pinned releases remain available through their version-bound
 installers. The complete safety and rollback contract is in [`UPDATES.md`](UPDATES.md).
 
 `lcc-admin app-port` reports the effective port and whether it is explicit or the legacy 8000
 default. `lcc-admin app-port set PORT` validates and probes the new loopback port, stages the
-environment and Caddy site, validates the complete Caddy configuration, restarts only LCC, checks
-internal health, reloads Caddy, and checks public HTTPS health. `--dry-run` performs validation
+environment, restarts only LCC, and checks internal health. In managed mode it also updates the
+LCC Caddy site, validates the complete configuration, reloads Caddy, and checks public HTTPS.
+In external mode the operator must coordinate the proxy upstream; automation requires
+`--ack-external-proxy` with `--yes`, and public readiness may be pending. `--dry-run` performs validation
 without mutation; `--yes` enables deliberate automation. Any activation failure restores the old
 environment, Caddy site, service port, and health path. Recovery artifacts are retained with a
 prominent path only if automatic rollback itself cannot complete.
@@ -108,11 +114,11 @@ sudo lcc-admin finalize-bootstrap
 ```
 
 `show-bootstrap-token` requires root and a controlling terminal, writes the value only to that
-terminal, and refuses once any user exists. Interactive installation shows it once after the HTTPS
+terminal, and refuses once any user exists. Managed installation shows it after the HTTPS
 health check; non-interactive installation never prints it. `finalize-bootstrap` stops LCC,
 verifies that the current database is at the expected schema with exactly one user, removes only
-the bootstrap-token line atomically, restarts the service, and verifies the public HTTPS health
-endpoint. An initialized production database intentionally refuses to restart while a bootstrap
+the bootstrap-token line atomically, restarts the service, and verifies internal health (and public
+HTTPS in managed mode). An initialized production database intentionally refuses to restart while a bootstrap
 token remains configured.
 
 ## Scheduled and manual backups

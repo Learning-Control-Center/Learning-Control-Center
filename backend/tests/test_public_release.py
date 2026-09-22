@@ -5,7 +5,6 @@ import io
 import json
 import os
 import re
-import shlex
 import shutil
 import stat
 import subprocess
@@ -17,7 +16,7 @@ from urllib.parse import unquote
 import pytest
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-BOOTSTRAP = REPOSITORY_ROOT / "scripts" / "bootstrap-ubuntu.sh"
+BOOTSTRAP = REPOSITORY_ROOT / "scripts" / "bootstrap.sh"
 PACKAGER = REPOSITORY_ROOT / "scripts" / "package-release.sh"
 PROMOTER = REPOSITORY_ROOT / "scripts" / "prepare-public-promotion.sh"
 GENERATOR = REPOSITORY_ROOT / "scripts" / "generate-production-env.sh"
@@ -42,7 +41,7 @@ def _copy_current(repository: Path, relative_path: str) -> None:
     shutil.copy2(source, destination)
 
 
-def _release_repository(tmp_path: Path) -> Path:
+def _release_repository(tmp_path: Path, *, stub_installer: bool = False) -> Path:
     repository = tmp_path / "release-source"
     repository.mkdir()
     source_archive = subprocess.run(
@@ -64,8 +63,14 @@ def _release_repository(tmp_path: Path) -> Path:
         "frontend/package.json",
         "frontend/package-lock.json",
         "scripts/frontend-artifact.py",
+        "scripts/bootstrap.sh",
+        "scripts/release-bootstrap.sh",
         "scripts/bootstrap-ubuntu.sh",
         "scripts/deploy-common.sh",
+        "scripts/install.sh",
+        "scripts/install/gateway.sh",
+        "scripts/install/transition.sh",
+        "scripts/install/platforms/ubuntu-24.04.sh",
         "scripts/generate-production-env.sh",
         "scripts/install-ubuntu.sh",
         "scripts/lcc-admin",
@@ -73,8 +78,10 @@ def _release_repository(tmp_path: Path) -> Path:
         "scripts/prepare-public-promotion.sh",
         "scripts/update.sh",
         "scripts/update-ubuntu.sh",
+        "scripts/uninstall.sh",
         "deploy/Caddyfile",
         "deploy/Caddyfile.template",
+        "deploy/examples/installer-v2-external-nginx.conf",
         "deploy/learning-control-center.env.example",
         "deploy/learning-control-center.service",
         "deploy/learning-control-center-update.sh",
@@ -118,27 +125,16 @@ def _release_repository(tmp_path: Path) -> Path:
     for relative_path, content in private_files.items():
         _write(repository / relative_path, content)
 
-    _write(
-        repository / "scripts" / "install-ubuntu.sh",
-        """#!/usr/bin/env bash
-set -euo pipefail
-printf '%s\\n' "$@" > "${LCC_BOOTSTRAP_HANDOFF_LOG:?}"
-while test "$#" -gt 0; do
-    case "$1" in
-        --env-file)
-            stat -c '%a' "$(dirname "$2")" > "${LCC_BOOTSTRAP_ENV_MODE_CAPTURE:?}"
-            stat -c '%a' "$2" >> "${LCC_BOOTSTRAP_ENV_MODE_CAPTURE:?}"
-            cp "$2" "${LCC_BOOTSTRAP_ENV_CAPTURE:?}"
-            chmod 0600 "${LCC_BOOTSTRAP_ENV_CAPTURE:?}"
-            shift 2
-            ;;
-        *) shift ;;
-    esac
-done
-printf 'fake installer invoked\\n'
-""",
-        0o755,
-    )
+    if stub_installer:
+        _write(
+            repository / "scripts/install.sh",
+            "#!/usr/bin/env bash\n"
+            'printf "%s\\n" "$LCC_V2_SOURCE_ROOT" "$LCC_V2_SOURCE_REPOSITORY" '
+            '"$LCC_V2_SOURCE_REF" "$LCC_V2_SOURCE_SHA" "$LCC_V2_RELEASE_ID" "$@" '
+            '> "$LCC_TEST_RELEASE_HANDOFF"\n',
+            0o755,
+        )
+
     subprocess.run(["git", "-C", repository, "add", "."], check=True)
     subprocess.run(
         ["git", "-C", repository, "add", "--force", "--", *private_files],
@@ -180,43 +176,6 @@ def _package(repository: Path, output_directory: Path) -> tuple[Path, Path, Path
     )
 
 
-def _bootstrap_environment(tmp_path: Path, asset_root: Path | None = None) -> dict[str, str]:
-    os_release = tmp_path / "os-release"
-    os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
-    secret_temp = tmp_path / "secret-temp"
-    secret_temp.mkdir(exist_ok=True)
-    environment = {
-        **os.environ,
-        "LCC_BOOTSTRAP_TESTING": "1",
-        "LCC_BOOTSTRAP_OS_RELEASE": str(os_release),
-        "LCC_BOOTSTRAP_HANDOFF_LOG": str(tmp_path / "handoff.log"),
-        "LCC_BOOTSTRAP_ENV_CAPTURE": str(tmp_path / "generated.env"),
-        "LCC_BOOTSTRAP_ENV_MODE_CAPTURE": str(tmp_path / "generated-env.modes"),
-        "LCC_BOOTSTRAP_SECRET_TMPDIR": str(secret_temp),
-    }
-    if asset_root is not None:
-        environment["LCC_BOOTSTRAP_ASSET_BASE_URL"] = asset_root.as_uri()
-    return environment
-
-
-def _stable_command(script: Path = BOOTSTRAP, *, dry_run: bool = False) -> list[str]:
-    command = [
-        str(script),
-        "--channel",
-        "stable",
-        "--ref",
-        RELEASE_ID,
-        "--domain",
-        "lcc.example.test",
-        "--timezone",
-        "UTC",
-        "--non-interactive",
-    ]
-    if dry_run:
-        command.append("--dry-run")
-    return command
-
-
 def test_release_packaging_is_deterministic_bounded_and_mode_preserving(
     tmp_path: Path,
 ) -> None:
@@ -232,9 +191,11 @@ def test_release_packaging_is_deterministic_bounded_and_mode_preserving(
     assert hashlib.sha256(first_archive.read_bytes()).hexdigest() == expected_hash
     assert stat.S_IMODE(first_install.stat().st_mode) == 0o755
     launcher = first_install.read_text()
-    assert f'readonly embedded_stable_ref="{RELEASE_ID}"' in launcher
-    assert f'readonly embedded_archive_sha256="{expected_hash}"' in launcher
-    assert 'readonly stable_only_launcher="1"' in launcher
+    assert f"readonly release_id='{RELEASE_ID}'" in launcher
+    assert f"readonly archive_sha256='{expected_hash}'" in launcher
+    assert "readonly source_sha='" in launcher
+    assert "lcc-release" in launcher
+    assert "embedded_stable_ref" not in launcher
 
     with tarfile.open(first_archive, "r:gz") as bundle:
         members = {member.name: member for member in bundle.getmembers()}
@@ -247,13 +208,21 @@ def test_release_packaging_is_deterministic_bounded_and_mode_preserving(
         f"{prefix}frontend/public/logo.png",
         f"{prefix}frontend/dist/index.html",
         f"{prefix}frontend/dist/LCC_FRONTEND_ARTIFACT.json",
+        f"{prefix}scripts/bootstrap.sh",
+        f"{prefix}scripts/release-bootstrap.sh",
         f"{prefix}scripts/bootstrap-ubuntu.sh",
+        f"{prefix}scripts/install.sh",
+        f"{prefix}scripts/install/gateway.sh",
+        f"{prefix}scripts/install/transition.sh",
+        f"{prefix}scripts/install/platforms/ubuntu-24.04.sh",
+        f"{prefix}deploy/examples/installer-v2-external-nginx.conf",
         f"{prefix}scripts/frontend-artifact.py",
         f"{prefix}scripts/generate-production-env.sh",
         f"{prefix}scripts/install-ubuntu.sh",
         f"{prefix}scripts/prepare-public-promotion.sh",
         f"{prefix}scripts/update.sh",
         f"{prefix}scripts/update-ubuntu.sh",
+        f"{prefix}scripts/uninstall.sh",
         f"{prefix}deploy/learning-control-center-update.sh",
         f"{prefix}RELEASE_ID",
         f"{prefix}RELEASE_CHANNEL",
@@ -261,11 +230,17 @@ def test_release_packaging_is_deterministic_bounded_and_mode_preserving(
         f"{prefix}RELEASE_MANIFEST",
     }
     assert expected <= members.keys()
+    assert members[f"{prefix}scripts/bootstrap.sh"].mode & stat.S_IXUSR
+    assert members[f"{prefix}scripts/release-bootstrap.sh"].mode & stat.S_IXUSR
     assert members[f"{prefix}scripts/bootstrap-ubuntu.sh"].mode & stat.S_IXUSR
+    assert members[f"{prefix}scripts/install.sh"].mode & stat.S_IXUSR
+    assert members[f"{prefix}scripts/install/gateway.sh"].mode & stat.S_IXUSR
+    assert members[f"{prefix}scripts/install/transition.sh"].mode & stat.S_IRUSR
     assert members[f"{prefix}scripts/generate-production-env.sh"].mode & stat.S_IXUSR
     assert members[f"{prefix}scripts/install-ubuntu.sh"].mode & stat.S_IXUSR
     assert members[f"{prefix}scripts/update.sh"].mode & stat.S_IXUSR
     assert members[f"{prefix}scripts/update-ubuntu.sh"].mode & stat.S_IXUSR
+    assert members[f"{prefix}scripts/uninstall.sh"].mode & stat.S_IXUSR
     assert members[f"{prefix}scripts/prepare-public-promotion.sh"].mode & stat.S_IXUSR
     assert members[f"{prefix}deploy/learning-control-center-update.sh"].mode & stat.S_IXUSR
     assert members[f"{prefix}scripts/frontend-artifact.py"].mode & stat.S_IXUSR
@@ -309,6 +284,135 @@ def test_release_packaging_is_deterministic_bounded_and_mode_preserving(
         capture_output=True,
         text=True,
     )
+
+
+def test_release_bound_launcher_verifies_archive_and_passes_immutable_identity(
+    tmp_path: Path,
+) -> None:
+    repository = _release_repository(tmp_path, stub_installer=True)
+    archive, _, launcher = _package(repository, tmp_path / "assets")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write(
+        fake_bin / "curl",
+        "#!/usr/bin/env bash\n"
+        'test "${*: -1}" = '
+        '"https://github.com/Learning-Control-Center/Learning-Control-Center/releases/'
+        'download/v1.0.1/learning-control-center-v1.0.1.tar.gz" || exit 3\n'
+        'while test "$#" -gt 0; do\n'
+        '  if test "$1" = --output; then cp "$LCC_TEST_ARCHIVE" "$2"; exit; fi\n'
+        "  shift\n"
+        "done\nexit 4\n",
+        0o755,
+    )
+    handoff = tmp_path / "handoff"
+    environment = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "LCC_TEST_ARCHIVE": str(archive),
+        "LCC_TEST_RELEASE_HANDOFF": str(handoff),
+    }
+    installed = subprocess.run(
+        [launcher, "--non-interactive", "--domain", "lcc.example.test"],
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert installed.returncode == 0, installed.stderr
+    identity = handoff.read_text().splitlines()
+    assert identity[0].endswith(f"Learning-Control-Center-{RELEASE_ID}")
+    assert identity[1:3] == [
+        "https://github.com/Learning-Control-Center/Learning-Control-Center.git",
+        f"refs/tags/{RELEASE_ID}",
+    ]
+    assert re.fullmatch("[0-9a-f]{40}", identity[3])
+    assert identity[4:] == [RELEASE_ID, "--non-interactive", "--domain", "lcc.example.test"]
+
+    archive.write_bytes(archive.read_bytes()[:-1])
+    handoff.unlink()
+    rejected = subprocess.run([launcher], env=environment, capture_output=True, text=True)
+    assert rejected.returncode != 0
+    assert "SHA-256 does not match" in rejected.stderr
+    assert not handoff.exists()
+
+    override = subprocess.run(
+        [launcher, "--repository-url", "https://elsewhere.invalid"],
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+    assert override.returncode != 0
+    assert "does not accept source or channel overrides" in override.stderr
+
+
+@pytest.mark.parametrize(
+    "member_name,member_type",
+    [
+        ("../outside", tarfile.REGTYPE),
+        ("/absolute", tarfile.REGTYPE),
+        (f"Learning-Control-Center-{RELEASE_ID}/README.md", tarfile.REGTYPE),
+        (f"Learning-Control-Center-{RELEASE_ID}/escape", tarfile.SYMTYPE),
+        (f"Learning-Control-Center-{RELEASE_ID}/device", tarfile.CHRTYPE),
+    ],
+)
+def test_release_bound_launcher_rejects_unsafe_members_even_with_matching_digest(
+    tmp_path: Path, member_name: str, member_type: bytes
+) -> None:
+    root = f"Learning-Control-Center-{RELEASE_ID}"
+    archive = tmp_path / "source.tar.gz"
+    with tarfile.open(archive, "w:gz") as bundle:
+        for name, data, mode, kind in (
+            (f"{root}/README.md", b"LCC", 0o644, tarfile.REGTYPE),
+            (f"{root}/pyproject.toml", b"[project]", 0o644, tarfile.REGTYPE),
+            (
+                f"{root}/scripts/install.sh",
+                b"#!/usr/bin/env bash\nexit 0\n",
+                0o755,
+                tarfile.REGTYPE,
+            ),
+            (f"{root}/scripts/install/transition.sh", b"# fixture", 0o644, tarfile.REGTYPE),
+            (f"{root}/SOURCE_REVISION", ("a" * 40).encode(), 0o644, tarfile.REGTYPE),
+            (f"{root}/RELEASE_MANIFEST", b"fixture", 0o644, tarfile.REGTYPE),
+            (member_name, b"unsafe", 0o644, member_type),
+        ):
+            member = tarfile.TarInfo(name)
+            member.mode = mode
+            member.type = kind
+            member.size = len(data) if kind == tarfile.REGTYPE else 0
+            bundle.addfile(member, io.BytesIO(data) if member.isfile() else None)
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    template = (REPOSITORY_ROOT / "scripts/release-bootstrap.sh").read_text()
+    launcher = tmp_path / "install.sh"
+    launcher.write_text(
+        template.replace("@LCC_RELEASE_ID@", RELEASE_ID)
+        .replace("@LCC_SOURCE_SHA@", "a" * 40)
+        .replace("@LCC_ARCHIVE_SHA256@", digest)
+    )
+    launcher.chmod(0o755)
+    bin_directory = tmp_path / "bin"
+    bin_directory.mkdir()
+    _write(
+        bin_directory / "curl",
+        "#!/usr/bin/env bash\n"
+        'while test "$#" -gt 0; do\n'
+        '  if test "$1" = --output; then cp "$LCC_TEST_ARCHIVE" "$2"; exit; fi\n'
+        "  shift\n"
+        "done\nexit 2\n",
+        0o755,
+    )
+    result = subprocess.run(
+        [launcher],
+        env={
+            **os.environ,
+            "PATH": f"{bin_directory}:{os.environ['PATH']}",
+            "LCC_TEST_ARCHIVE": str(archive),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "Invalid release archive" in result.stderr
 
 
 def test_public_promotion_transfers_only_a_sanitized_tree(tmp_path: Path) -> None:
@@ -457,1148 +561,6 @@ def test_frontend_artifact_is_verified_and_bound_to_source(tmp_path: Path) -> No
     assert "manifest is missing or unsafe" in missing.stderr
 
 
-def test_prerequisite_provisioning_uses_only_explicit_ubuntu_packages(tmp_path: Path) -> None:
-    repository = _release_repository(tmp_path)
-    asset_root = tmp_path / "assets"
-    _package(repository, asset_root / RELEASE_ID)
-    apt_log = tmp_path / "apt.log"
-    environment = {
-        **_bootstrap_environment(tmp_path, asset_root),
-        "LCC_BOOTSTRAP_TEST_MISSING_PACKAGES": "python3-venv,sqlite3,rsync,caddy,iproute2",
-        "LCC_BOOTSTRAP_APT_LOG": str(apt_log),
-    }
-    result = subprocess.run(
-        _stable_command(),
-        check=True,
-        capture_output=True,
-        text=True,
-        env=environment,
-    )
-    commands = apt_log.read_text().splitlines()
-    assert commands[0] == "update"
-    assert commands[1].split() == [
-        "install",
-        "python3-venv",
-        "sqlite3",
-        "rsync",
-        "caddy",
-        "iproute2",
-    ]
-    assert "upgrade" not in apt_log.read_text()
-    assert "full-upgrade" not in apt_log.read_text()
-    assert "Ubuntu 24.04 signed repositories only" in result.stdout
-    assert "Node.js/npm are not installed" in result.stdout
-
-
-def test_prerequisite_dry_run_plans_without_apt_mutation(tmp_path: Path) -> None:
-    repository = _release_repository(tmp_path)
-    asset_root = tmp_path / "assets"
-    _package(repository, asset_root / RELEASE_ID)
-    apt_log = tmp_path / "apt.log"
-    environment = {
-        **_bootstrap_environment(tmp_path, asset_root),
-        "LCC_BOOTSTRAP_TEST_MISSING_PACKAGES": "caddy,sqlite3",
-        "LCC_BOOTSTRAP_APT_LOG": str(apt_log),
-    }
-    result = subprocess.run(
-        _stable_command(dry_run=True),
-        check=True,
-        capture_output=True,
-        text=True,
-        env=environment,
-    )
-    assert not apt_log.exists()
-    assert "DRY-RUN: would run apt-get update and install: sqlite3 caddy" in result.stdout
-
-
-def test_prerequisite_provisioning_refuses_unexpected_isolated_package_indexes(
-    tmp_path: Path,
-) -> None:
-    apt_log = tmp_path / "apt.log"
-    environment = {
-        **_bootstrap_environment(tmp_path),
-        "LCC_BOOTSTRAP_TEST_MISSING_PACKAGES": "caddy",
-        "LCC_BOOTSTRAP_TEST_APT_INDEX_TARGETS": (
-            "Packages|Ubuntu|Ubuntu|noble|http://archive.ubuntu.com/ubuntu|"
-            "/usr/share/keyrings/ubuntu-archive-keyring.gpg\n"
-            "Packages|Vendor|Vendor|stable|https://packages.example.test/repo|"
-            "/usr/share/keyrings/vendor.gpg"
-        ),
-        "LCC_BOOTSTRAP_APT_LOG": str(apt_log),
-    }
-    result = subprocess.run(
-        _stable_command(),
-        check=False,
-        capture_output=True,
-        text=True,
-        env=environment,
-    )
-    assert result.returncode != 0
-    assert "isolated Ubuntu APT view returned an unexpected package index" in result.stderr
-    assert "packages.example.test" in result.stderr
-    assert apt_log.read_text().splitlines() == ["update"]
-
-
-def test_prerequisite_dry_run_preserves_unrelated_package_source(
-    tmp_path: Path,
-) -> None:
-    sources = tmp_path / "apt" / "sources.list.d"
-    sources.mkdir(parents=True)
-    (sources / "ubuntu.sources").write_text(
-        "Types: deb\nURIs: http://archive.ubuntu.com/ubuntu\n"
-        "Suites: noble noble-updates\nComponents: main universe\n"
-        "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n"
-    )
-    vendor = sources / "vendor.sources"
-    vendor_content = (
-        "Types: deb\nURIs: https://apt.example.test/repo\n"
-        "Suites: stable\nComponents: main\n"
-        "Signed-By: /usr/share/keyrings/vendor.gpg\n"
-    )
-    vendor.write_text(vendor_content)
-    captured = tmp_path / "isolated.sources"
-    environment = {
-        **_bootstrap_environment(tmp_path),
-        "LCC_BOOTSTRAP_TEST_MISSING_PACKAGES": "caddy",
-        "LCC_BOOTSTRAP_TEST_APT_SOURCE_ROOT": str(sources.parent),
-        "LCC_BOOTSTRAP_TEST_APT_SOURCE_CAPTURE": str(captured),
-        "LCC_BOOTSTRAP_ASSET_BASE_URL": (tmp_path / "missing-assets").as_uri(),
-    }
-    result = subprocess.run(
-        _stable_command(dry_run=True),
-        check=False,
-        capture_output=True,
-        text=True,
-        env=environment,
-    )
-    assert result.returncode != 0
-    assert "stable release acquisition" in result.stderr
-    assert "archive.ubuntu.com" in captured.read_text()
-    assert "apt.example.test" not in captured.read_text()
-    assert vendor.read_text() == vendor_content
-
-
-def test_prerequisite_provisioning_rejects_spoofed_ubuntu_source(
-    tmp_path: Path,
-) -> None:
-    sources = tmp_path / "apt" / "sources.list.d"
-    sources.mkdir(parents=True)
-    (sources / "spoofed.sources").write_text(
-        "Types: deb\nURIs: https://spoofed.example.test/ubuntu\n"
-        "Suites: noble\nComponents: main universe\n"
-        "Signed-By: /usr/share/keyrings/vendor.gpg\n"
-    )
-    environment = {
-        **_bootstrap_environment(tmp_path),
-        "LCC_BOOTSTRAP_TEST_MISSING_PACKAGES": "caddy",
-        "LCC_BOOTSTRAP_TEST_APT_SOURCE_ROOT": str(sources.parent),
-    }
-    result = subprocess.run(
-        _stable_command(dry_run=True),
-        check=False,
-        capture_output=True,
-        text=True,
-        env=environment,
-    )
-    assert result.returncode != 0
-    assert "No trusted Ubuntu 24.04 APT source" in result.stderr
-
-
-@pytest.mark.parametrize(
-    ("variable", "message"),
-    (
-        ("LCC_BOOTSTRAP_TEST_DPKG_AUDIT_FAILURE", "dpkg reports unfinished"),
-        ("LCC_BOOTSTRAP_TEST_APT_CHECK_FAILURE", "APT dependency state is broken"),
-        ("LCC_BOOTSTRAP_TEST_UBUNTU_KEYRING_FAILURE", "Ubuntu archive keyring"),
-        ("LCC_BOOTSTRAP_TEST_UNMANAGED_CADDY", "unmanaged Caddy"),
-        ("LCC_BOOTSTRAP_TEST_CADDY_PATH", "package-owned /usr/bin/caddy"),
-        ("LCC_BOOTSTRAP_TEST_CADDY_CONFIG_FAILURE", "existing Caddy configuration is invalid"),
-        ("LCC_BOOTSTRAP_TEST_PORT_CONFLICT", "Ports 80 or 443"),
-    ),
-)
-def test_prerequisite_preflight_refuses_unsafe_host_state(
-    tmp_path: Path, variable: str, message: str
-) -> None:
-    environment = _bootstrap_environment(tmp_path)
-    environment[variable] = "/usr/local/bin/caddy" if variable.endswith("CADDY_PATH") else "1"
-    result = subprocess.run(
-        _stable_command(dry_run=True),
-        check=False,
-        capture_output=True,
-        text=True,
-        env=environment,
-    )
-    assert result.returncode != 0
-    assert message in result.stderr
-
-
-def test_prerequisite_install_failure_is_phased_and_rerunnable(tmp_path: Path) -> None:
-    apt_log = tmp_path / "apt.log"
-    environment = {
-        **_bootstrap_environment(tmp_path),
-        "LCC_BOOTSTRAP_TEST_MISSING_PACKAGES": "caddy",
-        "LCC_BOOTSTRAP_TEST_APT_INSTALL_FAILURE": "1",
-        "LCC_BOOTSTRAP_APT_LOG": str(apt_log),
-    }
-    failed = subprocess.run(
-        _stable_command(),
-        check=False,
-        capture_output=True,
-        text=True,
-        env=environment,
-    )
-    assert failed.returncode != 0
-    assert "failed during phase: prerequisite install" in failed.stderr
-    assert "correct the error and rerun safely" in failed.stderr
-    assert apt_log.read_text().splitlines() == ["update", "install caddy"]
-
-
-def test_prerequisite_metadata_failure_stops_before_install(tmp_path: Path) -> None:
-    apt_log = tmp_path / "apt.log"
-    environment = {
-        **_bootstrap_environment(tmp_path),
-        "LCC_BOOTSTRAP_TEST_MISSING_PACKAGES": "caddy",
-        "LCC_BOOTSTRAP_TEST_APT_UPDATE_FAILURE": "1",
-        "LCC_BOOTSTRAP_APT_LOG": str(apt_log),
-    }
-    failed = subprocess.run(
-        _stable_command(),
-        check=False,
-        capture_output=True,
-        text=True,
-        env=environment,
-    )
-    assert failed.returncode != 0
-    assert "failed during phase: package metadata" in failed.stderr
-    assert apt_log.read_text().splitlines() == ["update"]
-
-
-@pytest.mark.parametrize(
-    ("environment_update", "message"),
-    (
-        ({"LCC_BOOTSTRAP_TEST_ARCHITECTURE": "riscv64"}, "Supported architectures"),
-        ({"LCC_BOOTSTRAP_TEST_AVAILABLE_KIB": "1024"}, "At least 1 GiB"),
-    ),
-)
-def test_prerequisite_preflight_rejects_unsupported_host_shape(
-    tmp_path: Path, environment_update: dict[str, str], message: str
-) -> None:
-    environment = {**_bootstrap_environment(tmp_path), **environment_update}
-    result = subprocess.run(
-        _stable_command(dry_run=True),
-        check=False,
-        capture_output=True,
-        text=True,
-        env=environment,
-    )
-    assert result.returncode != 0
-    assert message in result.stderr
-
-
-def test_prerequisite_preflight_rejects_unsupported_ubuntu(tmp_path: Path) -> None:
-    environment = _bootstrap_environment(tmp_path)
-    os_release = tmp_path / "old-os-release"
-    os_release.write_text('ID=ubuntu\nVERSION_ID="22.04"\n')
-    environment["LCC_BOOTSTRAP_OS_RELEASE"] = str(os_release)
-    result = subprocess.run(
-        _stable_command(dry_run=True),
-        check=False,
-        capture_output=True,
-        text=True,
-        env=environment,
-    )
-    assert result.returncode != 0
-    assert "Ubuntu Server 24.04 LTS" in result.stderr
-
-
-def test_existing_newer_install_refuses_downgrade_before_package_changes(
-    tmp_path: Path,
-) -> None:
-    install_root = tmp_path / "installed-root"
-    active = install_root / "opt" / "learning-control-center" / "releases" / "v1.0.2"
-    active.mkdir(parents=True)
-    (active / "RELEASE_ID").write_text("v1.0.2\n")
-    (active / "RELEASE_CHANNEL").write_text("stable\n")
-    (active / "SOURCE_REVISION").write_text("1" * 40 + "\n")
-    (active.parent.parent / "current").symlink_to(active)
-    apt_log = tmp_path / "apt.log"
-    environment = {
-        **_bootstrap_environment(tmp_path),
-        "LCC_BOOTSTRAP_INSTALL_ROOT": str(install_root),
-        "LCC_BOOTSTRAP_TEST_MISSING_PACKAGES": "caddy",
-        "LCC_BOOTSTRAP_APT_LOG": str(apt_log),
-    }
-    result = subprocess.run(
-        _stable_command(dry_run=True),
-        check=False,
-        capture_output=True,
-        text=True,
-        env=environment,
-    )
-    assert result.returncode != 0
-    assert "rollback workflow for downgrades" in result.stderr
-    assert not apt_log.exists()
-
-
-def test_main_and_stable_share_prerequisites_without_server_node() -> None:
-    source = BOOTSTRAP.read_text()
-    provision_start = source.index("provision_prerequisites()")
-    provision_end = source.index("verify_provisioned_commands()")
-    provision = source[provision_start:provision_end]
-    required_packages = re.search(r"required_packages=\((.*?)\n    \)", provision, re.DOTALL)
-    assert required_packages is not None
-    assert "git" in required_packages.group(1).split()
-    assert "required_packages+=(git)" not in provision
-    assert "nodejs" not in required_packages.group(1)
-    assert "npm" not in required_packages.group(1).split()
-    assert "apt-key" not in source
-    assert "deb.nodesource" not in source
-    assert "dl.cloudsmith" not in source
-    assert "full-upgrade" not in source
-    assert "npm --prefix" not in (REPOSITORY_ROOT / "scripts" / "install-ubuntu.sh").read_text()
-    assert "npm --prefix" not in (REPOSITORY_ROOT / "scripts" / "update-ubuntu.sh").read_text()
-
-
-def test_main_is_default_and_non_interactive_use_requires_exact_commit(tmp_path: Path) -> None:
-    missing = subprocess.run(
-        [BOOTSTRAP, "--non-interactive", "--domain", "lcc.example.test", "--timezone", "UTC"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert missing.returncode != 0
-    assert "Direct non-interactive main installation requires --commit" in missing.stderr
-
-    moving = subprocess.run(
-        [
-            BOOTSTRAP,
-            "--channel",
-            "stable",
-            "--ref",
-            "main",
-            "--non-interactive",
-            "--domain",
-            "lcc.example.test",
-            "--timezone",
-            "UTC",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert moving.returncode != 0
-    assert "semantic release tag" in moving.stderr
-
-
-def test_piped_main_bootstrap_reexecutes_immutable_stage_before_host_mutation(
-    tmp_path: Path,
-) -> None:
-    revision = "a" * 40
-    stage_log = tmp_path / "stage.log"
-    pinned_bootstrap = tmp_path / "pinned-bootstrap.sh"
-    pinned_bootstrap.write_text(
-        "\n".join(
-            (
-                "#!/usr/bin/env bash",
-                "set -euo pipefail",
-                'printf "%s\\n" "$LCC_BOOTSTRAP_PINNED_REVISION" > "$LCC_STAGE_TEST_LOG"',
-                'printf "%s\\n" "$LCC_BOOTSTRAP_PINNED_REPOSITORY" >> "$LCC_STAGE_TEST_LOG"',
-                'printf "%s\\n" "$@" >> "$LCC_STAGE_TEST_LOG"',
-                "",
-            )
-        )
-    )
-    environment = {
-        **os.environ,
-        "LCC_BOOTSTRAP_TESTING": "1",
-        "LCC_BOOTSTRAP_STAGE_TEST_RESOLVED_SHA": revision,
-        "LCC_BOOTSTRAP_STAGE_TEST_SCRIPT": str(pinned_bootstrap),
-        "LCC_STAGE_TEST_LOG": str(stage_log),
-        "LCC_BOOTSTRAP_TEST_DPKG_AUDIT_FAILURE": "1",
-        "TMPDIR": str(tmp_path),
-    }
-    result = subprocess.run(
-        [
-            "bash",
-            "-s",
-            "--",
-            "--dry-run",
-            "--non-interactive",
-            "--domain",
-            "lcc.example.test",
-            "--app-port",
-            "8123",
-        ],
-        input=BOOTSTRAP.read_text(),
-        check=True,
-        capture_output=True,
-        text=True,
-        env=environment,
-    )
-    assert f"Stage zero resolved main revision: {revision}" in result.stdout
-    assert stage_log.read_text().splitlines() == [
-        revision,
-        "https://github.com/Learning-Control-Center/Learning-Control-Center.git",
-        "--dry-run",
-        "--non-interactive",
-        "--domain",
-        "lcc.example.test",
-        "--app-port",
-        "8123",
-    ]
-    assert not list(tmp_path.glob("lcc-bootstrap-stage.*"))
-
-
-def test_bootstrap_generates_secure_environment_and_hands_off_without_secrets(
-    tmp_path: Path,
-) -> None:
-    repository = _release_repository(tmp_path)
-    asset_root = tmp_path / "assets"
-    _package(repository, asset_root / RELEASE_ID)
-    temporary_root = tmp_path / "bootstrap-temp"
-    temporary_root.mkdir()
-    environment = {
-        **_bootstrap_environment(tmp_path, asset_root),
-        "TMPDIR": str(temporary_root),
-    }
-
-    installed = subprocess.run(
-        _stable_command(),
-        check=True,
-        capture_output=True,
-        text=True,
-        env=environment,
-    )
-    handoff = (tmp_path / "handoff.log").read_text().splitlines()
-    generated = (tmp_path / "generated.env").read_text()
-    values = dict(
-        line.split("=", 1) for line in generated.splitlines() if line and not line.startswith("#")
-    )
-    security_secret = values["LCC_SECURITY_SECRET"]
-    bootstrap_token = values["LCC_BOOTSTRAP_TOKEN"]
-    assert values["LCC_APP_PORT"] == "8000"
-    assert security_secret != bootstrap_token
-    assert len(security_secret) >= 32 and len(bootstrap_token) >= 32
-    assert stat.S_IMODE((tmp_path / "generated.env").stat().st_mode) == 0o600
-    assert (tmp_path / "generated-env.modes").read_text().splitlines() == ["700", "600"]
-    assert handoff[:2] == ["--domain", "lcc.example.test"]
-    assert "--channel" in handoff and "stable" in handoff
-    assert "--release-id" in handoff and RELEASE_ID in handoff
-    assert "--source-revision" in handoff
-    assert "--source-repository" in handoff
-    combined_output = installed.stdout + installed.stderr + "\n".join(handoff)
-    assert security_secret not in combined_output
-    assert bootstrap_token not in combined_output
-    assert f"Verified stable release: {RELEASE_ID}" in installed.stdout
-    assert list(temporary_root.iterdir()) == []
-    assert list((tmp_path / "secret-temp").iterdir()) == []
-
-
-def test_bootstrap_app_port_noninteractive_selection_and_conflicts(tmp_path: Path) -> None:
-    repository = _release_repository(tmp_path)
-    asset_root = tmp_path / "assets"
-    _archive, _checksum, launcher = _package(repository, asset_root / RELEASE_ID)
-
-    custom_root = tmp_path / "custom"
-    custom_root.mkdir()
-    custom_environment = _bootstrap_environment(custom_root, asset_root)
-    custom = subprocess.run(
-        [*_stable_command(), "--app-port", "8123"],
-        check=True,
-        capture_output=True,
-        text=True,
-        env=custom_environment,
-    )
-    assert "LCC_APP_PORT=8123" in (custom_root / "generated.env").read_text()
-    assert "fake installer invoked" in custom.stdout
-
-    occupied_root = tmp_path / "occupied"
-    occupied_root.mkdir()
-    occupied_environment = _bootstrap_environment(occupied_root, asset_root)
-    occupied_environment["LCC_BOOTSTRAP_TEST_OCCUPIED_APP_PORTS"] = "8000"
-    occupied = subprocess.run(
-        _stable_command(),
-        check=False,
-        capture_output=True,
-        text=True,
-        env=occupied_environment,
-    )
-    assert occupied.returncode != 0
-    assert "rerun with --app-port PORT" in occupied.stderr
-    assert "process=test-listener pid=4242" in occupied.stderr
-
-    explicit_root = tmp_path / "explicit-occupied"
-    explicit_root.mkdir()
-    explicit_environment = _bootstrap_environment(explicit_root, asset_root)
-    explicit_environment["LCC_BOOTSTRAP_TEST_OCCUPIED_APP_PORTS"] = "8123"
-    explicit = subprocess.run(
-        [*_stable_command(), "--app-port", "8123"],
-        check=False,
-        capture_output=True,
-        text=True,
-        env=explicit_environment,
-    )
-    assert explicit.returncode != 0
-    assert "Explicitly requested internal application port 8123 is already occupied" in (
-        explicit.stderr
-    )
-
-    environment_file = tmp_path / "operator.env"
-    environment_file.write_text("LCC_APP_PORT=8123\n")
-    conflicting_authorities = subprocess.run(
-        [launcher, "--env-file", environment_file, "--app-port", "8124"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert conflicting_authorities.returncode != 0
-    assert "cannot be combined" in conflicting_authorities.stderr
-
-
-@pytest.mark.skipif(shutil.which("script") is None, reason="PTY helper is unavailable")
-def test_piped_style_interactive_app_port_conflict_reads_from_terminal(tmp_path: Path) -> None:
-    repository = _release_repository(tmp_path)
-    asset_root = tmp_path / "assets"
-    _archive, _checksum, launcher = _package(repository, asset_root / RELEASE_ID)
-    environment = _bootstrap_environment(tmp_path, asset_root)
-    environment["LCC_BOOTSTRAP_TEST_OCCUPIED_APP_PORTS"] = "8000"
-    pipeline = f"cat {shlex.quote(str(launcher))} | bash"
-    result = subprocess.run(
-        ["script", "-qec", pipeline, "/dev/null"],
-        input="\nlcc.example.test\nEurope/Istanbul\ny\n",
-        check=True,
-        capture_output=True,
-        text=True,
-        env=environment,
-    )
-    assert "Internal application port [8001]" in result.stdout
-    assert "Listener: 127.0.0.1:8000" in result.stdout
-    assert "Internal endpoint: 127.0.0.1:8001" in result.stdout
-    assert "LCC_APP_PORT=8001" in (tmp_path / "generated.env").read_text()
-
-
-def test_generated_stable_launcher_is_release_bound_and_rejects_identity_override(
-    tmp_path: Path,
-) -> None:
-    repository = _release_repository(tmp_path)
-    asset_root = tmp_path / "assets"
-    _archive, _checksum, launcher = _package(repository, asset_root / RELEASE_ID)
-    environment = _bootstrap_environment(tmp_path, asset_root)
-    installed = subprocess.run(
-        [
-            launcher,
-            "--domain",
-            "lcc.example.test",
-            "--timezone",
-            "UTC",
-            "--non-interactive",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-        env=environment,
-    )
-    assert f"Verified stable release: {RELEASE_ID}" in installed.stdout
-
-    for arguments in (
-        ["--channel", "main"],
-        ["--ref", "v9.9.9"],
-        ["--commit", "0" * 40],
-        ["--repository-url", "https://example.invalid/repository.git"],
-    ):
-        rejected = subprocess.run(
-            [launcher, *arguments],
-            check=False,
-            capture_output=True,
-            text=True,
-            env=environment,
-        )
-        assert rejected.returncode != 0
-        assert "release-bound install.sh" in rejected.stderr
-
-
-def _write_active_release(
-    root: Path, *, release_id: str, channel: str, revision: str, legacy_v1: bool = False
-) -> None:
-    release = root / "opt" / "learning-control-center" / "releases" / release_id
-    release.mkdir(parents=True)
-    (release / "RELEASE_ID").write_text(f"{release_id}\n")
-    if legacy_v1:
-        revision = "artifact-sha256-" + "a" * 64
-    else:
-        (release / "RELEASE_CHANNEL").write_text(f"{channel}\n")
-    (release / "SOURCE_REVISION").write_text(f"{revision}\n")
-    current = root / "opt" / "learning-control-center" / "current"
-    current.symlink_to(release)
-
-
-def test_release_bound_launcher_rerun_delegates_updates_and_handles_version_order(
-    tmp_path: Path,
-) -> None:
-    repository = _release_repository(tmp_path)
-    asset_root = tmp_path / "assets"
-    _archive, _checksum, launcher = _package(repository, asset_root / RELEASE_ID)
-    target_revision = subprocess.run(
-        ["git", "-C", repository, "rev-parse", "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-
-    older_root = tmp_path / "older-root"
-    _write_active_release(
-        older_root,
-        release_id="v1.0.0",
-        channel="stable",
-        revision="1" * 40,
-        legacy_v1=True,
-    )
-    older_installed_environment = older_root / "etc" / "learning-control-center.env"
-    older_installed_environment.parent.mkdir(parents=True)
-    older_installed_environment.write_text("LCC_APP_PORT=8123\n")
-    (tmp_path / "older").mkdir(exist_ok=True)
-    older_environment = _bootstrap_environment(tmp_path / "older", asset_root)
-    older_environment.update(
-        {
-            "LCC_BOOTSTRAP_INSTALL_ROOT": str(older_root),
-            "LCC_BOOTSTRAP_UPDATE_HANDOFF_LOG": str(tmp_path / "update-handoff.log"),
-        }
-    )
-    updated = subprocess.run(
-        [launcher, "--non-interactive"],
-        check=True,
-        capture_output=True,
-        text=True,
-        env=older_environment,
-    )
-    update_arguments = (tmp_path / "update-handoff.log").read_text().splitlines()
-    assert "apply" in update_arguments
-    assert RELEASE_ID in update_arguments
-    assert target_revision in update_arguments
-    assert "canonical update engine" in updated.stdout
-    assert older_installed_environment.read_text() == "LCC_APP_PORT=8123\n"
-
-    same_root = tmp_path / "same-root"
-    _write_active_release(
-        same_root, release_id=RELEASE_ID, channel="stable", revision=target_revision
-    )
-    installed_environment = same_root / "etc" / "learning-control-center.env"
-    installed_environment.parent.mkdir(parents=True)
-    installed_environment.write_text("LCC_APP_PORT=8123\n")
-    (tmp_path / "same").mkdir(exist_ok=True)
-    same_environment = _bootstrap_environment(tmp_path / "same", asset_root)
-    same_environment["LCC_BOOTSTRAP_INSTALL_ROOT"] = str(same_root)
-    same = subprocess.run(
-        [launcher, "--non-interactive"],
-        check=True,
-        capture_output=True,
-        text=True,
-        env=same_environment,
-    )
-    assert same.stdout.strip().endswith("Learning Control Center is already up to date.")
-    assert installed_environment.read_text() == "LCC_APP_PORT=8123\n"
-    rejected_port_change = subprocess.run(
-        [launcher, "--non-interactive", "--app-port", "8124"],
-        check=False,
-        capture_output=True,
-        text=True,
-        env=same_environment,
-    )
-    assert rejected_port_change.returncode != 0
-    assert "sudo lcc-admin app-port set 8124" in rejected_port_change.stderr
-    assert installed_environment.read_text() == "LCC_APP_PORT=8123\n"
-
-    newer_root = tmp_path / "newer-root"
-    _write_active_release(newer_root, release_id="v1.0.2", channel="stable", revision="2" * 40)
-    (tmp_path / "newer").mkdir(exist_ok=True)
-    newer_environment = _bootstrap_environment(tmp_path / "newer", asset_root)
-    newer_environment["LCC_BOOTSTRAP_INSTALL_ROOT"] = str(newer_root)
-    refused = subprocess.run(
-        [launcher, "--non-interactive"],
-        check=False,
-        capture_output=True,
-        text=True,
-        env=newer_environment,
-    )
-    assert refused.returncode != 0
-    assert "rollback workflow for downgrades" in refused.stderr
-
-
-def test_release_bound_launcher_requires_explicit_main_to_stable_channel_change(
-    tmp_path: Path,
-) -> None:
-    repository = _release_repository(tmp_path)
-    asset_root = tmp_path / "assets"
-    _archive, _checksum, launcher = _package(repository, asset_root / RELEASE_ID)
-    root = tmp_path / "main-root"
-    _write_active_release(
-        root,
-        release_id=f"main-{'3' * 40}",
-        channel="main",
-        revision="3" * 40,
-    )
-    (tmp_path / "main-installed").mkdir(exist_ok=True)
-    environment = _bootstrap_environment(tmp_path / "main-installed", asset_root)
-    environment.update(
-        {
-            "LCC_BOOTSTRAP_INSTALL_ROOT": str(root),
-            "LCC_BOOTSTRAP_UPDATE_HANDOFF_LOG": str(tmp_path / "channel-handoff.log"),
-        }
-    )
-    refused = subprocess.run(
-        [launcher, "--non-interactive"],
-        check=False,
-        capture_output=True,
-        text=True,
-        env=environment,
-    )
-    assert refused.returncode != 0
-    assert "requires --confirm-channel-change" in refused.stderr
-
-    accepted = subprocess.run(
-        [launcher, "--non-interactive", "--confirm-channel-change"],
-        check=True,
-        capture_output=True,
-        text=True,
-        env=environment,
-    )
-    assert "canonical update engine" in accepted.stdout
-    assert (tmp_path / "channel-handoff.log").read_text().splitlines()[-1] == (
-        "--confirm-channel-change"
-    )
-
-
-@pytest.mark.skipif(shutil.which("script") is None, reason="PTY helper is unavailable")
-def test_generated_stable_launcher_prompts_only_for_host_timezone_and_confirmation(
-    tmp_path: Path,
-) -> None:
-    repository = _release_repository(tmp_path)
-    asset_root = tmp_path / "assets"
-    _archive, _checksum, launcher = _package(repository, asset_root / RELEASE_ID)
-    environment = _bootstrap_environment(tmp_path, asset_root)
-    result = subprocess.run(
-        ["script", "-qec", shlex.quote(str(launcher)), "/dev/null"],
-        input="lcc.example.test\nEurope/Istanbul\ny\n",
-        check=True,
-        capture_output=True,
-        text=True,
-        env=environment,
-    )
-    assert "Public hostname" in result.stdout
-    assert "Application timezone" in result.stdout
-    assert "Continue with this stable installation?" in result.stdout
-    assert "LCC_SECURITY_SECRET" not in result.stdout
-    assert "LCC_BOOTSTRAP_TOKEN" not in result.stdout
-    generated = (tmp_path / "generated.env").read_text()
-    secrets = [
-        line.split("=", 1)[1]
-        for line in generated.splitlines()
-        if line.startswith(("LCC_SECURITY_SECRET=", "LCC_BOOTSTRAP_TOKEN="))
-    ]
-    assert all(secret not in result.stdout + result.stderr for secret in secrets)
-    assert (tmp_path / "handoff.log").is_file()
-
-
-def test_bootstrap_rejects_checksum_mismatch(tmp_path: Path) -> None:
-    repository = _release_repository(tmp_path)
-    asset_root = tmp_path / "assets"
-    archive, _checksum, _install = _package(repository, asset_root / RELEASE_ID)
-    archive.write_bytes(archive.read_bytes() + b"tampered")
-    result = subprocess.run(
-        _stable_command(dry_run=True),
-        check=False,
-        capture_output=True,
-        text=True,
-        env=_bootstrap_environment(tmp_path, asset_root),
-    )
-    assert result.returncode != 0
-    assert "SHA-256 verification failed" in result.stderr
-
-
-def test_bootstrap_rejects_archive_traversal_and_duplicate_members(tmp_path: Path) -> None:
-    asset_root = tmp_path / "assets"
-    release_assets = asset_root / RELEASE_ID
-    release_assets.mkdir(parents=True)
-    archive = release_assets / ARCHIVE_NAME
-    payload = b"unsafe"
-    with tarfile.open(archive, "w:gz") as bundle:
-        member = tarfile.TarInfo(f"Learning-Control-Center-{RELEASE_ID}/../../escape")
-        member.size = len(payload)
-        bundle.addfile(member, io.BytesIO(payload))
-    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-    (release_assets / CHECKSUM_NAME).write_text(f"{digest}  {ARCHIVE_NAME}\n")
-    result = subprocess.run(
-        _stable_command(dry_run=True),
-        check=False,
-        capture_output=True,
-        text=True,
-        env=_bootstrap_environment(tmp_path, asset_root),
-    )
-    assert result.returncode != 0
-    assert "unsafe release path" in result.stderr
-    assert not (tmp_path / "escape").exists()
-
-    with tarfile.open(archive, "w:gz") as bundle:
-        for _ in range(2):
-            member = tarfile.TarInfo(f"Learning-Control-Center-{RELEASE_ID}/duplicate")
-            member.size = len(payload)
-            bundle.addfile(member, io.BytesIO(payload))
-    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-    (release_assets / CHECKSUM_NAME).write_text(f"{digest}  {ARCHIVE_NAME}\n")
-    duplicate = subprocess.run(
-        _stable_command(dry_run=True),
-        check=False,
-        capture_output=True,
-        text=True,
-        env=_bootstrap_environment(tmp_path, asset_root),
-    )
-    assert duplicate.returncode != 0
-    assert "duplicate release path" in duplicate.stderr
-
-    with tarfile.open(archive, "w:gz") as bundle:
-        member = tarfile.TarInfo(f"Learning-Control-Center-{RELEASE_ID}/unsafe-link")
-        member.type = tarfile.SYMTYPE
-        member.linkname = "/etc/passwd"
-        bundle.addfile(member)
-    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-    (release_assets / CHECKSUM_NAME).write_text(f"{digest}  {ARCHIVE_NAME}\n")
-    unsafe_type = subprocess.run(
-        _stable_command(dry_run=True),
-        check=False,
-        capture_output=True,
-        text=True,
-        env=_bootstrap_environment(tmp_path, asset_root),
-    )
-    assert unsafe_type.returncode != 0
-    assert "unsupported release member type" in unsafe_type.stderr
-
-    with tarfile.open(archive, "w:gz") as bundle:
-        member = tarfile.TarInfo(f"Learning-Control-Center-{RELEASE_ID}/oversized")
-        member.size = len(payload)
-        bundle.addfile(member, io.BytesIO(payload))
-    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-    (release_assets / CHECKSUM_NAME).write_text(f"{digest}  {ARCHIVE_NAME}\n")
-    size_environment = _bootstrap_environment(tmp_path, asset_root)
-    size_environment["LCC_BOOTSTRAP_TEST_MAXIMUM_UNPACKED_BYTES"] = "5"
-    oversized = subprocess.run(
-        _stable_command(dry_run=True),
-        check=False,
-        capture_output=True,
-        text=True,
-        env=size_environment,
-    )
-    assert oversized.returncode != 0
-    assert "maximum unpacked size" in oversized.stderr
-
-
-def test_main_non_interactive_resolves_exact_sha_and_rejects_mismatch(tmp_path: Path) -> None:
-    repository = _release_repository(tmp_path)
-    revision = subprocess.run(
-        ["git", "-C", repository, "rev-parse", "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    environment = _bootstrap_environment(tmp_path)
-    environment["LCC_BOOTSTRAP_REPOSITORY_URL"] = str(repository)
-    environment["LCC_BOOTSTRAP_TEST_MISSING_PACKAGES"] = "git"
-    environment["LCC_BOOTSTRAP_APT_LOG"] = str(tmp_path / "main-apt.log")
-    command = [
-        BOOTSTRAP,
-        "--commit",
-        revision,
-        "--domain",
-        "lcc.example.test",
-        "--timezone",
-        "UTC",
-        "--non-interactive",
-    ]
-    installed = subprocess.run(
-        command,
-        check=True,
-        capture_output=True,
-        text=True,
-        env=environment,
-    )
-    handoff = (tmp_path / "handoff.log").read_text().splitlines()
-    assert "latest validated code, resolved to an exact commit" in installed.stdout
-    assert f"Resolved main revision: {revision}" in installed.stdout
-    channel_index = handoff.index("--channel")
-    assert handoff[channel_index : channel_index + 2] == ["--channel", "main"]
-    assert f"main-{revision}" in handoff
-    assert revision in handoff
-    assert "refs/heads/main" in handoff
-    assert (tmp_path / "main-apt.log").read_text().splitlines() == ["update", "install git"]
-
-    mismatch_command = command.copy()
-    mismatch_command[mismatch_command.index("--commit") + 1] = "0" * 40
-    mismatch = subprocess.run(
-        mismatch_command,
-        check=False,
-        capture_output=True,
-        text=True,
-        env=environment,
-    )
-    assert mismatch.returncode != 0
-    assert "not expected commit" in mismatch.stderr
-
-
-def test_main_first_bootstrap_rerun_noops_updates_and_requires_release_migration_opt_in(
-    tmp_path: Path,
-) -> None:
-    repository = _release_repository(tmp_path)
-    revision = subprocess.run(
-        ["git", "-C", repository, "rev-parse", "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-
-    same_root = tmp_path / "same-root"
-    _write_active_release(
-        same_root,
-        release_id=f"main-{revision}",
-        channel="main",
-        revision=revision,
-    )
-    same_case = tmp_path / "same-case"
-    same_case.mkdir()
-    same_environment = _bootstrap_environment(same_case)
-    same_environment.update(
-        {
-            "LCC_BOOTSTRAP_REPOSITORY_URL": str(repository),
-            "LCC_BOOTSTRAP_INSTALL_ROOT": str(same_root),
-        }
-    )
-    command = [BOOTSTRAP, "--commit", revision, "--non-interactive"]
-    same = subprocess.run(
-        command,
-        check=True,
-        capture_output=True,
-        text=True,
-        env=same_environment,
-    )
-    assert same.stdout.strip().endswith("Learning Control Center is already up to date.")
-    assert not (same_case / "handoff.log").exists()
-
-    changed_root = tmp_path / "changed-root"
-    previous_revision = "1" * 40
-    _write_active_release(
-        changed_root,
-        release_id=f"main-{previous_revision}",
-        channel="main",
-        revision=previous_revision,
-    )
-    changed_case = tmp_path / "changed-case"
-    changed_case.mkdir()
-    changed_environment = _bootstrap_environment(changed_case)
-    update_handoff = changed_case / "update-handoff.log"
-    changed_environment.update(
-        {
-            "LCC_BOOTSTRAP_REPOSITORY_URL": str(repository),
-            "LCC_BOOTSTRAP_INSTALL_ROOT": str(changed_root),
-            "LCC_BOOTSTRAP_UPDATE_HANDOFF_LOG": str(update_handoff),
-        }
-    )
-    changed = subprocess.run(
-        command,
-        check=True,
-        capture_output=True,
-        text=True,
-        env=changed_environment,
-    )
-    changed_arguments = update_handoff.read_text().splitlines()
-    assert "canonical update engine" in changed.stdout
-    assert "apply" in changed_arguments
-    assert f"main-{revision}" in changed_arguments
-    assert revision in changed_arguments
-    assert "--confirm-channel-change" not in changed_arguments
-
-    release_root = tmp_path / "release-root"
-    _write_active_release(
-        release_root,
-        release_id="v1.0.0",
-        channel="stable",
-        revision="2" * 40,
-        legacy_v1=True,
-    )
-    release_case = tmp_path / "release-case"
-    release_case.mkdir()
-    release_environment = _bootstrap_environment(release_case)
-    release_handoff = release_case / "update-handoff.log"
-    release_environment.update(
-        {
-            "LCC_BOOTSTRAP_REPOSITORY_URL": str(repository),
-            "LCC_BOOTSTRAP_INSTALL_ROOT": str(release_root),
-            "LCC_BOOTSTRAP_UPDATE_HANDOFF_LOG": str(release_handoff),
-        }
-    )
-    refused = subprocess.run(
-        command,
-        check=False,
-        capture_output=True,
-        text=True,
-        env=release_environment,
-    )
-    assert refused.returncode != 0
-    assert "requires --confirm-channel-change" in refused.stderr
-
-    migrated = subprocess.run(
-        [*command, "--confirm-channel-change"],
-        check=True,
-        capture_output=True,
-        text=True,
-        env=release_environment,
-    )
-    assert "channel=stable release=v1.0.0" in migrated.stdout
-    assert f"Resolved main revision: {revision}" in migrated.stdout
-    assert release_handoff.read_text().splitlines()[-1] == "--confirm-channel-change"
-
-
-def test_main_default_and_pinned_release_have_unambiguous_cli_contract() -> None:
-    cases = (
-        (["--non-interactive"], "requires --commit"),
-        (["--ref", RELEASE_ID], "only with --channel stable"),
-        (
-            ["--channel", "stable", "--ref", RELEASE_ID, "--commit", "0" * 40],
-            "only with --channel main",
-        ),
-        (
-            ["--channel", "main", "--asset-base-url", "https://example.test"],
-            "only with --channel stable",
-        ),
-        (
-            [
-                "--channel",
-                "stable",
-                "--ref",
-                RELEASE_ID,
-                "--repository-url",
-                "https://example.test/repo.git",
-            ],
-            "only with --channel main",
-        ),
-    )
-    for arguments, message in cases:
-        result = subprocess.run(
-            [BOOTSTRAP, *arguments],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        assert result.returncode != 0
-        assert message in result.stderr
-
-
-@pytest.mark.skipif(shutil.which("script") is None, reason="PTY helper is unavailable")
-def test_interactive_main_uses_normal_explicit_confirmation(tmp_path: Path) -> None:
-    repository = _release_repository(tmp_path)
-    environment = _bootstrap_environment(tmp_path)
-    environment["LCC_BOOTSTRAP_REPOSITORY_URL"] = str(repository)
-    command = [BOOTSTRAP]
-    rejected = subprocess.run(
-        ["script", "-qec", shlex.join(str(item) for item in command), "/dev/null"],
-        input="NO\n",
-        check=False,
-        capture_output=True,
-        text=True,
-        env=environment,
-    )
-    assert rejected.returncode != 0
-    assert "Continue? [y/N]" in rejected.stdout
-    assert "Main installation was not confirmed" in rejected.stdout
-    assert not (tmp_path / "handoff.log").exists()
-    assert list((tmp_path / "secret-temp").iterdir()) == []
-    bootstrap_source = (REPOSITORY_ROOT / "scripts" / "bootstrap-ubuntu.sh").read_text()
-    assert bootstrap_source.index("Current main — latest validated code") < bootstrap_source.index(
-        'checkout --quiet --detach "$source_revision"'
-    )
-
-    accepted = subprocess.run(
-        ["script", "-qec", shlex.join(str(item) for item in command), "/dev/null"],
-        input="y\nlcc.example.test\nUTC\n",
-        check=True,
-        capture_output=True,
-        text=True,
-        env=environment,
-    )
-    assert "Learning Control Center installation summary" in accepted.stdout
-    assert (tmp_path / "handoff.log").is_file()
-
-    changed_root = tmp_path / "changed-root"
-    previous_revision = "9" * 40
-    _write_active_release(
-        changed_root,
-        release_id=f"main-{previous_revision}",
-        channel="main",
-        revision=previous_revision,
-    )
-    changed_case = tmp_path / "changed"
-    changed_case.mkdir()
-    changed_environment = _bootstrap_environment(changed_case)
-    changed_environment.update(
-        {
-            "LCC_BOOTSTRAP_REPOSITORY_URL": str(repository),
-            "LCC_BOOTSTRAP_INSTALL_ROOT": str(changed_root),
-            "LCC_BOOTSTRAP_UPDATE_HANDOFF_LOG": str(tmp_path / "changed-handoff.log"),
-        }
-    )
-    changed = subprocess.run(
-        ["script", "-qec", shlex.join(str(item) for item in command), "/dev/null"],
-        input="y\n",
-        check=True,
-        capture_output=True,
-        text=True,
-        env=changed_environment,
-    )
-    current_revision = subprocess.run(
-        ["git", "-C", repository, "rev-parse", "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    assert f"Current source SHA: {previous_revision}" in changed.stdout
-    assert f"Target source SHA: {current_revision}" in changed.stdout
-    assert "Delegating immutable target" in changed.stdout
-
-
-def test_external_environment_file_must_be_regular_private_and_not_a_symlink(
-    tmp_path: Path,
-) -> None:
-    regular = tmp_path / "operator.env"
-    regular.write_text("safe\n")
-    regular.chmod(0o644)
-    link = tmp_path / "operator-link.env"
-    link.symlink_to(regular)
-    common = REPOSITORY_ROOT / "scripts" / "deploy-common.sh"
-    command = [
-        "bash",
-        "-c",
-        'source "$1"; lcc_validate_environment_file_security "$2" 0 "$(id -u)"',
-        "env-security-test",
-        str(common),
-    ]
-    exposed = subprocess.run([*command, str(regular)], check=False, capture_output=True, text=True)
-    assert exposed.returncode != 0
-    assert "must not grant group or other permissions" in exposed.stderr
-    regular.chmod(0o600)
-    symlinked = subprocess.run([*command, str(link)], check=False, capture_output=True, text=True)
-    assert symlinked.returncode != 0
-    assert "must not be a symbolic link" in symlinked.stderr
-
-    unsafe_parent = tmp_path / "replaceable"
-    unsafe_parent.mkdir(mode=0o777)
-    unsafe_parent.chmod(0o777)
-    nested = unsafe_parent / "operator.env"
-    nested.write_text("safe\n")
-    nested.chmod(0o600)
-    replaceable = subprocess.run(
-        [*command, str(nested)], check=False, capture_output=True, text=True
-    )
-    assert replaceable.returncode != 0
-    assert "parent directories" in replaceable.stderr
-
-
 def test_production_source_urls_require_explicit_credential_free_https() -> None:
     common = REPOSITORY_ROOT / "scripts" / "deploy-common.sh"
 
@@ -1694,6 +656,9 @@ def test_public_repository_assets_and_metadata_are_consistent() -> None:
         "docs/PRODUCT_QA.md",
         "docs/RELEASING.md",
         "scripts/bootstrap-ubuntu.sh",
+        "scripts/bootstrap.sh",
+        "scripts/release-bootstrap.sh",
+        "scripts/install.sh",
         "scripts/generate-production-env.sh",
         "scripts/package-release.sh",
         "scripts/prepare-public-promotion.sh",
