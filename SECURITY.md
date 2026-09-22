@@ -27,7 +27,13 @@ LCC does not update itself in the background. Ubuntu packages use the host's con
 authentication, candidate selection, and pinning policy; LCC never bypasses package authentication
 or edits repository/key definitions to install itself. Production secrets are root-controlled, the
 application service runs unprivileged and binds only to loopback, and public traffic needs HTTPS
-through managed Caddy or an explicitly configured same-host reverse proxy.
+through managed Caddy or an explicitly configured same-host gateway. The application serves its
+verified frontend and API from one loopback origin. An external gateway forwards the complete
+site; it does not read application files or secrets. Public Host and write Origin checks use only
+the administrator-configured HTTPS public origin. Before one is configured, production accepts
+only loopback Host and no browser write origin. Uvicorn ignores proxy-header scheme rewriting;
+forwarded client addresses are interpreted only from configured loopback proxy hops. External
+gateways, including Cloudflare Tunnel, remain operator-managed.
 
 ## Deployment responsibility
 

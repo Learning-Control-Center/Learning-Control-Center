@@ -98,6 +98,65 @@ lcc_transition_classify_gateway "$3/legacy-release"
     assert main.read_text() == "unrelated config\n"
 
 
+def test_v1_gateway_ownership_uses_the_installed_legacy_template(tmp_path: Path) -> None:
+    release = tmp_path / "legacy-release"
+    (release / "deploy").mkdir(parents=True)
+    (release / "deploy/Caddyfile.template").write_text(
+        "@@LCC_PUBLIC_HOST@@ {\n"
+        "  root * @@LCC_FRONTEND_ROOT@@\n"
+        "  reverse_proxy 127.0.0.1:@@LCC_APP_PORT@@\n"
+        "}\n"
+    )
+    current = tmp_path / "current"
+    current.symlink_to(release)
+    site = tmp_path / "site.caddy"
+    site.write_text(
+        "lcc.example.test {\n"
+        f"  root * {current}/frontend/dist\n"
+        "  reverse_proxy 127.0.0.1:8000\n"
+        "}\n"
+    )
+    main = tmp_path / "Caddyfile"
+    main.write_text("import legacy-site\n")
+    caddy = tmp_path / "caddy"
+    caddy.write_text("#!/bin/sh\nexit 0\n")
+    caddy.chmod(0o755)
+    environment = tmp_path / "lcc.env"
+    generated = subprocess.run(
+        [
+            str(ROOT / "scripts/generate-production-env.sh"),
+            "--root",
+            str(tmp_path / "host"),
+            "--domain",
+            "lcc.example.test",
+            "--timezone",
+            "UTC",
+            "--output",
+            str(environment),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert generated.returncode == 0, generated.stderr
+    script = r"""
+set -euo pipefail
+source "$1"
+source "$2"
+LCC_DEPLOYMENT_STATE_FILE="$3/missing-state"
+LCC_CADDY_SITE="$3/site.caddy"
+LCC_CADDY_MAIN="$3/Caddyfile"
+LCC_CADDY_IMPORT='import legacy-site'
+LCC_CADDY_BINARY="$3/caddy"
+LCC_CURRENT_RELEASE="$3/current"
+lcc_load_environment "$3/lcc.env"
+lcc_transition_classify_gateway "$3/legacy-release"
+"""
+    result = _shell(script, str(tmp_path))
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "caddy"
+
+
 def test_v2_managed_caddy_requires_owned_site_and_import(tmp_path: Path) -> None:
     release = tmp_path / "release"
     release.mkdir()

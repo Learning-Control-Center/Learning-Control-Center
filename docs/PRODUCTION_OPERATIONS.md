@@ -26,7 +26,8 @@ full source SHA before the systemd status.
 
 Production releases also contain `frontend/dist/LCC_FRONTEND_ARTIFACT.json`. It binds the served
 static files to the public frontend build inputs and is verified during acquisition, installation,
-and update. Node.js/npm are not installed or used on the production server.
+and update. The application serves those files and its API from the same loopback port. No gateway
+needs filesystem access to `frontend/dist`. Node.js/npm are not installed or used on the server.
 
 The `lcc` account is a non-login system account. Application releases are read-only to that
 account. Only the data and backup directories are writable. Operational backups contain password
@@ -48,10 +49,13 @@ sudo systemctl enable learning-control-center.service
 ```
 
 The service runs one Uvicorn worker on `127.0.0.1:LCC_APP_PORT`; the default is 8000. Managed Caddy
-or an explicitly selected same-host external proxy provides public TLS. The internal port is stored in the root-owned production
+or an explicitly selected same-host external gateway provides public TLS and forwards the entire
+site to that loopback origin. The internal port is stored in the root-owned production
 environment and is never a configurable bind address.
 Uvicorn proxy-header rewriting stays disabled; LCC accepts forwarded client addresses only from the
-configured loopback proxy CIDR. Standard output and errors go to journald.
+configured loopback proxy CIDR. The public Host and exact HTTPS Origin are checked against
+administrator-controlled configuration; an unconfigured origin permits only loopback Host and no
+browser writes. Standard output and errors go to journald.
 
 Managed gateway mode uses a compatible package-managed Caddy service and imports only the LCC site
 file into the administrator's main Caddyfile. It does not expose the application environment to
@@ -76,6 +80,8 @@ sudo lcc-admin health
 sudo lcc-admin logs 200
 sudo lcc-admin app-port
 sudo lcc-admin app-port set 8123
+sudo lcc-admin public-origin
+sudo lcc-admin public-origin set https://lcc.example.com
 sudo /opt/learning-control-center/update.sh
 # Exact thin alias to the same updater:
 sudo lcc-admin update
@@ -97,6 +103,14 @@ In external mode the operator must coordinate the proxy upstream; automation req
 without mutation; `--yes` enables deliberate automation. Any activation failure restores the old
 environment, Caddy site, service port, and health path. Recovery artifacts are retained with a
 prominent path only if automatic rollback itself cannot complete.
+
+`lcc-admin public-origin set HTTPS_ORIGIN` validates an HTTPS DNS origin without a path, query, or
+fragment; `--dry-run` checks the staged change and `--yes` permits non-interactive confirmation.
+It atomically updates the public origin and its derived allowed Host/Origin lists. External mode
+restarts LCC and checks internal health, then reports public health separately; it never edits the
+operator's tunnel or proxy. Managed mode also stages and validates the complete Caddy config,
+changes the LCC-owned hostname, reloads Caddy, and requires public HTTPS health. On failure it
+restores the prior environment and managed Caddy configuration and verifies recovery.
 
 Startup holds an exclusive database-operation lock, upgrades the configured database to Alembic
 head, verifies the production bootstrap/single-user invariant, recovers projection work, backfills
@@ -158,7 +172,8 @@ The administrator tool stops the backup timer for the operation and refuses to c
 a backup is running. The restore command validates integrity, foreign keys, supported migration
 revision, and the single-user invariant; creates a pre-restore backup; upgrades a supported older
 backup in staging; installs it atomically; increments credential generation; and revokes every
-restored session. It then starts LCC and checks the public HTTPS health endpoint.
+restored session. It then starts LCC and checks internal health; managed Caddy also requires public
+HTTPS health.
 
 Portable JSON restore is a separate authenticated application workflow. Never pass a portable JSON
 package to the SQLite restore command.

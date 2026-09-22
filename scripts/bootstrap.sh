@@ -19,7 +19,7 @@ note() { printf 'lcc-bootstrap-v2: %s\n' "$*"; }
 
 usage() {
     cat <<'EOF'
-Usage: bootstrap.sh [--domain HOST] [--timezone ZONE] [--app-port PORT]
+Usage: bootstrap.sh [--domain HOST|--public-origin HTTPS_ORIGIN] [--timezone ZONE] [--app-port PORT]
                     [--gateway caddy|external] [--non-interactive] [--yes]
 
 Install or update from public GitHub main, selected once by full commit SHA.

@@ -165,7 +165,7 @@ EOF
 
 required_paths=(
     CHANGELOG.md README.md LICENSE SECURITY.md logo.png alembic.ini pyproject.toml
-    requirements-production.lock backend/app/main.py backend/alembic/env.py
+    requirements-production.lock backend/app/main.py backend/app/frontend.py backend/alembic/env.py
     deploy/Caddyfile.template deploy/examples/installer-v2-external-nginx.conf
     deploy/learning-control-center.env.example
     deploy/learning-control-center-update.sh

@@ -48,7 +48,6 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
 PY
 )"
 export LCC_APP_PORT
-export LCC_FRONTEND_ROOT="$repository_root/frontend/dist"
 export LCC_E2E_BASE_URL=https://localhost:8443
 export XDG_DATA_HOME="$run_directory/caddy-data"
 export XDG_CONFIG_HOME="$run_directory/caddy-config"
@@ -83,6 +82,9 @@ for _attempt in $(seq 1 60); do
     sleep 0.25
 done
 curl --silent --fail --insecure https://localhost:8443/api/v1/health >/dev/null
+curl --silent --fail --header 'Host: localhost' "http://127.0.0.1:$LCC_APP_PORT/" | grep -q 'Learning Control Center'
+curl --silent --fail --insecure https://localhost:8443/ | grep -q 'Learning Control Center'
+curl --silent --fail --insecure https://localhost:8443/roadmap/overview | grep -q 'Learning Control Center'
 "$repository_root/scripts/operational-backup.sh"
 live_backup="$(find "$LCC_BACKUP_DIRECTORY" -maxdepth 1 -name 'lcc-scheduled-*.sqlite3' -print -quit)"
 if "$repository_root/.venv/bin/python" -m app.ops restore --from "$live_backup" >"$run_directory/live-restore.log" 2>&1; then

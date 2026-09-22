@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,6 +29,7 @@ from app.curriculum.api import router as curriculum_router
 from app.database import SessionLocal, initialize_database, run_migrations
 from app.errors import install_error_handlers
 from app.evidence import router as evidence_router
+from app.frontend import FRONTEND_CSP, install_frontend_routes
 from app.import_export import router as import_export_router
 from app.learning_graph import models as learning_graph_models  # noqa: F401
 from app.learning_graph.api import router as learning_graph_router
@@ -150,7 +152,12 @@ async def security_boundary(
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
-    response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
+    if request.scope.get("lcc_frontend"):
+        response.headers["Content-Security-Policy"] = FRONTEND_CSP
+    else:
+        response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
+    if settings.environment == "production":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     if request.url.path.startswith("/api/v1/auth"):
         response.headers["Cache-Control"] = "no-store"
     return response
@@ -191,3 +198,5 @@ app.include_router(analysis_v3_router, prefix="/api/v2")
 app.include_router(recommendation_v2_router, prefix="/api/v2")
 app.include_router(today_router, prefix="/api/v2")
 app.include_router(authority_router, prefix="/api/v2")
+
+install_frontend_routes(app, Path(__file__).resolve().parents[2])

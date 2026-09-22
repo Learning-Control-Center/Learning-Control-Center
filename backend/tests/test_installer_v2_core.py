@@ -277,7 +277,7 @@ def test_default_port_and_symlinked_owned_path(tmp_path: Path) -> None:
     assert "LCC_APP_PORT=8000" in (destination / "etc/learning-control-center.env").read_text()
 
 
-def test_noninteractive_needs_domain_and_core_has_no_caddy_or_git_install() -> None:
+def test_noninteractive_core_has_no_domain_caddy_or_git_requirement() -> None:
     script = INSTALLER.read_text()
     assert "lcc_ubuntu_provision_core" in script
     assert "lcc_wait_for_internal_health" in script
@@ -287,9 +287,11 @@ def test_noninteractive_needs_domain_and_core_has_no_caddy_or_git_install() -> N
     assert "git clone" not in script
 
 
-def test_noninteractive_missing_decision_creates_no_state(tmp_path: Path) -> None:
+def test_noninteractive_core_without_domain_is_pending(tmp_path: Path) -> None:
     destination = tmp_path / "host"
     result = _run(destination, "--non-interactive")
-    assert result.returncode != 0
-    assert "--domain is required" in result.stderr
-    assert not destination.exists()
+    assert result.returncode == 0, result.stderr
+    environment = (destination / "etc/learning-control-center.env").read_text()
+    assert "LCC_PUBLIC_ORIGIN=\n" in environment
+    assert "LCC_ALLOWED_ORIGINS='[]'" in environment
+    assert "LCC_ALLOWED_HOSTS='[\"127.0.0.1\"]'" in environment

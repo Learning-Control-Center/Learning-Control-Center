@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 import subprocess
 from pathlib import Path
@@ -111,7 +112,7 @@ def test_external_gateway_layout_and_same_sha_repeat(tmp_path: Path) -> None:
     assert first.returncode == 0, first.stderr
     assert "Public gateway/TLS: pending" in first.stdout
     assert "http://127.0.0.1:8123" in first.stdout
-    assert "Proxy /api/*" in first.stdout
+    assert "Forward the entire site" in first.stdout
     state = destination / "etc/learning-control-center.deployment"
     assert state.read_text() == "format_version=1\ngateway=external\n"
     assert not (destination / "etc/caddy").exists()
@@ -176,7 +177,7 @@ lcc_verify_managed_caddy() { return 0; }
 lcc_gateway_listener_conflict() { return 1; }
 lcc_render_caddy_site() {
     test "${FAIL_MODE:-none}" != render || return 1
-    printf 'lcc.example.test { reverse_proxy 127.0.0.1:8000 }\\n' > "$3"
+    printf 'lcc.example.test { reverse_proxy 127.0.0.1:8000 }\\n' > "$2"
 }
 lcc_effective_app_port() { echo 8000; }
 lcc_wait_for_internal_health() { test "${FAIL_MODE:-none}" != internal; }
@@ -301,13 +302,235 @@ lcc_install_managed_caddy "$4" ""
     assert not marker.exists()
 
 
-def test_external_nginx_example_preserves_api_prefix_and_spa_fallback() -> None:
+def test_external_nginx_example_proxies_the_entire_site() -> None:
     example = (ROOT / "deploy/examples/installer-v2-external-nginx.conf").read_text()
     assert "proxy_pass http://127.0.0.1:8000;" in example
     assert "proxy_set_header Host $host;" in example
     assert "proxy_set_header X-Forwarded-For $remote_addr;" in example
-    assert "try_files $uri $uri/ /index.html;" in example
+    assert "location / {" in example
+    assert "try_files" not in example
+    assert "root /opt/" not in example
+    assert "location /api/" not in example
     assert "/etc/learning-control-center.env" not in example
+
+
+def test_external_noninteractive_install_defers_public_origin(tmp_path: Path) -> None:
+    destination = tmp_path / "host"
+    result = _install(destination, "--gateway", "external", "--non-interactive")
+    assert result.returncode == 0, result.stderr
+    assert "Public origin: not configured (pending)" in result.stdout
+    environment = (destination / "etc/learning-control-center.env").read_text()
+    assert "LCC_PUBLIC_ORIGIN=\n" in environment
+    assert "LCC_ALLOWED_ORIGINS='[]'" in environment
+    assert "LCC_ALLOWED_HOSTS='[\"127.0.0.1\"]'" in environment
+
+
+def test_external_noninteractive_install_accepts_explicit_https_origin(tmp_path: Path) -> None:
+    destination = tmp_path / "host"
+    result = _install(
+        destination,
+        "--gateway",
+        "external",
+        "--non-interactive",
+        "--public-origin",
+        "https://lcc.example.test:8443",
+    )
+    assert result.returncode == 0, result.stderr
+    environment = (destination / "etc/learning-control-center.env").read_text()
+    assert "LCC_PUBLIC_ORIGIN=https://lcc.example.test:8443" in environment
+    assert "LCC_ALLOWED_ORIGINS='[\"https://lcc.example.test:8443\"]'" in environment
+    assert "LCC_ALLOWED_HOSTS='[\"lcc.example.test\"]'" in environment
+
+
+def test_existing_external_origin_cannot_be_overridden_by_install_argument(tmp_path: Path) -> None:
+    destination = tmp_path / "host"
+    first = _install(destination, "--gateway", "external", "--domain", "lcc.example.test")
+    assert first.returncode == 0, first.stderr
+    environment = destination / "etc/learning-control-center.env"
+    original = environment.read_bytes()
+    attempted = _install(
+        destination,
+        "--gateway",
+        "external",
+        "--public-origin",
+        "https://lcc.example.test:8443",
+    )
+    assert attempted.returncode != 0
+    assert "Public origin differs from existing configuration" in attempted.stderr
+    assert environment.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "http://lcc.example.test",
+        "https://*.example.test",
+        "https://lcc.example.test/path",
+        "https://user@lcc.example.test",
+        "https://lcc.example.test?x=1",
+        "https://lcc.example.test#fragment",
+        "https://lcc.example.test:bad",
+        "https://lcc.example.test:0",
+        "https://lcc.example.test\nINJECTED=1",
+        " HTTPS://lcc.example.test",
+    ],
+)
+def test_public_origin_command_validation_rejects_unsafe_values(origin: str) -> None:
+    result = _shell('set -euo pipefail; source "$1"; lcc_validate_public_origin "$3"', origin)
+    assert result.returncode != 0
+
+
+@pytest.mark.parametrize("mode", ["dry-run", "success", "internal-failure"])
+def test_external_public_origin_transaction_is_app_owned(tmp_path: Path, mode: str) -> None:
+    root = tmp_path / "host"
+    current = root / "opt/learning-control-center/current"
+    release = current.parent / "releases/test"
+    release.mkdir(parents=True)
+    current.symlink_to(release)
+    environment = root / "etc/learning-control-center.env"
+    environment.parent.mkdir(parents=True)
+    generated = subprocess.run(
+        [
+            str(ROOT / "scripts/generate-production-env.sh"),
+            "--root",
+            str(root),
+            "--timezone",
+            "UTC",
+            "--output",
+            str(environment),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert generated.returncode == 0, generated.stderr
+    original = environment.read_bytes()
+    unrelated = tmp_path / "cloudflared.yml"
+    unrelated.write_text("operator-owned tunnel\n")
+    script = """
+set -euo pipefail
+source "$1"
+LCC_ENVIRONMENT_FILE="$3"
+LCC_CURRENT_RELEASE="$4"
+LCC_TRANSACTION_DIRECTORY_PARENT="$5"
+lcc_install_environment_file() { install -m 0640 "$1" "$2.next"; mv -f "$2.next" "$2"; }
+systemctl() { return 0; }
+lcc_wait_for_internal_health() {
+    test "${PUBLIC_MODE:-success}" != internal-failure || test -z "${LCC_PUBLIC_ORIGIN:-}"
+}
+lcc_wait_for_health() { return 1; }
+lcc_load_environment "$LCC_ENVIRONMENT_FILE"
+lcc_validate_environment "$LCC_CURRENT_RELEASE"
+lcc_apply_public_origin_change https://lcc.example.test external "$6"
+"""
+    result = _shell(
+        script,
+        str(environment),
+        str(current),
+        str(tmp_path),
+        "1" if mode == "dry-run" else "0",
+        environment={"PUBLIC_MODE": mode},
+    )
+    assert unrelated.read_text() == "operator-owned tunnel\n"
+    if mode == "success":
+        assert result.returncode == 0, result.stderr
+        assert "LCC_PUBLIC_ORIGIN=https://lcc.example.test" in environment.read_text()
+        assert "pending operator verification" in result.stdout
+    else:
+        assert environment.read_bytes() == original
+        assert result.returncode == (0 if mode == "dry-run" else 1), result.stderr
+
+
+@pytest.mark.parametrize("mode", ["dry-run", "success", "public-failure"])
+def test_managed_public_origin_transaction_restores_owned_site_on_failure(
+    tmp_path: Path, mode: str
+) -> None:
+    root = tmp_path / "host"
+    current = root / "opt/learning-control-center/current"
+    release = current.parent / "releases/test"
+    (release / "deploy").mkdir(parents=True)
+    shutil.copy2(ROOT / "deploy/Caddyfile.template", release / "deploy/Caddyfile.template")
+    current.symlink_to(release)
+    environment = root / "etc/learning-control-center.env"
+    environment.parent.mkdir(parents=True)
+    generated = subprocess.run(
+        [
+            str(ROOT / "scripts/generate-production-env.sh"),
+            "--root",
+            str(root),
+            "--domain",
+            "old.example.test",
+            "--timezone",
+            "UTC",
+            "--output",
+            str(environment),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert generated.returncode == 0, generated.stderr
+    site = root / "etc/caddy/Caddyfile.d/learning-control-center.caddy"
+    site.parent.mkdir(parents=True)
+    site.write_text(
+        "# Managed by Learning Control Center Installer V2\n"
+        + (ROOT / "deploy/Caddyfile.template")
+        .read_text()
+        .replace("@@LCC_PUBLIC_HOST@@", "old.example.test")
+        .replace("@@LCC_APP_PORT@@", "8000")
+    )
+    main = root / "etc/caddy/Caddyfile"
+    main.write_text(f"unrelated.example.test {{ respond 'unrelated' }}\nimport {site}\n")
+    fake_caddy = tmp_path / "caddy"
+    fake_caddy.write_text("#!/bin/sh\nexit 0\n")
+    fake_caddy.chmod(0o755)
+    old_environment, old_site, old_main = (
+        environment.read_bytes(),
+        site.read_bytes(),
+        main.read_bytes(),
+    )
+    script = """
+set -euo pipefail
+source "$1"
+LCC_ENVIRONMENT_FILE="$3"
+LCC_CURRENT_RELEASE="$4"
+LCC_TRANSACTION_DIRECTORY_PARENT="$5"
+LCC_CADDY_SITE="$6"
+LCC_CADDY_MAIN="$7"
+LCC_CADDY_BINARY="$8"
+LCC_V2_CADDY_IMPORT="import $LCC_CADDY_SITE"
+lcc_install_environment_file() { install -m 0640 "$1" "$2.next"; mv -f "$2.next" "$2"; }
+systemctl() { return 0; }
+lcc_wait_for_internal_health() { return 0; }
+lcc_wait_for_health() {
+    test "${PUBLIC_MODE:-success}" != public-failure ||
+        test "$LCC_PUBLIC_ORIGIN" = https://old.example.test
+}
+lcc_load_environment "$LCC_ENVIRONMENT_FILE"
+lcc_validate_environment "$LCC_CURRENT_RELEASE"
+lcc_apply_public_origin_change https://new.example.test caddy "$9"
+"""
+    result = _shell(
+        script,
+        str(environment),
+        str(current),
+        str(tmp_path),
+        str(site),
+        str(main),
+        str(fake_caddy),
+        "1" if mode == "dry-run" else "0",
+        environment={"PUBLIC_MODE": mode},
+    )
+    assert main.read_bytes() == old_main
+    if mode == "success":
+        assert result.returncode == 0, result.stderr
+        assert "LCC_PUBLIC_ORIGIN=https://new.example.test" in environment.read_text()
+        assert "new.example.test" in site.read_text()
+        assert "old.example.test" not in site.read_text()
+    else:
+        assert result.returncode == (0 if mode == "dry-run" else 1), result.stderr
+        assert environment.read_bytes() == old_environment
+        assert site.read_bytes() == old_site
 
 
 @pytest.mark.parametrize("mode", ["dry-run", "success", "internal-failure"])

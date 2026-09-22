@@ -51,9 +51,11 @@ only missing named prerequisites through the host's configured APT policy. Third
 are left untouched; there is no system-wide upgrade, Git requirement, or Node.js requirement on
 the production host. The source identity is recorded in the immutable release.
 
-The default gateway is managed Caddy, which needs a DNS hostname pointing at this host and ports
-80/443 available. Choose `--gateway external` for a same-host reverse proxy that you configure
-yourself: Core may be healthy and installation successful while public HTTPS is still pending.
+The application serves its frontend and API from one loopback origin. The default gateway is
+managed Caddy, which needs a DNS hostname pointing at this host and ports 80/443 available. Choose
+`--gateway external` for an operator-managed same-host HTTPS gateway, including Cloudflare Tunnel:
+forward the entire site to `http://127.0.0.1:<LCC_APP_PORT>`. External installation can finish
+without a public origin; set it later with `sudo lcc-admin public-origin set https://lcc.example.com`.
 The backend binds only to `127.0.0.1`, on port 8000 by default. An occupied default port prompts
 for another; automation supplies `--app-port PORT` explicitly.
 
@@ -69,7 +71,9 @@ migration-checked, activated, health-checked, and rolled back on failure. There 
 update. Existing V1 installations migrate through this **new** bootstrap, avoiding the old
 installed updater's prerequisite path. The old `*-ubuntu.sh` names are compatibility entry points.
 See the [installation guide](docs/INSTALLATION.md) for the gateway, port, migration, and review
-paths. Public-main V2 and real ACME acceptance remain pending publication and real-server testing.
+paths. Published Installer V2 has passed real-server GitHub acquisition, host APT, Core/systemd,
+internal health, external API reachability, and app-port checks. This frontend/origin fix still
+awaits sanitized publication and changed-SHA real-server acceptance; public ACME remains untested.
 
 ## Update an installed server
 
@@ -106,7 +110,8 @@ LCC is a modular monolith:
 - React 19, TypeScript, Vite, and Tailwind CSS provide the browser application.
 - FastAPI, Pydantic, SQLAlchemy 2, and Alembic provide the server and migration boundary.
 - SQLite is the single source of truth for the single-user installation.
-- Managed Caddy or an operator-owned same-host reverse proxy serves the frontend and proxies `/api` to one Uvicorn worker.
+- One Uvicorn worker serves the verified frontend and API; managed Caddy or an operator-owned
+  same-host gateway forwards the complete site over HTTPS.
 - systemd owns the application process and scheduled operational backups.
 
 Canonical facts and immutable history are persisted. Capability, availability, Roadmap, Analysis,

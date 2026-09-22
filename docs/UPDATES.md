@@ -22,8 +22,9 @@ runtime, verifies the bundled frontend and migration relation, and checks schema
 It then takes an offline `pre-update` backup, runs candidate migrations where necessary, atomically
 activates, updates LCC-owned units/gateway configuration, restarts, and checks health. Failure
 restores the old release and the matching database backup if migration changed the schema. The
-existing domain, timezone, secrets, initialized account, bootstrap state, SQLite data, backup
-history, gateway mode, and `LCC_APP_PORT` remain in place.
+existing public origin (including a pending unconfigured origin), timezone, secrets, initialized
+account, bootstrap state, SQLite data, backup history, gateway mode, and `LCC_APP_PORT` remain in
+place.
 
 In managed Caddy mode both loopback and public HTTPS health are required. In external mode loopback
 health is required and public routing is checked/reported separately; LCC does not touch the

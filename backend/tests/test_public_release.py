@@ -59,6 +59,7 @@ def _release_repository(tmp_path: Path, *, stub_installer: bool = False) -> Path
         "README.md",
         "pyproject.toml",
         "backend/app/main.py",
+        "backend/app/frontend.py",
         "backend/app/analysis/v1_compat.py",
         "frontend/package.json",
         "frontend/package-lock.json",
@@ -208,6 +209,7 @@ def test_release_packaging_is_deterministic_bounded_and_mode_preserving(
         f"{prefix}frontend/public/logo.png",
         f"{prefix}frontend/dist/index.html",
         f"{prefix}frontend/dist/LCC_FRONTEND_ARTIFACT.json",
+        f"{prefix}backend/app/frontend.py",
         f"{prefix}scripts/bootstrap.sh",
         f"{prefix}scripts/release-bootstrap.sh",
         f"{prefix}scripts/bootstrap-ubuntu.sh",
@@ -639,7 +641,10 @@ def test_public_repository_assets_and_metadata_are_consistent() -> None:
     assert "fonts.googleapis.com" not in public_frontend_text
     assert "fonts.gstatic.com" not in public_frontend_text
     caddy_template = (REPOSITORY_ROOT / "deploy" / "Caddyfile.template").read_text()
-    assert "font-src 'self'" in caddy_template
+    frontend_policy = (REPOSITORY_ROOT / "backend/app/frontend.py").read_text()
+    assert "font-src 'self'" in frontend_policy
+    assert "reverse_proxy 127.0.0.1:@@LCC_APP_PORT@@" in caddy_template
+    assert "file_server" not in caddy_template
 
     changelog = (REPOSITORY_ROOT / "CHANGELOG.md").read_text()
     assert "## [1.0.1] - Unreleased" in changelog

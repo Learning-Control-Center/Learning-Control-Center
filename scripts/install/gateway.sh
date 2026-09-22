@@ -34,16 +34,18 @@ lcc_report_external_gateway() {
 LCC Core is internally healthy. Public gateway/TLS: pending operator integration.
 Gateway mode: external (same-host reverse proxy only).
 Upstream: http://127.0.0.1:$port
-Public origin: $LCC_PUBLIC_ORIGIN
-Configure HTTPS for $hostname; preserve Host: $hostname.
-Forward the client IP and HTTPS scheme through X-Forwarded-For and X-Forwarded-Proto.
-Proxy /api/* to the loopback upstream without stripping /api.
-Serve /opt/learning-control-center/current/frontend/dist as the static root,
-with unknown frontend paths falling back to /index.html (SPA routing).
+Public origin: ${LCC_PUBLIC_ORIGIN:-not configured (pending)}
+Forward the entire site to the loopback upstream without rewriting paths.
+Preserve the public Host and forward the client IP and HTTPS scheme.
 The external proxy must not receive /etc/learning-control-center.env.
 Example: $LCC_CURRENT_RELEASE/deploy/examples/installer-v2-external-nginx.conf
-After operator configuration, run: lcc-admin health --public
 EOF
+    if test -z "$hostname"; then
+        echo 'Configure an HTTPS public origin later: lcc-admin public-origin set https://lcc.example.com'
+    else
+        printf 'Configure HTTPS for %s; preserve Host: %s.\n' "$hostname" "$hostname"
+        echo 'After operator configuration, run: lcc-admin health --public'
+    fi
 }
 
 lcc_install_managed_caddy() (
@@ -94,7 +96,7 @@ lcc_install_managed_caddy() (
     chmod 0700 "$backup_dir"
     trap 'rm -rf -- "$backup_dir"' EXIT
     rendered="$backup_dir/site.rendered"
-    lcc_render_caddy_site "$release_root" "$LCC_CURRENT_RELEASE/frontend/dist" "$rendered"
+    lcc_render_caddy_site "$release_root" "$rendered"
     sed -i '1i# Managed by Learning Control Center Installer V2' "$rendered"
     "$LCC_CADDY_BINARY" fmt --overwrite "$rendered"
     if test "$mode_state" = caddy && cmp -s "$rendered" "$LCC_CADDY_SITE" &&

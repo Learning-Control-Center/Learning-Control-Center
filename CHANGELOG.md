@@ -23,6 +23,10 @@ All notable public changes to Learning Control Center are recorded here. The pro
   historical Ubuntu names retained as thin compatibility forwarders.
 - A gateway-independent Core with managed Caddy or an explicit same-host external proxy mode,
   and a shared V1 migration, update, rollback, and uninstall transition.
+- Single-port serving of the verified frontend, SPA routes, and API by the application, with
+  managed Caddy and external gateways forwarding the complete site.
+- Deferred public-origin configuration for Core and external installs, managed through a guarded
+  `lcc-admin public-origin` transaction.
 
 ### Changed
 

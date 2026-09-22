@@ -158,10 +158,9 @@ def test_environment_generator_and_caddy_renderer_use_custom_app_port(tmp_path: 
     assert "LCC_APP_PORT=8123" in environment.read_text()
     rendered = tmp_path / "site.caddy"
     result = _run_common(
-        'lcc_load_environment "$1"; lcc_render_caddy_site "$2" "$3" "$4"',
+        'lcc_load_environment "$1"; lcc_render_caddy_site "$2" "$3"',
         str(environment),
         str(REPOSITORY_ROOT),
-        "/opt/learning-control-center/current/frontend/dist",
         str(rendered),
     )
     assert result.returncode == 0, result.stderr
@@ -389,12 +388,7 @@ def _transaction_fixture(tmp_path: Path) -> dict[str, Path]:
     (release / "deploy").mkdir(parents=True)
     (release / "frontend" / "dist").mkdir(parents=True)
     (release / "deploy" / "Caddyfile.template").write_text(
-        "@@LCC_PUBLIC_HOST@@ {\n"
-        "\thandle /api/* {\n"
-        "\t\treverse_proxy 127.0.0.1:@@LCC_APP_PORT@@\n"
-        "\t}\n"
-        "\troot * @@LCC_FRONTEND_ROOT@@\n"
-        "}\n"
+        "@@LCC_PUBLIC_HOST@@ {\n\t\treverse_proxy 127.0.0.1:@@LCC_APP_PORT@@\n}\n"
     )
     current = root / "current"
     current.symlink_to(release)

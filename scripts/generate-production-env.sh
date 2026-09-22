@@ -8,7 +8,7 @@ source "$SCRIPT_DIRECTORY/deploy-common.sh"
 
 usage() {
     cat <<'EOF'
-Usage: generate-production-env.sh --domain HOST --timezone ZONE --output FILE [--app-port PORT] [--root DIR]
+Usage: generate-production-env.sh --timezone ZONE --output FILE [--domain HOST|--public-origin HTTPS_ORIGIN] [--app-port PORT] [--root DIR]
 
 Generate one complete Learning Control Center production environment file. Secrets
 are created inside this process and are never accepted as command-line arguments.
@@ -18,6 +18,7 @@ EOF
 }
 
 domain=""
+public_origin=""
 timezone=""
 output_file=""
 app_port="$LCC_APP_PORT_DEFAULT"
@@ -26,6 +27,7 @@ install_root="/"
 while test "$#" -gt 0; do
     case "$1" in
         --domain) domain="${2:?Missing --domain value}"; shift 2 ;;
+        --public-origin) public_origin="${2:?Missing --public-origin value}"; shift 2 ;;
         --timezone) timezone="${2:?Missing --timezone value}"; shift 2 ;;
         --output) output_file="${2:?Missing --output value}"; shift 2 ;;
         --app-port) app_port="${2:?Missing --app-port value}"; shift 2 ;;
@@ -35,10 +37,21 @@ while test "$#" -gt 0; do
     esac
 done
 
-test -n "$domain" || lcc_die "--domain is required."
 test -n "$timezone" || lcc_die "--timezone is required."
 test -n "$output_file" || lcc_die "--output is required."
-lcc_validate_public_hostname "$domain"
+if test -n "$domain"; then lcc_validate_public_hostname "$domain"; fi
+if test -n "$public_origin"; then
+    lcc_validate_public_origin "$public_origin"
+    public_hostname="$(/usr/bin/python3 - "$public_origin" <<'PY'
+import sys
+from urllib.parse import urlsplit
+print(urlsplit(sys.argv[1]).hostname)
+PY
+)"
+    test -z "$domain" || test "$domain" = "$public_hostname" ||
+        lcc_die "--domain and --public-origin disagree."
+    domain="$public_hostname"
+fi
 app_port="$(lcc_validate_app_port "$app_port")"
 [[ "$output_file" = /* ]] || lcc_die "--output must be an absolute path."
 test ! -e "$output_file" || lcc_die "Refusing to replace existing environment file: $output_file"
@@ -54,7 +67,7 @@ current_release="$(lcc_prefixed_path "$install_root" "$LCC_CURRENT_RELEASE")"
 database_file="$(lcc_prefixed_path "$install_root" "$LCC_DATABASE_FILE")"
 backup_directory="$(lcc_prefixed_path "$install_root" "$LCC_BACKUP_DIRECTORY_DEFAULT")"
 
-python3 - "$domain" "$timezone" "$output_file" "$current_release" \
+python3 - "$domain" "$public_origin" "$timezone" "$output_file" "$current_release" \
     "$database_file" "$backup_directory" "$app_port" <<'PY'
 import json
 import os
@@ -63,7 +76,7 @@ import sys
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-domain, timezone, output, release_root, database, backups, app_port = sys.argv[1:]
+domain, requested_origin, timezone, output, release_root, database, backups, app_port = sys.argv[1:]
 try:
     ZoneInfo(timezone)
 except Exception as exc:
@@ -85,7 +98,9 @@ bootstrap_token = strong_secret()
 while bootstrap_token == security_secret:
     bootstrap_token = strong_secret()
 
-origin = f"https://{domain}"
+origin = requested_origin or (f"https://{domain}" if domain else "")
+allowed_origins = [origin] if origin else []
+allowed_hosts = [domain] if domain else ["127.0.0.1"]
 lines = [
     "# Generated Learning Control Center production environment.",
     "# Managed by the operator; keep this file root:lcc 0640 after installation.",
@@ -95,8 +110,8 @@ lines = [
     f"LCC_RELEASE_ROOT={release_root}",
     f"LCC_APP_PORT={app_port}",
     f"LCC_PUBLIC_ORIGIN={origin}",
-    f"LCC_ALLOWED_ORIGINS='{json.dumps([origin], separators=(',', ':'))}'",
-    f"LCC_ALLOWED_HOSTS='{json.dumps([domain], separators=(',', ':'))}'",
+    f"LCC_ALLOWED_ORIGINS='{json.dumps(allowed_origins, separators=(',', ':'))}'",
+    f"LCC_ALLOWED_HOSTS='{json.dumps(allowed_hosts, separators=(',', ':'))}'",
     "LCC_TRUSTED_PROXY_CIDRS='[\"127.0.0.1/32\"]'",
     f"LCC_BOOTSTRAP_TOKEN={bootstrap_token}",
     f"LCC_SECURITY_SECRET={security_secret}",

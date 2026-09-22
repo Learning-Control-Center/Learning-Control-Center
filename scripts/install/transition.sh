@@ -100,7 +100,7 @@ lcc_transition_classify_gateway() {
         grep -Fqx "$LCC_CADDY_IMPORT" "$LCC_CADDY_MAIN" ||
         lcc_die "V1 Caddy ownership is ambiguous; no proxy configuration was changed."
     rendered="$(mktemp /tmp/lcc-v1-site.XXXXXXXX)"
-    lcc_render_caddy_site "$old" "$LCC_CURRENT_RELEASE/frontend/dist" "$rendered"
+    lcc_render_caddy_site "$old" "$rendered"
     "$LCC_CADDY_BINARY" fmt --overwrite "$rendered" >/dev/null
     if ! cmp -s "$rendered" "$LCC_CADDY_SITE"; then
         rm -f -- "$rendered"
@@ -113,7 +113,7 @@ lcc_transition_classify_gateway() {
 lcc_transition_render_caddy() {
     local target="$1" rendered
     rendered="$(mktemp /tmp/lcc-v2-site.XXXXXXXX)"
-    lcc_render_caddy_site "$target" "$LCC_CURRENT_RELEASE/frontend/dist" "$rendered"
+    lcc_render_caddy_site "$target" "$rendered"
     if test -f "$target/INSTALLER_V2_CORE"; then
         sed -i '1i# Managed by Learning Control Center Installer V2' "$rendered"
     fi

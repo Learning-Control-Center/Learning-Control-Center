@@ -14,18 +14,19 @@ source "$script_directory/install/gateway.sh"
 
 usage() {
     cat <<'EOF'
-Usage: install.sh [--domain HOST] [--timezone ZONE] [--app-port PORT]
+Usage: install.sh [--domain HOST|--public-origin HTTPS_ORIGIN] [--timezone ZONE] [--app-port PORT]
                   [--gateway caddy|external] [--env-file ABSOLUTE_PATH]
                   [--non-interactive] [--yes] [--dry-run]
 
 Requires a validated source identity from bootstrap.sh or a release-bound
 installer. Managed Caddy is the default; external needs operator integration.
-Fresh installation requires a domain; updates preserve the installed one.
+Managed Caddy requires a domain; external and Core-only installs may defer it.
 --dry-run previews an existing-installation transition only.
 EOF
 }
 
 domain=""
+public_origin=""
 timezone=""
 requested_port=""
 environment_source=""
@@ -42,10 +43,11 @@ test_root="/"
 # shellcheck disable=SC2034
 while test "$#" -gt 0; do
     case "$1" in
-        --domain|--timezone|--app-port|--env-file|--commit|--channel|--test-root|--gateway)
+        --domain|--public-origin|--timezone|--app-port|--env-file|--commit|--channel|--test-root|--gateway)
             test "$#" -ge 2 || lcc_die "$1 requires a value."
             case "$1" in
                 --domain) domain="$2" ;;
+                --public-origin) public_origin="$2" ;;
                 --timezone) timezone="$2" ;;
                 --app-port) requested_port="$2" ;;
                 --env-file) environment_source="$2" ;;
@@ -65,6 +67,18 @@ while test "$#" -gt 0; do
         *) lcc_die "Unknown Core installer option: $1" ;;
     esac
 done
+if test -n "$public_origin"; then
+    lcc_validate_public_origin "$public_origin"
+    origin_hostname="$(/usr/bin/python3 - "$public_origin" <<'PY'
+import sys
+from urllib.parse import urlsplit
+print(urlsplit(sys.argv[1]).hostname)
+PY
+)"
+    test -z "$domain" || test "$domain" = "$origin_hostname" ||
+        lcc_die "--domain and --public-origin disagree."
+    domain="$origin_hostname"
+fi
 lcc_validate_gateway_mode "$gateway"
 test "$core_only" -eq 0 || test "$gateway_explicit" -eq 0 ||
     lcc_die "--core-only cannot be combined with --gateway."
@@ -172,6 +186,14 @@ fi
 if test "$test_root" != / && test "$core_only" -eq 0 && test "$gateway" = caddy; then
     lcc_die "Managed Caddy requires a disposable systemd host; use --core-only for layout tests."
 fi
+if test "$test_root" = / && test "$core_only" -eq 0 && test "$gateway_explicit" -eq 0 &&
+    test "$non_interactive" -eq 0 && test ! -e "$environment_target"; then
+    exec 3<>/dev/tty || lcc_die "Gateway selection requires a controlling terminal; use --gateway for automation."
+    printf 'Gateway mode [caddy/external] (default caddy): ' >&3
+    IFS= read -r selected_gateway <&3 || lcc_die "Cannot read gateway selection."
+    gateway="${selected_gateway:-caddy}"
+    lcc_validate_gateway_mode "$gateway"
+fi
 for owned_directory in "$application_root" "$application_root/releases" "$release_directory" \
     "$data_directory" "$backup_directory"; do
     test ! -L "$owned_directory" || lcc_die "LCC-owned directory must not be a symlink: $owned_directory"
@@ -248,6 +270,8 @@ if test -n "$environment_source"; then
     existing_domain="$(lcc_public_hostname)"
     test -z "$domain" || test "$domain" = "$existing_domain" ||
         lcc_die "External environment domain differs from --domain."
+    test -z "$public_origin" || test "$public_origin" = "$LCC_PUBLIC_ORIGIN" ||
+        lcc_die "External environment public origin differs from --public-origin."
     test -z "$timezone" || test "$timezone" = "$LCC_APP_TIMEZONE" ||
         lcc_die "External environment timezone differs from --timezone."
     domain="$existing_domain"
@@ -266,22 +290,24 @@ if test -e "$environment_target"; then
         lcc_die "Existing environment has incompatible Core data paths."
     existing_domain="$(lcc_public_hostname)"
     test -z "$domain" || test "$domain" = "$existing_domain" || lcc_die "Domain differs from existing configuration."
+    test -z "$public_origin" || test "$public_origin" = "$LCC_PUBLIC_ORIGIN" ||
+        lcc_die "Public origin differs from existing configuration; use lcc-admin public-origin set."
     test -z "$timezone" || test "$timezone" = "$LCC_APP_TIMEZONE" || lcc_die "Timezone differs from existing configuration."
     test -z "$requested_port" || test "$requested_port" = "$(lcc_effective_app_port)" ||
         lcc_die "Port changes after installation require the gateway-aware Phase 4 workflow."
     domain="$existing_domain"
     app_port="$(lcc_effective_app_port)"
 elif test -z "$environment_source"; then
-    if test -z "$domain"; then
-        test "$non_interactive" -eq 0 || lcc_die "--domain is required for a non-interactive Core install."
-        printf 'Intended future HTTPS domain: ' > /dev/tty
+    if test "$gateway" = caddy && test "$core_only" -eq 0 && test -z "$domain"; then
+        test "$non_interactive" -eq 0 || lcc_die "Managed Caddy requires --domain or --public-origin in non-interactive mode."
+        printf 'Managed Caddy HTTPS domain: ' > /dev/tty
         IFS= read -r domain < /dev/tty || lcc_die "Cannot read domain from the terminal."
     fi
-    lcc_validate_public_hostname "$domain"
+    if test -n "$domain"; then lcc_validate_public_hostname "$domain"; fi
     timezone="${timezone:-UTC}"
     app_port="$(lcc_validate_app_port "${requested_port:-$LCC_APP_PORT_DEFAULT}")"
 fi
-lcc_validate_public_hostname "$domain"
+if test -n "$domain"; then lcc_validate_public_hostname "$domain"; fi
 if test "$test_root" = /; then
     lcc_ubuntu_check_platform
     if ! lcc_app_port_is_available "$app_port"; then
@@ -326,7 +352,12 @@ elif ! test -e "$environment_target"; then
     if test "$test_root" != /; then environment_parent=/tmp; fi
     temporary_environment="$(mktemp "$environment_parent/lcc-core-env.XXXXXXXX")"
     rm -f -- "$temporary_environment"
-    env_arguments=(--domain "$domain" --timezone "$timezone" --app-port "$app_port" --output "$temporary_environment")
+    env_arguments=(--timezone "$timezone" --app-port "$app_port" --output "$temporary_environment")
+    if test -n "$public_origin"; then
+        env_arguments+=(--public-origin "$public_origin")
+    elif test -n "$domain"; then
+        env_arguments+=(--domain "$domain")
+    fi
     if test "$test_root" != /; then env_arguments+=(--root "$test_root"); fi
     "$source_root/scripts/generate-production-env.sh" "${env_arguments[@]}"
     environment_source="$temporary_environment"

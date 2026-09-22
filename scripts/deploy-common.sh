@@ -193,6 +193,32 @@ if (
 PY
 }
 
+lcc_validate_public_origin() {
+    local origin="$1"
+    /usr/bin/python3 - "$origin" <<'PY'
+import re
+import sys
+from urllib.parse import urlsplit
+
+value = sys.argv[1]
+try:
+    parsed = urlsplit(value)
+    host = parsed.hostname
+    port = parsed.port
+except ValueError as exc:
+    raise SystemExit("Public origin is malformed") from exc
+if (parsed.scheme != "https" or not host or parsed.username or parsed.password
+        or parsed.path or parsed.query or parsed.fragment
+        or parsed.netloc != (host if port is None else f"{host}:{port}")
+        or value != f"https://{host}" + ("" if port is None else f":{port}")
+        or port == 0
+        or len(host) > 253 or len(host.split(".")) < 2
+        or any(not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", label)
+               or len(label) > 63 for label in host.split("."))):
+    raise SystemExit("Public origin must be one lowercase HTTPS DNS origin without a path, query, or fragment")
+PY
+}
+
 lcc_validate_https_url() {
     local value="$1"
     local label="${2:-URL}"
@@ -615,9 +641,9 @@ lcc_validate_environment() {
     test "${LCC_RELEASE_ROOT:-}" = "$expected_release_root" || \
         lcc_die "LCC_RELEASE_ROOT must be $expected_release_root."
     test -n "${LCC_SECURITY_SECRET:-}" || lcc_die "LCC_SECURITY_SECRET is required."
-    test -n "${LCC_PUBLIC_ORIGIN:-}" || lcc_die "LCC_PUBLIC_ORIGIN is required."
-    test -n "${LCC_ALLOWED_ORIGINS:-}" || lcc_die "LCC_ALLOWED_ORIGINS is required."
-    test -n "${LCC_ALLOWED_HOSTS:-}" || lcc_die "LCC_ALLOWED_HOSTS is required."
+    [[ -v 'LCC_DEPLOY_ENV_SEEN[LCC_PUBLIC_ORIGIN]' ]] || lcc_die "LCC_PUBLIC_ORIGIN is required (empty means pending)."
+    [[ -v 'LCC_DEPLOY_ENV_SEEN[LCC_ALLOWED_ORIGINS]' ]] || lcc_die "LCC_ALLOWED_ORIGINS is required."
+    [[ -v 'LCC_DEPLOY_ENV_SEEN[LCC_ALLOWED_HOSTS]' ]] || lcc_die "LCC_ALLOWED_HOSTS is required."
     test -n "${LCC_TRUSTED_PROXY_CIDRS:-}" || lcc_die "LCC_TRUSTED_PROXY_CIDRS is required."
     test -n "${LCC_APP_TIMEZONE:-}" || lcc_die "LCC_APP_TIMEZONE is required."
     lcc_effective_app_port >/dev/null
@@ -629,6 +655,7 @@ lcc_validate_environment() {
     lcc_run_with_deploy_environment /usr/bin/python3 - "$expected_release_root" <<'PY'
 import json
 import os
+import re
 import sys
 from ipaddress import ip_network
 from pathlib import Path
@@ -636,16 +663,29 @@ from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 release_root = Path(sys.argv[1]).resolve()
-origin = urlparse(os.environ["LCC_PUBLIC_ORIGIN"])
-if origin.scheme != "https" or not origin.hostname or origin.path not in ("", "/"):
-    raise SystemExit("LCC_PUBLIC_ORIGIN must be one HTTPS origin without a path")
+public_origin = os.environ["LCC_PUBLIC_ORIGIN"]
+origin = urlparse(public_origin)
 origins = json.loads(os.environ["LCC_ALLOWED_ORIGINS"])
 hosts = json.loads(os.environ["LCC_ALLOWED_HOSTS"])
 proxies = json.loads(os.environ["LCC_TRUSTED_PROXY_CIDRS"])
-if origins != [os.environ["LCC_PUBLIC_ORIGIN"]]:
-    raise SystemExit("LCC_ALLOWED_ORIGINS must contain only LCC_PUBLIC_ORIGIN")
-if hosts != [origin.hostname]:
-    raise SystemExit("LCC_ALLOWED_HOSTS must contain only the public hostname")
+if public_origin:
+    try:
+        port = origin.port
+    except ValueError as exc:
+        raise SystemExit("LCC_PUBLIC_ORIGIN has an invalid port") from exc
+    if (origin.scheme != "https" or not origin.hostname or origin.path
+            or origin.username or origin.password or origin.query or origin.fragment
+            or origin.params or origin.netloc != (origin.hostname if port is None else f"{origin.hostname}:{port}")
+            or public_origin != f"https://{origin.hostname}" + ("" if port is None else f":{port}")
+            or port == 0
+            or len(origin.hostname) > 253
+            or any(len(label) > 63 or not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", label)
+                   for label in origin.hostname.split("."))):
+        raise SystemExit("LCC_PUBLIC_ORIGIN must be one HTTPS origin without a path")
+    if origins != [public_origin] or hosts != [origin.hostname]:
+        raise SystemExit("Allowed Origin/Host must match LCC_PUBLIC_ORIGIN exactly")
+elif origins != [] or hosts != ["127.0.0.1"]:
+    raise SystemExit("Pending public origin permits only loopback Host and no Origin")
 if not proxies:
     raise SystemExit("At least one trusted loopback proxy CIDR is required")
 for value in proxies:
@@ -679,19 +719,50 @@ lcc_public_hostname() {
     lcc_run_with_deploy_environment /usr/bin/python3 - <<'PY'
 import os
 from urllib.parse import urlparse
-print(urlparse(os.environ["LCC_PUBLIC_ORIGIN"]).hostname)
+print(urlparse(os.environ["LCC_PUBLIC_ORIGIN"]).hostname or "")
+PY
+}
+
+lcc_render_environment_with_public_origin() {
+    local source_file="$1" destination_file="$2" origin="$3"
+    lcc_validate_public_origin "$origin"
+    /usr/bin/python3 - "$source_file" "$destination_file" "$origin" <<'PY'
+import json
+import sys
+from pathlib import Path
+from urllib.parse import urlsplit
+
+source, destination, origin = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+hostname = urlsplit(origin).hostname
+replacements = {
+    "LCC_PUBLIC_ORIGIN": origin,
+    "LCC_ALLOWED_ORIGINS": "'" + json.dumps([origin], separators=(",", ":")) + "'",
+    "LCC_ALLOWED_HOSTS": "'" + json.dumps([hostname], separators=(",", ":")) + "'",
+}
+lines = source.read_text().splitlines()
+seen = set()
+for index, line in enumerate(lines):
+    key = line.split("=", 1)[0]
+    if key in replacements:
+        lines[index] = f"{key}={replacements[key]}"
+        seen.add(key)
+if seen != replacements.keys():
+    raise SystemExit("Production environment is missing public-origin fields")
+destination.write_text("\n".join(lines) + "\n")
 PY
 }
 
 lcc_render_caddy_site() {
     local release_root="$1"
-    local frontend_root="$2"
-    local output="$3"
+    local output="$2"
     local hostname app_port
     hostname="$(lcc_public_hostname)"
+    test -n "$hostname" || lcc_die "Managed Caddy requires a configured public origin."
     app_port="$(lcc_effective_app_port)"
+    # V1 ownership checks must reproduce the installed V1 template exactly.
+    # Current V2 templates contain no frontend-root placeholder.
     sed -e "s|@@LCC_PUBLIC_HOST@@|$hostname|g" \
-        -e "s|@@LCC_FRONTEND_ROOT@@|$frontend_root|g" \
+        -e "s|@@LCC_FRONTEND_ROOT@@|$LCC_CURRENT_RELEASE/frontend/dist|g" \
         -e "s|@@LCC_APP_PORT@@|$app_port|g" \
         "$release_root/deploy/Caddyfile.template" > "$output"
     if grep -Eq '@@LCC_[A-Z0-9_]+@@' "$output"; then
@@ -936,6 +1007,7 @@ lcc_wait_for_health() {
     local attempts="${1:-40}"
     local delay="${2:-0.5}"
     local attempt
+    test -n "${LCC_PUBLIC_ORIGIN:-}" || return 1
     for ((attempt = 1; attempt <= attempts; attempt++)); do
         if curl --fail --silent --show-error --max-time 5 \
             "$LCC_PUBLIC_ORIGIN/api/v1/health" >/dev/null 2>&1; then
@@ -952,6 +1024,7 @@ lcc_wait_for_internal_health() {
     attempts="${2:-40}"
     delay="${3:-0.5}"
     hostname="$(lcc_public_hostname)"
+    hostname="${hostname:-127.0.0.1}"
     for ((attempt = 1; attempt <= attempts; attempt++)); do
         if curl --fail --silent --show-error --max-time 5 \
             --header "Host: $hostname" \
@@ -1009,8 +1082,7 @@ lcc_apply_app_port_change() (
     chmod 0600 "$staged_environment"
     lcc_load_environment "$staged_environment"
     lcc_validate_environment "$LCC_CURRENT_RELEASE"
-    lcc_render_caddy_site \
-        "$release_root" "$LCC_CURRENT_RELEASE/frontend/dist" "$rendered_caddy"
+    lcc_render_caddy_site "$release_root" "$rendered_caddy"
     if test -f "$LCC_DEPLOYMENT_STATE_FILE" &&
         test "$(lcc_read_gateway_state)" = caddy; then
         sed -i '1i# Managed by Learning Control Center Installer V2' "$rendered_caddy"
@@ -1141,4 +1213,106 @@ lcc_apply_external_app_port_change() (
     trap - EXIT
     echo "Internal Core port changed from $old_port to $requested_port."
     echo "External proxy routing to 127.0.0.1:$requested_port requires operator coordination; public gateway/TLS is pending until verified."
+)
+
+lcc_apply_public_origin_change() (
+    set -euo pipefail
+    local requested_origin="$1" gateway_mode="$2" dry_run="${3:-0}"
+    local previous_origin="${LCC_PUBLIC_ORIGIN:-}" port transaction_directory=""
+    local staged_environment rendered_site="" active=0 recovery_failed=0
+    # Invoked indirectly by the EXIT trap below.
+    # shellcheck disable=SC2329
+    cleanup_public_origin_change() {
+        local original_status=$?
+        trap - EXIT
+        if test "$active" -eq 1; then
+            set +e
+            lcc_note "Public-origin change failed; restoring the previous configuration."
+            lcc_install_environment_file "$transaction_directory/environment.previous" "$LCC_ENVIRONMENT_FILE" || recovery_failed=1
+            if test "$gateway_mode" = caddy; then
+                lcc_restore_caddy_configuration "$transaction_directory/caddy-backup" \
+                    "$LCC_CADDY_SITE" "$LCC_CADDY_MAIN" || recovery_failed=1
+                "$LCC_CADDY_BINARY" validate --config "$LCC_CADDY_MAIN" --adapter caddyfile \
+                    >/dev/null || recovery_failed=1
+            fi
+            systemctl restart "$LCC_SERVICE_NAME" || recovery_failed=1
+            lcc_load_environment "$LCC_ENVIRONMENT_FILE"
+            lcc_wait_for_internal_health "$port" 120 0.5 || recovery_failed=1
+            if test "$gateway_mode" = caddy; then
+                systemctl reload caddy.service || recovery_failed=1
+                lcc_wait_for_health 60 0.5 || recovery_failed=1
+            fi
+        fi
+        if test -n "$transaction_directory"; then
+            if test "$recovery_failed" -eq 0; then
+                rm -rf -- "$transaction_directory"
+            else
+                lcc_note "CRITICAL: public-origin recovery needs operator attention; protected backup remains at $transaction_directory"
+                exit 1
+            fi
+        fi
+        exit "$original_status"
+    }
+    trap cleanup_public_origin_change EXIT
+    lcc_validate_public_origin "$requested_origin"
+    test "$gateway_mode" = external || test "$gateway_mode" = caddy ||
+        lcc_die "Public-origin changes require an external or managed Caddy gateway."
+    test "$requested_origin" != "$previous_origin" || {
+        echo "Public origin is already $requested_origin; no changes were made."
+        exit 0
+    }
+    port="$(lcc_effective_app_port)"
+    transaction_directory="$(mktemp -d "${LCC_TRANSACTION_DIRECTORY_PARENT:-/run}/lcc-public-origin.XXXXXXXX")"
+    chmod 0700 "$transaction_directory"
+    cp -a -- "$LCC_ENVIRONMENT_FILE" "$transaction_directory/environment.previous"
+    staged_environment="$transaction_directory/environment.next"
+    lcc_render_environment_with_public_origin "$LCC_ENVIRONMENT_FILE" "$staged_environment" "$requested_origin"
+    chmod 0600 "$staged_environment"
+    lcc_load_environment "$staged_environment"
+    lcc_validate_environment "$LCC_CURRENT_RELEASE"
+    if test "$gateway_mode" = caddy; then
+        if ! test -f "$LCC_CADDY_SITE" || test -L "$LCC_CADDY_SITE" ||
+            ! grep -Fqx '# Managed by Learning Control Center Installer V2' "$LCC_CADDY_SITE"; then
+            lcc_die "Managed Caddy site is missing or is no longer LCC-owned."
+        fi
+        mkdir -m 0700 "$transaction_directory/caddy-backup"
+        cp -a -- "$LCC_CADDY_SITE" "$transaction_directory/caddy-backup/site"
+        cp -a -- "$LCC_CADDY_MAIN" "$transaction_directory/caddy-backup/main"
+        rendered_site="$transaction_directory/site.next"
+        lcc_render_caddy_site "$(readlink -f "$LCC_CURRENT_RELEASE")" "$rendered_site"
+        sed -i '1i# Managed by Learning Control Center Installer V2' "$rendered_site"
+        lcc_validate_staged_caddy_site "$rendered_site" "$LCC_CADDY_MAIN" "$LCC_CADDY_BINARY"
+    fi
+    if test "$dry_run" -eq 1; then
+        echo "Dry run passed: public origin can change from ${previous_origin:-not configured} to $requested_origin."
+        exit 0
+    fi
+    active=1
+    if test "$gateway_mode" = caddy; then
+        install -m 0644 "$rendered_site" "${LCC_CADDY_SITE}.next.$$"
+        mv -f -- "${LCC_CADDY_SITE}.next.$$" "$LCC_CADDY_SITE"
+        lcc_format_validate_or_restore_caddy "$LCC_CADDY_SITE" "$LCC_CADDY_MAIN" \
+            "$transaction_directory/caddy-backup"
+    fi
+    lcc_install_environment_file "$staged_environment" "$LCC_ENVIRONMENT_FILE"
+    systemctl restart "$LCC_SERVICE_NAME"
+    lcc_wait_for_internal_health "$port" 120 0.5 ||
+        lcc_die "Core did not become healthy with the new public origin."
+    if test "$gateway_mode" = caddy; then
+        systemctl reload caddy.service
+        lcc_wait_for_health 120 0.5 || lcc_die "Managed public HTTPS health failed."
+    fi
+    active=0
+    trap - EXIT
+    rm -rf -- "$transaction_directory"
+    echo "Public origin: $requested_origin"
+    if test "$gateway_mode" = external; then
+        if lcc_wait_for_health 1 0; then
+            echo 'Public HTTPS health: healthy (external gateway was not modified).'
+        else
+            echo 'Public gateway/TLS: pending operator verification; external gateway was not modified.'
+        fi
+    else
+        echo 'Managed Caddy public HTTPS health: healthy.'
+    fi
 )

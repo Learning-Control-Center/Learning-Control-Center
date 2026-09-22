@@ -5,15 +5,7 @@
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"
 		Referrer-Policy "no-referrer"
-		Content-Security-Policy "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
 		-Server
 	}
-	handle /api/* {
-		reverse_proxy 127.0.0.1:@@LCC_APP_PORT@@
-	}
-	handle {
-		root * @@LCC_FRONTEND_ROOT@@
-		try_files {path} /index.html
-		file_server
-	}
+	reverse_proxy 127.0.0.1:@@LCC_APP_PORT@@
 }

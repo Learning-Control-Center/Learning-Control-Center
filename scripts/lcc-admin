@@ -21,6 +21,9 @@ Operations:
   app-port                       Show the internal loopback application port
   app-port set PORT [--dry-run] [--yes] [--ack-external-proxy]
                                  Safely validate or change the internal port
+  public-origin                  Show the configured public HTTPS origin
+  public-origin set HTTPS_ORIGIN [--dry-run] [--yes]
+                                 Change origin and verify Core/gateway health
   logs [LINES]                   Show recent application journal entries
   backup                         Run one SQLite-safe operational backup
   backup-status                  Show timer state, schedule, retention, and recent files
@@ -57,7 +60,7 @@ shift
 
 case "$command_name" in
     status|health|logs|backup-status|show-bootstrap-token|update|-h|--help|help) ;;
-    app-port)
+    app-port|public-origin)
         if test "${1:-}" = set; then
             lcc_acquire_deployment_lock
         fi
@@ -114,6 +117,8 @@ case "$command_name" in
                 echo "Updater: unavailable"
             fi
             echo "Gateway mode: $gateway_mode"
+            echo "Internal app port: $(lcc_effective_app_port)"
+            echo "Public origin: ${LCC_PUBLIC_ORIGIN:-not configured (pending)}"
             if systemctl is-active --quiet "$LCC_SERVICE_NAME"; then
                 echo "Core service: active"
             else
@@ -139,6 +144,8 @@ case "$command_name" in
             fi
             if test "$gateway_mode" = core-only; then
                 echo "Public gateway/TLS: pending (no gateway selected)"
+            elif test -z "${LCC_PUBLIC_ORIGIN:-}"; then
+                echo "Public gateway/TLS: pending (public origin not configured)"
             elif lcc_wait_for_health 1 0; then
                 echo "Public HTTPS health: healthy"
             else
@@ -156,14 +163,17 @@ case "$command_name" in
         fi
         if test "$health_scope" = --internal; then
             port="$(lcc_effective_app_port)"
+            internal_hostname="$(lcc_public_hostname)"
+            internal_hostname="${internal_hostname:-127.0.0.1}"
             curl --fail --silent --show-error --max-time 10 \
-                --header "Host: $(lcc_public_hostname)" \
+                --header "Host: $internal_hostname" \
                 "http://127.0.0.1:$port/api/v1/health"
             printf '\n'
             if test "$gateway_mode" = core-only; then echo 'Public gateway/TLS: pending'; fi
             exit 0
         fi
-        test "$gateway_mode" != core-only || lcc_die "Public gateway/TLS is pending; Core-only installation has no configured gateway."
+        test "$gateway_mode" != core-only && test -n "${LCC_PUBLIC_ORIGIN:-}" ||
+            lcc_die "Public gateway/TLS is pending; a gateway and public origin must be configured."
         curl --fail --silent --show-error --max-time 10 \
             "$LCC_PUBLIC_ORIGIN/api/v1/health"
         printf '\n'
@@ -238,6 +248,41 @@ case "$command_name" in
         else
             lcc_apply_app_port_change "$requested_app_port" "$app_port_dry_run"
         fi
+        ;;
+    public-origin)
+        if test "$#" -eq 0; then
+            echo "Public origin: ${LCC_PUBLIC_ORIGIN:-not configured (pending)}"
+            exit 0
+        fi
+        test "$1" = set || lcc_die "public-origin accepts no arguments or: set HTTPS_ORIGIN [--dry-run] [--yes]"
+        shift
+        test "$#" -ge 1 || lcc_die "public-origin set requires HTTPS_ORIGIN."
+        requested_public_origin="$1"
+        lcc_validate_public_origin "$requested_public_origin"
+        shift
+        public_origin_dry_run=0
+        public_origin_assume_yes=0
+        while test "$#" -gt 0; do
+            case "$1" in
+                --dry-run) public_origin_dry_run=1 ;;
+                --yes) public_origin_assume_yes=1 ;;
+                *) lcc_die "Unknown public-origin set option: $1" ;;
+            esac
+            shift
+        done
+        test "$gateway_mode" = external || test "$gateway_mode" = caddy ||
+            lcc_die "Select a gateway before changing the public origin."
+        echo "Public origin: ${LCC_PUBLIC_ORIGIN:-not configured} -> $requested_public_origin"
+        if test "$gateway_mode" = external; then
+            echo 'The external gateway remains operator-managed; public HTTPS may be pending.'
+        fi
+        if test "$public_origin_dry_run" -eq 0 && test "$public_origin_assume_yes" -eq 0; then
+            exec 3<>/dev/tty || lcc_die "Interactive confirmation requires a terminal; use --yes for automation."
+            printf 'Apply this public-origin change? [y/N]: ' >&3
+            IFS= read -r answer <&3 || lcc_die "Unable to read public-origin confirmation."
+            case "${answer,,}" in y|yes) ;; *) lcc_die "Public-origin change cancelled." ;; esac
+        fi
+        lcc_apply_public_origin_change "$requested_public_origin" "$gateway_mode" "$public_origin_dry_run"
         ;;
     logs)
         lines="${1:-100}"

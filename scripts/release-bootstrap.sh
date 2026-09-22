@@ -14,7 +14,7 @@ die() { printf 'lcc-release: %s\n' "$*" >&2; exit 1; }
 for argument in "$@"; do
     case "$argument" in
         -h|--help)
-            printf 'Usage: install.sh [--domain HOST] [--timezone ZONE] [--app-port PORT] [--gateway caddy|external] [--env-file PATH] [--non-interactive]\n'
+            printf 'Usage: install.sh [--domain HOST|--public-origin HTTPS_ORIGIN] [--timezone ZONE] [--app-port PORT] [--gateway caddy|external] [--env-file PATH] [--non-interactive]\n'
             printf 'Fresh pinned release: %s (%s). Existing installations update from public main.\n' "$release_id" "$source_sha"
             exit 0 ;;
         --repository-url*|--asset-base-url*|--ref*|--channel*|--commit*)

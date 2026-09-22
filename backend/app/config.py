@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from functools import lru_cache
 from ipaddress import ip_network
@@ -80,22 +81,43 @@ class Settings(BaseSettings):
             return self
         if self.fixture_clock_at is not None or self.fixture_clock_step_ms:
             raise ValueError("Production cannot enable fixture_clock_at.")
-        origin = urlparse(self.public_origin)
-        if (
-            origin.scheme != "https"
-            or not origin.hostname
-            or origin.path not in {"", "/"}
-            or origin.username is not None
-            or origin.password is not None
-            or origin.query
-            or origin.fragment
-            or origin.params
-        ):
-            raise ValueError("Production public_origin must be an HTTPS origin without a path.")
-        if self.allowed_origins != [self.public_origin]:
-            raise ValueError("Production allowed_origins must contain only public_origin.")
-        if self.allowed_hosts != [origin.hostname]:
-            raise ValueError("Production allowed_hosts must contain only the public hostname.")
+        if not self.public_origin:
+            if self.allowed_origins != [] or self.allowed_hosts != ["127.0.0.1"]:
+                raise ValueError(
+                    "Production without a public origin allows only loopback Host and no Origin."
+                )
+        else:
+            origin = urlparse(self.public_origin)
+            hostname = origin.hostname
+            try:
+                port = origin.port
+            except ValueError as exc:
+                raise ValueError("Production public_origin has an invalid port.") from exc
+            if (
+                origin.scheme != "https"
+                or not hostname
+                or origin.path
+                or origin.username is not None
+                or origin.password is not None
+                or origin.query
+                or origin.fragment
+                or origin.params
+                or origin.netloc != (hostname if port is None else f"{hostname}:{port}")
+                or self.public_origin
+                != f"https://{hostname}" + ("" if port is None else f":{port}")
+                or port == 0
+                or len(hostname) > 253
+                or any(
+                    len(label) > 63
+                    or re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", label) is None
+                    for label in hostname.split(".")
+                )
+            ):
+                raise ValueError("Production public_origin must be an HTTPS origin without a path.")
+            if self.allowed_origins != [self.public_origin]:
+                raise ValueError("Production allowed_origins must contain only public_origin.")
+            if self.allowed_hosts != [hostname]:
+                raise ValueError("Production allowed_hosts must contain only the public hostname.")
         if not is_strong_operator_secret(self.security_secret):
             raise ValueError(
                 "Production security_secret must be a non-placeholder value of 32+ characters."

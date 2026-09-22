@@ -32,6 +32,13 @@ paths = ['''^backend/tests/test_security_foundation_v2\.py$''']
 regexes = ['''Q7vN2xK9mR4pT8wY3cF6hJ1sD5gL0bZa''']
 
 [[allowlists]]
+description = "Adjudicated synthetic Settings secret used only by frontend serving tests"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^backend/tests/test_frontend_serving\.py$''']
+regexes = ['''Q7vN2xK9mR4pT8wY3cF6hJ1sD5gL0bZa''']
+
+[[allowlists]]
 description = "Adjudicated synthetic browser-test secret"
 condition = "AND"
 regexTarget = "line"
