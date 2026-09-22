@@ -119,21 +119,29 @@ inspect `sudo lcc-admin logs` rather than bypassing the check.
 
 ## Bootstrap finalization
 
-The initial installation starts with a strong `LCC_BOOTSTRAP_TOKEN`. Open the configured HTTPS URL,
-create the first user, and immediately run:
+The initial installation starts with a strong `LCC_BOOTSTRAP_TOKEN`. Retrieve it from a root
+terminal before creating the account:
 
 ```bash
 sudo lcc-admin show-bootstrap-token
+```
+
+Open the configured HTTPS URL and create the first user. Then remove the consumed token from the
+root-owned environment:
+
+```bash
 sudo lcc-admin finalize-bootstrap
 ```
 
 `show-bootstrap-token` requires root and a controlling terminal, writes the value only to that
 terminal, and refuses once any user exists. Managed installation shows it after the HTTPS
-health check; non-interactive installation never prints it. `finalize-bootstrap` stops LCC,
-verifies that the current database is at the expected schema with exactly one user, removes only
-the bootstrap-token line atomically, restarts the service, and verifies internal health (and public
-HTTPS in managed mode). An initialized production database intentionally refuses to restart while a bootstrap
-token remains configured.
+health check; non-interactive installation never prints it. The first committed account consumes
+bootstrap authority immediately: another account cannot be created with the token, and normal
+restarts remain safe while its root-owned environment line awaits cleanup. Run
+`finalize-bootstrap` promptly to remove that line. The command verifies the current schema and
+single user, pauses backup activity, removes only the token line atomically, restarts Core, and
+checks internal health (and managed public HTTPS health). Repeating it after cleanup reports that
+the token is already absent without changing service state.
 
 ## Scheduled and manual backups
 
@@ -180,16 +188,20 @@ package to the SQLite restore command.
 
 ## Password recovery
 
-From an interactive terminal:
+From an interactive terminal, in any working directory:
 
 ```bash
-sudo systemctl stop learning-control-center.service
 sudo lcc-admin recover-password
-sudo systemctl start learning-control-center.service
 ```
 
-Recovery verifies the database, creates and checks a pre-recovery backup, changes the Argon2id
-password, increments credential generation, revokes every session, and writes a safe audit event.
+The wrapper takes the deployment lock, pauses the backup timer, stops Core if necessary, and runs
+recovery as the `lcc` user from the active release with only the installed production environment.
+It restores an initially active Core and checks internal health even if recovery fails; an
+initially inactive Core remains inactive. Recovery verifies the database, creates and checks a
+pre-recovery backup, changes the Argon2id password, increments credential generation, revokes every
+session, and writes a safe audit event. Passwords are entered only at the terminal and must contain
+12–256 characters. If Core or the backup timer cannot be restored, the command exits with a clear
+error; inspect systemd status and `sudo lcc-admin logs`.
 
 ## Projection repair
 

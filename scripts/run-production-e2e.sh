@@ -14,7 +14,7 @@ cleanup() {
         test -f "$run_directory/backend.log" && tail -n 80 "$run_directory/backend.log" >&2
         test -f "$run_directory/caddy.log" && tail -n 80 "$run_directory/caddy.log" >&2
         test -f "$run_directory/live-restore.log" && tail -n 80 "$run_directory/live-restore.log" >&2
-        test -f "$run_directory/rejected-restart.log" && tail -n 80 "$run_directory/rejected-restart.log" >&2
+        test -f "$run_directory/restarted-with-token.log" && tail -n 80 "$run_directory/restarted-with-token.log" >&2
         test -f "$run_directory/restarted.log" && tail -n 80 "$run_directory/restarted.log" >&2
     fi
     rm -rf -- "$run_directory"
@@ -105,20 +105,26 @@ unset backend_pid
 cd "$repository_root"
 "$repository_root/.venv/bin/python" -m app.ops restore --from "$post_e2e_backup"
 "$repository_root/.venv/bin/python" -c 'import os, sqlite3; path=os.environ["LCC_DATABASE_URL"].removeprefix("sqlite:///"); connection=sqlite3.connect(path); assert connection.execute("SELECT COUNT(*) FROM auth_sessions WHERE revoked_at IS NULL").fetchone()[0] == 0; connection.close()'
-"$repository_root/.venv/bin/uvicorn" app.main:app --host 127.0.0.1 --port "$LCC_APP_PORT" --workers 1 --no-proxy-headers >"$run_directory/rejected-restart.log" 2>&1 &
-rejected_pid=$!
-for _attempt in $(seq 1 100); do
-    if ! kill -0 "$rejected_pid" 2>/dev/null; then
+"$repository_root/.venv/bin/uvicorn" app.main:app --host 127.0.0.1 --port "$LCC_APP_PORT" --workers 1 --no-proxy-headers >"$run_directory/restarted-with-token.log" 2>&1 &
+backend_pid=$!
+for _attempt in $(seq 1 60); do
+    if curl --silent --fail --insecure https://localhost:8443/api/v1/health >/dev/null; then
         break
     fi
-    sleep 0.1
+    sleep 0.25
 done
-if kill -0 "$rejected_pid" 2>/dev/null; then
-    kill "$rejected_pid"
-    echo "Initialized production unexpectedly restarted with bootstrap token configured" >&2
-    exit 1
-fi
-wait "$rejected_pid" || true
+curl --silent --fail --insecure https://localhost:8443/api/v1/health >/dev/null
+replay_status="$(
+    "$repository_root/.venv/bin/python" -c \
+        'import json, os; print(json.dumps({"username":"replay","password":"fixture-password-value","bootstrap_token":os.environ["LCC_BOOTSTRAP_TOKEN"]}))' |
+        curl --silent --insecure --output /dev/null --write-out '%{http_code}' \
+            --header 'Content-Type: application/json' --header 'Origin: https://localhost:8443' \
+            --data-binary @- https://localhost:8443/api/v1/auth/bootstrap
+)"
+test "$replay_status" = 409
+kill "$backend_pid"
+wait "$backend_pid" || true
+unset backend_pid
 
 unset LCC_BOOTSTRAP_TOKEN
 "$repository_root/.venv/bin/uvicorn" app.main:app --host 127.0.0.1 --port "$LCC_APP_PORT" --workers 1 --no-proxy-headers >"$run_directory/restarted.log" 2>&1 &

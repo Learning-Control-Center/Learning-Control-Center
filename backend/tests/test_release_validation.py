@@ -149,7 +149,6 @@ async def test_application_lifespan_runs_startup_and_shutdown_work(
     [
         (2, None, "single-user invariant"),
         (0, "weak", "strong bootstrap token"),
-        (1, "still-configured", "Remove the bootstrap token"),
     ],
 )
 def test_production_database_state_rejects_unsafe_startup(
@@ -166,6 +165,19 @@ def test_production_database_state_rejects_unsafe_startup(
     )
     with pytest.raises(RuntimeError, match=message):
         main._validate_database_state(db)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("bootstrap_token", [None, "still-configured"])
+def test_production_database_state_accepts_consumed_bootstrap_token(
+    monkeypatch: pytest.MonkeyPatch, bootstrap_token: str | None
+) -> None:
+    db = SimpleNamespace(scalar=lambda _statement: 1)
+    monkeypatch.setattr(
+        main,
+        "get_settings",
+        lambda: SimpleNamespace(environment="production", bootstrap_token=bootstrap_token),
+    )
+    main._validate_database_state(db)  # type: ignore[arg-type]
 
 
 def test_nonproduction_database_state_does_not_query_users(

@@ -100,8 +100,9 @@ def _validate_database_state(db: Session) -> None:
     if user_count == 0:
         if not is_strong_operator_secret(configured.bootstrap_token):
             raise RuntimeError("Uninitialized production requires a strong bootstrap token.")
-    elif configured.bootstrap_token:
-        raise RuntimeError("Remove the bootstrap token after production initialization.")
+    # A committed first user consumes bootstrap authority. The still-configured
+    # token is inert because the bootstrap API refuses every request with a user.
+    # Removing it from the root-owned environment remains an operator cleanup.
 
 
 app = FastAPI(

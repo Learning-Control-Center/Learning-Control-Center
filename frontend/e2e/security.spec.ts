@@ -22,7 +22,7 @@ test('production authentication and forced-logout flow', async ({ browser, page 
   await page.getByLabel('Confirm new password').fill(replacementPassword)
   await page.getByRole('button', { name: 'Change password' }).click()
   await expect(page.getByRole('heading', { name: 'Welcome back' })).toBeVisible()
-  await expect(page.getByText('lcc-ops recover-password')).toBeVisible()
+  await expect(page.getByText('sudo lcc-admin recover-password')).toBeVisible()
 
   await page.getByLabel('Username').fill('learner')
   await page.getByLabel('Password').fill(replacementPassword)

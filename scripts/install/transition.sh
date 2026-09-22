@@ -489,7 +489,7 @@ lcc_transition_rollback() {
                 "$(sed -n 's/^checksum_sha256=//p' "$supplied_backup.manifest")" &&
             test "$(sqlite3 "$supplied_backup" 'PRAGMA integrity_check;')" = ok ||
             lcc_die "Rollback backup does not match the target release/schema or failed integrity verification."
-        runuser -u "$LCC_SERVICE_USER" -- test -r "$supplied_backup" ||
+        lcc_run_as_service_user "$old" test -r "$supplied_backup" ||
             lcc_die "LCC service account cannot read rollback backup."
     else
         test -z "$supplied_backup" || lcc_die "A database replacement is unnecessary for this rollback."

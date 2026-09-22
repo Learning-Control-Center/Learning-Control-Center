@@ -29,7 +29,7 @@ Operations:
   backup-status                  Show timer state, schedule, retention, and recent files
   verify                         Verify the offline database and single-user invariant
   restore /absolute/backup       Restore offline and restart LCC
-  recover-password               Reset the password offline from an interactive TTY
+  recover-password               Reset the password from an interactive TTY; manage Core lifecycle
   repair-projections [--full]    Drain capability work offline; optionally enqueue all
   show-bootstrap-token           Show pending one-time token on /dev/tty only
   finalize-bootstrap             Remove bootstrap token after first-user creation
@@ -95,6 +95,75 @@ run_offline() {
     lcc_run_as_service_user "$release_root" "$@"
     resume_backup_timer
     trap - EXIT
+}
+
+run_offline_with_service() (
+    set -euo pipefail
+    local restart_policy="$1" require_public_health="$2" initial_state
+    local restart_after=0 stop_attempted=0 timer_pause_attempted=0
+    local timer_was_active=0 temporary_environment=""
+    shift 2
+    initial_state="$(systemctl is-active "$LCC_SERVICE_NAME" 2>/dev/null || true)"
+    case "$initial_state" in
+        active|activating|reloading|deactivating) restart_after=1 ;;
+        inactive|failed|unknown) ;;
+        *) lcc_die "Cannot determine Core service state: $initial_state" ;;
+    esac
+    # shellcheck disable=SC2329
+    finish_offline_service() {
+        local operation_status=$? service_status=0 timer_status=0
+        trap - EXIT
+        set +e
+        if test -n "$temporary_environment"; then rm -f -- "$temporary_environment"; fi
+        if test "$restart_policy" = always && test "$operation_status" -eq 0; then
+            restart_after=1
+        fi
+        if test "$restart_after" -eq 1 && test "$stop_attempted" -eq 1; then
+            systemctl start "$LCC_SERVICE_NAME"
+            service_status=$?
+            if test "$service_status" -eq 0; then
+                lcc_wait_for_internal_health "$(lcc_effective_app_port)" 120 0.5
+                service_status=$?
+            fi
+            if test "$service_status" -eq 0 && test "$require_public_health" -eq 1 &&
+                { test "$gateway_mode" = caddy || test "$gateway_mode" = legacy; }; then
+                lcc_wait_for_health 60 0.5
+                service_status=$?
+            fi
+            if test "$service_status" -ne 0; then
+                echo 'ERROR: Offline operation ended, but Core/public health recovery failed; inspect sudo lcc-admin logs.' >&2
+                operation_status=1
+            fi
+        fi
+        if test "$timer_pause_attempted" -eq 1; then
+            resume_backup_timer
+            timer_status=$?
+            if test "$timer_status" -ne 0; then
+                echo 'ERROR: Backup timer could not be restored; inspect its systemd state.' >&2
+                operation_status=1
+            fi
+        fi
+        exit "$operation_status"
+    }
+    trap finish_offline_service EXIT
+    timer_pause_attempted=1
+    pause_backup_timer
+    stop_attempted=1
+    systemctl stop "$LCC_SERVICE_NAME"
+    lcc_require_inactive_service
+    "$@"
+)
+
+finalize_bootstrap_offline() {
+    lcc_run_as_service_user "$release_root" "$release_root/.venv/bin/lcc-ops" verify
+    temporary_environment="$(mktemp "${LCC_ENVIRONMENT_FILE}.XXXXXX")"
+    awk '!/^LCC_BOOTSTRAP_TOKEN=/' "$LCC_ENVIRONMENT_FILE" > "$temporary_environment"
+    chown "root:$LCC_SERVICE_GROUP" "$temporary_environment"
+    chmod 0640 "$temporary_environment"
+    lcc_load_environment "$temporary_environment"
+    lcc_validate_environment "$LCC_CURRENT_RELEASE"
+    mv -f -- "$temporary_environment" "$LCC_ENVIRONMENT_FILE"
+    temporary_environment=""
 }
 
 case "$command_name" in
@@ -326,7 +395,7 @@ case "$command_name" in
         [[ "$1" = /* ]] || lcc_die "Restore source must be an absolute path."
         restore_source="$(readlink -f "$1")"
         test -f "$restore_source" || lcc_die "Restore source does not exist."
-        runuser -u "$LCC_SERVICE_USER" -- test -r "$restore_source" || \
+        lcc_run_as_service_user "$release_root" test -r "$restore_source" || \
             lcc_die "The lcc service user cannot read the restore source."
         run_offline "$release_root/.venv/bin/lcc-ops" restore --from "$restore_source"
         systemctl start "$LCC_SERVICE_NAME"
@@ -343,7 +412,8 @@ case "$command_name" in
     recover-password)
         test "$#" -eq 0 || lcc_die "recover-password accepts no arguments."
         test -t 0 && test -t 2 || lcc_die "Password recovery requires an interactive terminal."
-        run_offline "$release_root/.venv/bin/lcc-ops" recover-password
+        run_offline_with_service if-active 0 lcc_run_as_service_user \
+            "$release_root" "$release_root/.venv/bin/lcc-ops" recover-password
         ;;
     repair-projections)
         if test "$#" -eq 0; then
@@ -375,33 +445,11 @@ case "$command_name" in
         ;;
     finalize-bootstrap)
         test "$#" -eq 0 || lcc_die "finalize-bootstrap accepts no arguments."
-        grep -q '^LCC_BOOTSTRAP_TOKEN=' "$LCC_ENVIRONMENT_FILE" || \
-            lcc_die "Bootstrap token is already absent."
-        systemctl stop "$LCC_SERVICE_NAME"
-        trap resume_backup_timer EXIT
-        pause_backup_timer
-        lcc_run_as_service_user "$release_root" "$release_root/.venv/bin/lcc-ops" verify
-        temporary_environment="$(mktemp "${LCC_ENVIRONMENT_FILE}.XXXXXX")"
-        awk '!/^LCC_BOOTSTRAP_TOKEN=/' "$LCC_ENVIRONMENT_FILE" > "$temporary_environment"
-        chown "root:$LCC_SERVICE_GROUP" "$temporary_environment"
-        chmod 0640 "$temporary_environment"
-        mv -f "$temporary_environment" "$LCC_ENVIRONMENT_FILE"
-        lcc_load_environment "$LCC_ENVIRONMENT_FILE"
-        resume_backup_timer
-        trap - EXIT
-        systemctl start "$LCC_SERVICE_NAME"
-        if test "$core_only" -eq 1; then
-            lcc_wait_for_internal_health "$(lcc_effective_app_port)" 120 0.5 ||
-                lcc_die "Bootstrap was finalized, but internal Core health failed."
-            if test "$gateway_mode" = caddy; then
-                lcc_wait_for_health 60 0.5 || lcc_die "Bootstrap was finalized, but managed public HTTPS health failed."
-                echo "Bootstrap token removed; Core and managed public HTTPS health passed."
-            else
-                echo "Bootstrap token removed; Core restart and internal health passed. Public gateway/TLS may be pending."
-            fi
+        if ! grep -q '^LCC_BOOTSTRAP_TOKEN=' "$LCC_ENVIRONMENT_FILE"; then
+            echo 'Bootstrap token is already absent; no changes were made.'
         else
-            lcc_wait_for_health 60 0.5 || lcc_die "Bootstrap was finalized, but the public health check failed."
-            echo "Bootstrap token removed; production restart and HTTPS health check passed."
+            run_offline_with_service always 1 finalize_bootstrap_offline
+            echo 'Bootstrap token removed; Core restart and required health checks passed.'
         fi
         ;;
     -h|--help|help)

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import app.main as main_module
+import pytest
 from app.models import AuthSession, User
 from app.time_utils import epoch_ms_to_rfc3339
 from httpx import AsyncClient
@@ -12,7 +16,9 @@ def test_sqlite_foreign_keys_and_time_round_trip(db: Session) -> None:
     assert epoch_ms_to_rfc3339(1_788_284_472_481) == "2026-09-01T17:41:12.481Z"
 
 
-async def test_bootstrap_login_session_csrf_and_logout(client: AsyncClient, db: Session) -> None:
+async def test_bootstrap_login_session_csrf_and_logout(
+    client: AsyncClient, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
     bootstrap = await client.post(
         "/api/v1/auth/bootstrap",
         json={
@@ -28,6 +34,17 @@ async def test_bootstrap_login_session_csrf_and_logout(client: AsyncClient, db: 
     cookie = client.cookies.get("lcc_session")
     assert cookie and cookie not in stored_session.token_lookup_hash
     assert cookie.split(".", 1)[0] not in stored_session.token_lookup_hash
+
+    # Startup after the first account must succeed even before root removes the
+    # now-consumed token. The API must still reject its reuse.
+    monkeypatch.setattr(
+        main_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            environment="production", bootstrap_token="test-bootstrap-token-with-enough-entropy"
+        ),
+    )
+    main_module._validate_database_state(db)
 
     second_bootstrap = await client.post(
         "/api/v1/auth/bootstrap",

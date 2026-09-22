@@ -92,11 +92,10 @@ def _release_repository(tmp_path: Path, *, stub_installer: bool = False) -> Path
         "docs/UPDATES.md",
     ):
         _copy_current(repository, relative_path)
-    shutil.copytree(
-        REPOSITORY_ROOT / "frontend" / "dist",
-        repository / "frontend" / "dist",
-        dirs_exist_ok=True,
-    )
+    shutil.rmtree(repository / "frontend" / "src")
+    shutil.copytree(REPOSITORY_ROOT / "frontend" / "src", repository / "frontend" / "src")
+    shutil.rmtree(repository / "frontend" / "dist")
+    shutil.copytree(REPOSITORY_ROOT / "frontend" / "dist", repository / "frontend" / "dist")
 
     subprocess.run(["git", "init", "--quiet", "--initial-branch=main", repository], check=True)
     subprocess.run(["git", "-C", repository, "config", "user.name", "WaqSea"], check=True)

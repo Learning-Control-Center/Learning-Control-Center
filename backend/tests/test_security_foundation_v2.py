@@ -149,9 +149,48 @@ def test_production_bootstrap_state_fails_closed(
             "get_settings",
             lambda: production_settings("Q7vN2xK9mR4pT8wY3cF6hJ1sD5gL0bZa"),
         )
-        with pytest.raises(RuntimeError, match="Remove the bootstrap token"):
-            main_module._validate_database_state(session)
+        main_module._validate_database_state(session)
     engine.dispose()
+
+
+def test_production_settings_ignore_caller_dotenv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".env").write_bytes(b"\xff")
+    monkeypatch.chdir(tmp_path)
+    production = {
+        "LCC_ENVIRONMENT": "production",
+        "LCC_DATABASE_URL": f"sqlite:///{tmp_path / 'data' / 'lcc.sqlite3'}",
+        "LCC_BACKUP_DIRECTORY": str(tmp_path / "backups"),
+        "LCC_PUBLIC_ORIGIN": "https://learn.example.test",
+        "LCC_ALLOWED_ORIGINS": '["https://learn.example.test"]',
+        "LCC_ALLOWED_HOSTS": '["learn.example.test"]',
+        "LCC_TRUSTED_PROXY_CIDRS": '["127.0.0.1/32"]',
+        "LCC_SECURITY_SECRET": "Q7vN2xK9mR4pT8wY3cF6hJ1sD5gL0bZa",
+    }
+    for key, value in production.items():
+        monkeypatch.setenv(key, value)
+    get_settings.cache_clear()
+    try:
+        configured = get_settings()
+        assert configured.environment == "production"
+        assert configured.public_origin == "https://learn.example.test"
+    finally:
+        get_settings.cache_clear()
+
+
+def test_development_settings_still_read_dotenv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".env").write_text("LCC_APP_TIMEZONE=Europe/Istanbul\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LCC_ENVIRONMENT", "development")
+    monkeypatch.delenv("LCC_APP_TIMEZONE", raising=False)
+    get_settings.cache_clear()
+    try:
+        assert get_settings().app_timezone == "Europe/Istanbul"
+    finally:
+        get_settings.cache_clear()
 
 
 def test_forwarded_client_resolution_has_an_explicit_trust_boundary() -> None:

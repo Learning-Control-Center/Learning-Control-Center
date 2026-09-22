@@ -39,5 +39,7 @@ gateways, including Cloudflare Tunnel, remain operator-managed.
 
 Learning Control Center is self-hosted. Operators are responsible for TLS and DNS operation,
 firewall policy, host updates, restrictive configuration and database permissions, backup custody,
-and removing the one-time bootstrap secret after initialization. The production runbook is
+and removing the consumed bootstrap secret from the root-owned environment after initialization.
+The presence of an existing user makes that token unusable for further account creation, including
+after a restart. The production runbook is
 [`docs/PRODUCTION_OPERATIONS.md`](docs/PRODUCTION_OPERATIONS.md).

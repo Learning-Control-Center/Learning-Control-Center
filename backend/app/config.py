@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from datetime import UTC, datetime
 from functools import lru_cache
@@ -154,6 +155,10 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
+    # Production receives its complete configuration from the installed systemd
+    # environment or the administrator wrapper. Never inspect a caller-local .env.
+    if os.environ.get("LCC_ENVIRONMENT") == "production":
+        return Settings(_env_file=None)
     return Settings()
 
 

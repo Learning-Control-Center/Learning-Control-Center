@@ -26,6 +26,12 @@ existing public origin (including a pending unconfigured origin), timezone, secr
 account, bootstrap state, SQLite data, backup history, gateway mode, and `LCC_APP_PORT` remain in
 place.
 
+An update can start from an installation whose service is failed or auto-restarting after first
+account creation with the bootstrap token still configured. The changed-SHA transition stops that
+service, backs up and preserves the user and token configuration, activates the fixed release, and
+verifies internal health. The token remains consumed by the existing user; remove its environment
+line afterward with `sudo lcc-admin finalize-bootstrap`.
+
 In managed Caddy mode both loopback and public HTTPS health are required. In external mode loopback
 health is required and public routing is checked/reported separately; LCC does not touch the
 operator's reverse proxy. If it remains pending, check `sudo lcc-admin health --public` after
@@ -65,8 +71,8 @@ service account; it does not remove shared distro packages or external proxy con
 sudo /opt/learning-control-center/current/scripts/uninstall.sh
 ```
 
-Reinstallation against preserved initialized data requires a compatible schema and secrets; do
-not reintroduce an active bootstrap token for an existing account. The external proxy must be
+Reinstallation against preserved initialized data requires a compatible schema and secrets; remove
+any consumed bootstrap token from the root-owned environment after recovery. The external proxy must be
 cleaned up by its operator. Destructive removal requires both explicit flags:
 
 ```bash

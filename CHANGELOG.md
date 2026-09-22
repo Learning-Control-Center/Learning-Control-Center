@@ -5,6 +5,13 @@ All notable public changes to Learning Control Center are recorded here. The pro
 
 ## [1.0.1] - Unreleased
 
+### Fixed
+
+- Production administration ignores caller-local dotenv files and runs offline commands from the
+  active release, including password recovery from an inaccessible working directory.
+- The first account consumes bootstrap authority without making a pre-finalization restart fatal;
+  password recovery now manages Core and backup-timer lifecycle from one administrator command.
+
 ### Added
 
 - Human-first main installation with secure generated production configuration and guarded

@@ -981,26 +981,32 @@ lcc_require_inactive_service() {
 lcc_run_as_service_user() {
     local release_root="$1"
     shift
-    # The service-user shell expands the quoted script body.
-    # shellcheck disable=SC2016
-    runuser -u "$LCC_SERVICE_USER" -- /usr/bin/env -i \
-        HOME="$LCC_DATA_DIRECTORY" \
-        PATH="$release_root/.venv/bin:/usr/bin:/bin" \
-        PYTHONPATH="$release_root/backend" \
-        /bin/bash --noprofile --norc -c '
-            set -euo pipefail
-            common_path="$1"
-            environment_path="$2"
-            shift 2
-            # shellcheck source=scripts/deploy-common.sh
-            source "$common_path"
-            lcc_load_environment "$environment_path"
-            for assignment in "${LCC_DEPLOY_ENV_ARGS[@]}"; do
-                export "$assignment"
-            done
-            exec "$@"
-        ' lcc-environment-exec \
-        "$release_root/scripts/deploy-common.sh" "$LCC_ENVIRONMENT_FILE" "$@"
+    # runuser preserves the caller's working directory. A root operator may run
+    # this command from a home directory that the lcc user cannot traverse.
+    # Use the immutable release as the working directory for every entry point.
+    (
+        cd -- "$release_root"
+        # The service-user shell expands the quoted script body.
+        # shellcheck disable=SC2016
+        runuser -u "$LCC_SERVICE_USER" -- /usr/bin/env -i \
+            HOME="$LCC_DATA_DIRECTORY" \
+            PATH="$release_root/.venv/bin:/usr/bin:/bin" \
+            PYTHONPATH="$release_root/backend" \
+            /bin/bash --noprofile --norc -c '
+                set -euo pipefail
+                common_path="$1"
+                environment_path="$2"
+                shift 2
+                # shellcheck source=scripts/deploy-common.sh
+                source "$common_path"
+                lcc_load_environment "$environment_path"
+                for assignment in "${LCC_DEPLOY_ENV_ARGS[@]}"; do
+                    export "$assignment"
+                done
+                exec "$@"
+            ' lcc-environment-exec \
+            "$release_root/scripts/deploy-common.sh" "$LCC_ENVIRONMENT_FILE" "$@"
+    )
 }
 
 lcc_wait_for_health() {

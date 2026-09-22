@@ -137,7 +137,9 @@ published merely because packaging is implemented.
 
 On managed Caddy, visit the HTTPS URL and create the first user using the one-time bootstrap token.
 Retrieve it from a root terminal with `sudo lcc-admin show-bootstrap-token`; after account
-creation run `sudo lcc-admin finalize-bootstrap`. In external mode finish HTTPS routing first.
+creation run `sudo lcc-admin finalize-bootstrap` to remove the consumed root-owned token. A
+restart before cleanup remains safe: the existing user makes the token unusable for another
+bootstrap. In external mode finish HTTPS routing first.
 Check `sudo lcc-admin status`, `sudo lcc-admin health --internal`, and, once integrated,
 `sudo lcc-admin health --public`. See [production operations](PRODUCTION_OPERATIONS.md) for
 backups, restore, and recovery.
