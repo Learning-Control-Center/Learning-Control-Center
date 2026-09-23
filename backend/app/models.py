@@ -1854,6 +1854,56 @@ class ImportRecord(Base):
     pre_import_backup_reference: Mapped[str | None] = mapped_column(Text)
 
 
+class MasterImportRevision(Base):
+    __tablename__ = "master_import_revisions"
+    __table_args__ = (
+        UniqueConstraint("lineage_key", "content_revision", name="uq_master_revision_order"),
+        UniqueConstraint("lineage_key", "content_digest", name="uq_master_revision_content"),
+        CheckConstraint("content_revision > 0", name="ck_master_revision_positive"),
+        CheckConstraint("canonicalization_version = 'mi-canon-v1'", name="ck_master_canon_v1"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    import_record_id: Mapped[str] = mapped_column(
+        ForeignKey("import_records.id", ondelete="RESTRICT"), unique=True, nullable=False
+    )
+    lineage_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    owner_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    content_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    package_digest: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    content_digest: Mapped[str] = mapped_column(String(128), nullable=False)
+    previous_content_digest: Mapped[str | None] = mapped_column(String(128))
+    canonicalization_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    provenance_json: Mapped[str] = mapped_column(Text, nullable=False)
+    selected_versions_json: Mapped[str] = mapped_column(Text, nullable=False)
+    activation_json: Mapped[str] = mapped_column(Text, nullable=False)
+    applied_at: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class MasterImportOwnedKey(Base):
+    __tablename__ = "master_import_owned_keys"
+    __table_args__ = (
+        UniqueConstraint("entity_kind", "scope_key", "stable_key", name="uq_master_owned_key"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    first_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("master_import_revisions.id", ondelete="RESTRICT"), nullable=False
+    )
+    lineage_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    owner_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    entity_kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    scope_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    stable_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    canonical_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    meaning_digest: Mapped[str] = mapped_column(String(128), nullable=False)
+
+
+for _master_immutable_model in (MasterImportRevision, MasterImportOwnedKey):
+    event.listen(_master_immutable_model, "before_update", _reject_v2_semantic_history_mutation)
+    event.listen(_master_immutable_model, "before_delete", _reject_v2_semantic_history_mutation)
+
+
 class ExportRecord(Base):
     __tablename__ = "export_records"
 

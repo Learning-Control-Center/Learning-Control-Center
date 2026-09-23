@@ -385,13 +385,11 @@ def _serialize_semantic_definition(
     }
 
 
-@router.post("/competencies/{competency_identity_id}/definitions", status_code=201)
-async def create_semantic_definition(
+def write_semantic_definition(
     competency_identity_id: str,
     payload: SemanticCompetencyDefinitionCreate,
-    _auth: AuthContext = Depends(require_csrf),
-    db: Session = Depends(get_db),
-) -> dict[str, Any]:
+    db: Session,
+) -> SemanticCompetencyDefinition:
     identity = db.get(CompetencyIdentity, competency_identity_id)
     if identity is None:
         raise AppError(404, "COMPETENCY_NOT_FOUND", "The competency identity does not exist.")
@@ -496,6 +494,18 @@ async def create_semantic_definition(
                 supersedes_definition_id=previous_criterion.id if previous_criterion else None,
             )
         )
+    db.flush()
+    return definition
+
+
+@router.post("/competencies/{competency_identity_id}/definitions", status_code=201)
+async def create_semantic_definition(
+    competency_identity_id: str,
+    payload: SemanticCompetencyDefinitionCreate,
+    _auth: AuthContext = Depends(require_csrf),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    definition = write_semantic_definition(competency_identity_id, payload, db)
     db.commit()
     return _serialize_semantic_definition(db, definition)
 
@@ -529,13 +539,11 @@ async def get_semantic_definition(
     return _serialize_semantic_definition(db, definition)
 
 
-@router.post("/competencies/{competency_identity_id}/definitions/{definition_id}/activate")
-async def activate_semantic_definition(
+def write_semantic_activation(
     competency_identity_id: str,
     definition_id: str,
     payload: ActivationRequest,
-    _auth: AuthContext = Depends(require_csrf),
-    db: Session = Depends(get_db),
+    db: Session,
 ) -> dict[str, Any]:
     definition = db.get(SemanticCompetencyDefinition, definition_id)
     if definition is None or definition.competency_identity_id != competency_identity_id:
@@ -596,8 +604,21 @@ async def activate_semantic_definition(
         source_fact_id=activation_event.id,
         requested_at=now,
     )
-    commit_source_and_drain(db)
+    db.flush()
     return {"competencyIdentityId": competency_identity_id, "activeDefinitionId": definition.id}
+
+
+@router.post("/competencies/{competency_identity_id}/definitions/{definition_id}/activate")
+async def activate_semantic_definition(
+    competency_identity_id: str,
+    definition_id: str,
+    payload: ActivationRequest,
+    _auth: AuthContext = Depends(require_csrf),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    result = write_semantic_activation(competency_identity_id, definition_id, payload, db)
+    commit_source_and_drain(db)
+    return result
 
 
 def _validate_profile_payload(payload: TargetProfileVersionCreate) -> None:
@@ -1089,13 +1110,11 @@ async def get_target_profile_version(
     return _serialize_profile_version(db, version)
 
 
-@router.post("/target-profiles/{profile_id}/versions/{version_id}/activate")
-async def activate_target_profile_version(
+def write_target_profile_activation(
     profile_id: str,
     version_id: str,
     payload: ActivationRequest,
-    _auth: AuthContext = Depends(require_csrf),
-    db: Session = Depends(get_db),
+    db: Session,
 ) -> dict[str, Any]:
     version = db.get(TargetProfileVersion, version_id)
     if version is None or version.target_profile_id != profile_id:
@@ -1158,5 +1177,18 @@ async def activate_target_profile_version(
         requested_at=now,
     )
     _queue_profile_review_invalidations(db, source_fact_id=activation_event.id, requested_at=now)
-    commit_source_and_drain(db)
+    db.flush()
     return {"profileId": profile_id, "activeVersionId": version.id}
+
+
+@router.post("/target-profiles/{profile_id}/versions/{version_id}/activate")
+async def activate_target_profile_version(
+    profile_id: str,
+    version_id: str,
+    payload: ActivationRequest,
+    _auth: AuthContext = Depends(require_csrf),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    result = write_target_profile_activation(profile_id, version_id, payload, db)
+    commit_source_and_drain(db)
+    return result

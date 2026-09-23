@@ -24,6 +24,7 @@ from app.models import (
     Track,
     User,
 )
+from app.portability.registry import PORTABLE_V9_MANIFEST, PORTABLE_V10_MASTER_IMPORT_TABLES
 from app.time_utils import utc_now_ms
 from httpx import AsyncClient
 from sqlalchemy import func, select
@@ -192,6 +193,9 @@ def test_historical_v9_backup_paths_are_readable_but_not_restored(db: Session) -
     )
     db.commit()
     payload = _portable_payload(db)
+    payload["manifest"] = PORTABLE_V9_MANIFEST
+    for table_name in PORTABLE_V10_MASTER_IMPORT_TABLES:
+        payload["tables"].pop(table_name)
     historical_row = next(
         row
         for row in payload["tables"]["import_records"]
@@ -202,6 +206,8 @@ def test_historical_v9_backup_paths_are_readable_but_not_restored(db: Session) -
     validated_tables, _summary = _validate_portable_payload(
         payload, "historical-v9-path-package", 9
     )
+    assert validated_tables["master_import_revisions"] == []
+    assert validated_tables["master_import_owned_keys"] == []
     validated_row = next(
         row
         for row in validated_tables["import_records"]

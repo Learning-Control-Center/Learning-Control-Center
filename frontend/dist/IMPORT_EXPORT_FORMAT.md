@@ -4,14 +4,15 @@
 
 This is the canonical human- and AI-facing reference for the import/export contracts implemented by the current post-Phase-3 application. Exact wire behavior comes from the running Pydantic schemas, serializers, validators, services, persistence mappings, and integrity checks. The application is the final validator when prose and implementation differ.
 
-The application contains four distinct contract families:
+The application contains five distinct contract families:
 
 1. **Legacy V1 mutation packages** for legacy Roadmap versions, verification records, and learning-lifecycle status.
 2. **Current export-only artifacts** for selective external analysis or human-readable reporting.
-3. **Portable logical backup/restore packages**, currently exported as schema V9, for application-generated state portability and recovery.
-4. **Operational SQLite backups**, which are server recovery files outside the JSON import contract.
+3. **Master Import V1 packages** for hand-authored V2 technical learning content.
+4. **Portable logical backup/restore packages**, currently exported as schema V10, for application-generated state portability and recovery.
+5. **Operational SQLite backups**, which are server recovery files outside the JSON import contract.
 
-The modern learning model is V2-oriented. It is not initialized by a legacy Roadmap package. There is currently **no public hand-authored V2 import package** that directly initializes the complete Target Profile + semantic competencies + Curriculum + Projects + Learning Graph system. A separate Master LCC Import contract does not currently exist in this document or application.
+The modern learning model is V2-oriented. Master Import initializes semantic Competencies, a Target Profile, Curriculum, and the native Learning Graph through the existing Import / Export inspect, diff, confirmation, backup, and apply workflow. Master Import V1 does not author Projects or learner history.
 
 ## Import/export context in current LCC
 
@@ -27,13 +28,14 @@ Roadmap is now a derived projection over V2 canonical state. Legacy `Roadmap`, `
 | Legacy V1 mutation | `roadmap_replace` | JSON envelope | yes | no | exactly V1 | supported with caution | Compatibility alias of `roadmap_update`; not a destructive replacement patch |
 | Legacy V1 mutation | `verification_update` | JSON envelope | yes | no | exactly V1 | supported with existing internal IDs | Append legacy-compatible verification records and implied lifecycle statuses |
 | Legacy V1 mutation | `state_update` | JSON envelope | yes | no | exactly V1 | supported with existing internal IDs | Apply explicit legacy learning-lifecycle status changes |
-| Portable | `portable_logical_backup` | JSON envelope | yes | yes | reads V1–V9; exports V9 | no; application-generated only | Logical portable-state backup and full replacement restore |
-| Portable alias | `restore` | JSON envelope | yes | no | reads V1–V9 | no; application-generated payload only | Import alias for the same portable restore contract |
+| Master Import | `master_import` | JSON envelope and uploaded UTF-8 text | yes | no | exactly V1; `mi-canon-v1` | yes | Complete owned technical-content snapshot with semantic diff and immutable revision ledger |
+| Portable | `portable_logical_backup` | JSON envelope | yes | yes | reads V1–V10; exports V10 | no; application-generated only | Logical portable-state backup and full replacement restore |
+| Portable alias | `restore` | JSON envelope | yes | no | reads V1–V10 | no; application-generated payload only | Import alias for the same portable restore contract |
 | Export-only | `analysis_snapshot` | JSON envelope | no | yes | export envelope V1 | request is hand-authored; content is generated | Selective legacy analytics/legacy Roadmap-context export |
 | Export-only | Human Report / `human_report` | Markdown | no | yes | no JSON package schema | request is hand-authored; content is generated | Human-readable selective summary |
 | Operational | SQLite backup | SQLite file | offline/internal recovery only | internal only | database/Alembic format | no | Full deployed-database disaster recovery and automatic pre-mutation safety backup |
 
-Portable schema V9 is an internal database-row and immutable-history representation with exact manifests and checkpoints. It is **not** the recommended hand-authored Master LCC format.
+Portable schema V10 is an internal database-row and immutable-history representation with exact manifests and checkpoints. It is not a hand-authored Master Import format.
 
 ## JSON package envelope
 
@@ -48,7 +50,7 @@ Portable schema V9 is an internal database-row and immutable-history representat
 }
 ```
 
-The envelope is strict: unknown envelope fields are rejected. `packageId` is non-empty and at most 255 characters. `appVersion` and `createdAt` are recorded producer metadata; the importer does not select behavior from the filename. Legacy mutation packages require `schemaVersion: 1`. Portable backup/restore accepts schema versions 1 through 9. Exported `analysis_snapshot` envelopes use schema version 1, while exported portable backups use schema version 9.
+The envelope is strict: unknown envelope fields are rejected. `packageId` is non-empty and at most 255 characters. `appVersion` and `createdAt` are recorded producer metadata; the importer does not select behavior from the filename. Legacy mutation and Master Import packages require `schemaVersion: 1`. Portable backup/restore accepts schema versions 1 through 10. Exported `analysis_snapshot` envelopes use schema version 1, while exported portable backups use schema version 10.
 
 ## Legacy V1 mutation packages
 
@@ -141,11 +143,25 @@ Competencies: Functions (programming.functions)
 - Total learning duration: 3600000 ms
 ```
 
+## Master Import V1
+
+`master_import` is a hand-authored technical-content package inside the existing Import / Export UI and API. The envelope has `schemaVersion: 1`, `packageType: "master_import"`, `packageId`, `appVersion`, UTC RFC 3339 `createdAt`, and `payload`. The upload transports the decoded UTF-8 JSON text as `rawText` alongside the parsed envelope, so inspection can reject duplicate JSON keys and bind confirmation to exactly the text that was inspected. No original file-byte digest is claimed after browser decoding. The server limits this text to 32 MiB, rejects a BOM, non-NFC strings, unpaired surrogates, floating-point/exponent forms, negative zero, integers outside ±9,007,199,254,740,991, and nesting deeper than 80 levels. It also caps parsed JSON nodes at 500,000, container items at 100,000, each authored string at 16,384 Unicode characters, authored entities at 40,000, and authored references at 200,000. Pydantic models recursively reject unknown fields. The existing inspect/apply HTTP endpoints enforce a 128 MiB request-body bound, including streamed bodies, before FastAPI parses JSON. V1 still materializes the bounded request envelope and uploaded text before Master-specific validation, so peak process memory can exceed the wire size; it is not a streaming JSON importer.
+
+The payload requires `lineageKey`, `ownerKey`, `contentRevision`, `previousContentDigest`, `canonicalizationVersion: "mi-canon-v1"`, `provenance` (`sourceName`, `authoredBy`, `sourceRevision`), UTC `effectiveAt`, explicit `activationIntent` booleans, `competencies`, `targetProfile`, `curriculum`, `learningGraph`, `initialSpine`, and `removedFromActiveVersion`. V1 requires all four activation booleans true. Competencies contain semantic criteria. The Profile contains technical domains, targets, milestones, and readiness gates. Curriculum contains objectives, Learning Units with action/duration/targets/requirements/evidence opportunities, and assessment rubrics. The Graph contains native edges. Cross-section references use stable keys; criterion references use `competencyKey::criterionKey`. V1 fixes scale references to the seeded `technical`/`v1` scale and validates every authored `levelKey` against it; it does not accept arbitrary scale versions. The exact nested field and enum contract is enforced by `backend/app/master_import/contracts.py`.
+
+V1 is a **complete snapshot of the lineage's owned technical roots**. Revision 1 starts a lineage; a successor increments `contentRevision` by one and supplies the exact prior `mi-content-v1` digest in `previousContentDigest`. It includes every previously owned root and may add roots. Roots cannot be deleted or retired in V1. A child absent from a successor's active aggregate must appear exactly once in `removedFromActiveVersion` with entity kind, stable key, and reason; its historical identity and versions remain. Unchanged content cannot be published as a new revision. An exact package replay is a no-op. Reusing a `packageId` for different package content is rejected. Stable keys cannot be appropriated from another lineage or preexisting unowned identity, and existing semantic meaning cannot drift under the same key. A Criterion stable key fixes its Competency, level, demonstration rule, and `requirementType`; textual definition changes remain versionable.
+
+`mi-canon-v1` is a durable digest contract implemented without Pydantic serialization or generic JSON output. It encodes NFC Unicode scalar strings as UTF-8; object keys sort by UTF-8 byte order; arrays retain order; there is no insignificant whitespace; strings use JSON escaping for quote, backslash, and controls (short escapes for backspace, tab, newline, form feed, and carriage return; lowercase `\\u00xx` for other controls); integers use shortest decimal form; booleans and null use lowercase JSON literals. Null and an omitted field differ. The `mi-content-v1:sha256:` digest hashes `LCC-MASTER-CONTENT-v1` plus a NUL byte plus canonical semantic content: package type/schema and the payload's canonicalization version, lineage/owner keys, effective time, activation intent, four authored content sections, initial spine, and explicit removals. Envelope metadata, provenance, content revision, and predecessor digest are excluded from the content digest. The `mi-package-v1:sha256:` digest hashes `LCC-MASTER-PACKAGE-v1` plus a NUL byte plus the complete canonical envelope, including all metadata. `mi-text-v1:sha256:` hashes the UTF-8 encoding of the decoded uploaded text to bind inspect and apply. Future canonicalization changes require a new named version; historical `mi-canon-v1` behavior cannot change.
+
+Inspect parses and validates the entire proposed package before live canonical writes, resolves all stable references against proposed and existing state, checks semantic and graph invariants, simulates apply in a migrated temporary database, and returns a semantic diff and confirmation token bound to the authenticated session. The diff reports complete counts and up to 32 stable-key details per category, with explicit omitted counts; it does not echo complete Profile, Curriculum, or Graph payloads, and the same bounded result is recorded in `ImportRecord.dry_run_summary_json`. The all-Unknown cold-start check requires at least one immediately reachable legitimate first action and an initial spine without accidental prerequisite deadlock; it does not require an entry in every later-stage domain. For hard capability and criterion prerequisites, validation requires a conservative structural route through earlier spine Units, compatible targets, evidence opportunities or assessment rubrics, and the required Technical scale criteria. This only establishes a possible learning path; it does not claim the learner has earned Evidence or capability. Apply checks exact text/package and relevant base state, obtains SQLite `BEGIN IMMEDIATE`, rechecks the base under that writer reservation, then creates the existing operational pre-import backup before canonical mutation. All canonical content, activations, ImportRecord audit summary, and authoritative ledgers commit in that one outer transaction after domain-integrity validation. A canonical failure rolls back the database transaction; the already written pre-import backup file remains in protected backup storage for operator recovery even when its transactional audit row rolls back. Post-commit derived processing can be complete, pending retry, or failed without rolling back that canonical commit.
+
+Master Import never authors learner Activity, Evidence, Verification, capability state, Analysis, Recommendation, Today history, Projects, externally managed ProfileTargets, or V2 authority cutover. A fresh technical capability remains Unknown until genuine learning evidence exists. The dedicated append-only Master Import ledgers are portable in V10; `ImportRecord.dry_run_summary_json` is only presentation/audit data.
+
 ## Portable logical backup and restore
 
 ### Purpose and package types
 
-Portable export uses purpose and package type `portable_logical_backup`, format `json`, and currently emits `schemaVersion: 9`. Import accepts either `portable_logical_backup` or the compatibility alias `restore` with the same payload. Both package types accept supported historical portable schemas V1 through V9.
+Portable export uses purpose and package type `portable_logical_backup`, format `json`, and currently emits `schemaVersion: 10`. Import accepts either `portable_logical_backup` or the compatibility alias `restore` with the same payload. Both package types accept supported historical portable schemas V1 through V10.
 
 Portable data is an application-generated recovery representation. Every included table row must contain exactly the database columns expected for that table, with strict canonical scalar types. The payload also carries a version-exact manifest and integrity/rebuild checkpoints. Internal IDs, immutable lineages, policy versions, hashes, and cross-table references make this unsuitable for ordinary hand authoring.
 
@@ -169,11 +185,11 @@ Portable tables exclude `users`, `auth_sessions`, authentication rate-limit/secu
 
 The current exporter does **not** provide a universal secret scanner for arbitrary free-text or non-secret application-setting values. `import_records` remains portable for audit continuity, and its exact row shape still includes nullable `pre_import_backup_reference`; however, the portable boundary always serializes that column as JSON null. On read, supported historical packages that contain a valid string value are accepted and normalized to null before restore; non-string/non-null values still fail strict scalar-type validation. The destination therefore retains the audit event but does not import another host's backup path or pretend that the referenced backup exists locally.
 
-This correction remains portable schema V9. It changes neither the manifest, table set, exact column set, nor nullable scalar contract, and the field is not part of a portable checkpoint or immutable-history hash. Historical V1–V9 packages remain readable. A live successful import still records its newly created local backup path in the destination database for local recovery, but later portable exports null that host-local value.
+This host-local backup-path normalization originated in portable schema V9 and continues in V10. Historical V1–V9 packages remain readable. A live successful import still records its newly created local backup path in the destination database for local recovery, but later portable exports null that host-local value.
 
 ### Portable schema history and linear adapters
 
-Portable readers use a linear V1→V2→V3→V4→V5→V6→V7→V8→V9 adapter chain. “Lossless” means available source facts are preserved or deterministically represented with provenance. It does **not** mean ambiguous legacy data is upgraded into invented modern meaning.
+Portable readers use a linear V1→V2→V3→V4→V5→V6→V7→V8→V9→V10 adapter chain. “Lossless” means available source facts are preserved or deterministically represented with provenance. It does **not** mean ambiguous legacy data is upgraded into invented modern meaning.
 
 | Portable schema | Contract introduced | Historical adapter behavior |
 | --- | --- | --- |
@@ -186,12 +202,13 @@ Portable readers use a linear V1→V2→V3→V4→V5→V6→V7→V8→V9 adapter
 | V7 | Complete immutable Recommendation V2 runs, candidates, eligibility decisions, rule results, expected values, score components, selections, recommendations, and reasons | Initializes Recommendation V2 history empty; does not reinterpret legacy recommendation snapshots as V2 decisions. |
 | V8 | Today V2 generations, suggestions, interactions/corrections, actual-Activity relations/corrections, and current-state checkpoint | Initializes Today V2 history empty; does not infer interactions from legacy decisions or sessions. |
 | V9 | Monotonic learning-control authority state/history and `authorityCheckpoint`; physical contraction of legacy Roadmap pointer columns | Validates exact V8 Roadmap-pointer parity, preserves it in compatibility state, removes contracted pointer columns, and creates only the legacy-authority bootstrap baseline. It never infers V2 activation. |
+| V10 | Authoritative Master Import revision and stable-key ownership ledgers | Initializes both ledgers empty for V9 and earlier packages. It never infers Master Import ownership from old import audit rows. |
 
 Adapters do not fabricate Target Profiles, unavailable native semantic definitions, Curriculum, Projects, native Learning Graph semantics, Analysis V3 history, Recommendation V2 decisions, Today V2 interactions, or V2 authority activation. The deterministic compatibility baselines listed above are the only deliberate additions.
 
 ### Canonical and immutable portable state
 
-The V9 manifest includes canonical facts and the immutable history needed to preserve meaning and auditability, including:
+The V10 manifest includes canonical facts and the immutable history needed to preserve meaning and auditability, including:
 
 - stable and versioned legacy/V2 identities, definitions, targets, criteria, graphs, Curricula, and Projects;
 - activation and scope history;
@@ -201,6 +218,7 @@ The V9 manifest includes canonical facts and the immutable history needed to pre
 - discipline configuration history;
 - immutable Analysis V3, Recommendation V2, and Today V2 histories;
 - learning-control authority state and append-only authority events;
+- Master Import revision lineage, selected versions, activation provenance, and owned-key ledger;
 - non-authentication application settings and import/export audit history.
 
 Some included Analysis, Recommendation, and Today records are immutable histories of derived computation, not source learning facts. Their inclusion preserves exact decisions and audit lineage; it does not make them inputs for rebuilding Evidence or capability truth.
@@ -209,7 +227,7 @@ Some included Analysis, Recommendation, and Today records are immutable historie
 
 ### Omitted rebuildable state
 
-The exact V9 manifest labels the following projections/current-state material as rebuildable and omits it from portable tables:
+The exact V10 manifest labels the following projections/current-state material as rebuildable and omits it from portable tables:
 
 - competency capability current state;
 - competency review current state;
@@ -229,9 +247,9 @@ Authority history is contiguous, hash-verified, and monotonic. A valid history b
 
 Every pre-V9 portable package is adapted to the legacy-authority baseline. No adapter infers that V2 was activated. When the destination is already V2-authoritative, restore rejects an incoming legacy authority state, a shorter history, or a history that does not contain the destination's existing authority events as an exact prefix. Restore therefore cannot demote V2 authority or silently remove/rewrite protected authority history.
 
-### Representative empty portable package
+### Historical V9 representative empty portable package
 
-The following is an **application-generated representative structure**, retained as a validated recovery-contract example. It is not a hand-authoring template. This valid package represents an empty portable learning state; non-empty exports use the same keys with exact database rows and internally consistent history/checkpoints.
+The following is a **historical V9 application-generated representative structure**, retained as a compatibility example. It is not a hand-authoring template or a V10 export template. Current non-empty V10 exports also include the Master Import ledger tables and use their exact V10 manifest/checkpoints.
 
 ```json
 {
@@ -499,8 +517,8 @@ A package where `a` requires `b` and `b` requires `a` creates a rejected require
 When generating data for Learning-Control-Center:
 
 1. Do not use `roadmap_update` or `roadmap_replace` as a substitute for complete modern LCC initialization. They create legacy Roadmap compatibility state only.
-2. Do not hand-author portable V9 as though it were a convenient semantic import schema. It contains internal database rows, IDs, versioned immutable history, exact manifests, policy references, hashes, and rebuild checkpoints.
-3. A separate Master LCC Import contract does not currently exist. Do not invent one or encode an undocumented package type.
+2. Do not hand-author portable V10 as though it were a semantic import schema. It contains internal database rows, IDs, versioned immutable history, exact manifests, policy references, hashes, and rebuild checkpoints.
+3. Use the documented `master_import` V1 contract for approved hand-authored modern technical content; do not fabricate learner state or use it for external non-technical outcomes.
 4. Emit only a documented package type and supported schema version. Emit valid JSON without comments, ellipses, or surrounding prose when JSON is requested.
 5. For a requested legacy Roadmap package, copy exact snake_case field names, treat the Roadmap as one complete version rather than a patch, and preserve roadmap, competency, and exit-criterion stable identities across genuine revisions.
 6. Resolve every parent and prerequisite key to a supplied legacy Roadmap competency and avoid hierarchy and required-dependency cycles.
@@ -582,9 +600,9 @@ This synthetic **legacy V1 Roadmap** package is for demonstrations and populated
 
 | Name | JSON type | Required | Allowed value/semantics | Example |
 | --- | --- | --- | --- | --- |
-| `schemaVersion` | integer | yes | `1` for legacy mutation and `analysis_snapshot` packages; portable backup/restore accepts `1` through `9` and exports `9` | `9` |
+| `schemaVersion` | integer | yes | `1` for legacy mutation, Master Import, and `analysis_snapshot` packages; portable backup/restore accepts `1` through `10` and exports `10` | `10` |
 | `packageType` | string | yes | One accepted import type listed above; exports use `analysis_snapshot` or `portable_logical_backup` | `roadmap_update` |
-| `packageId` | string | yes | Non-empty, at most 255 characters; must not have been applied before | `example-package-001` |
+| `packageId` | string | yes | Non-empty, at most 255 characters; exact Master Import replay is idempotent, while changed reuse is rejected | `example-package-001` |
 | `appVersion` | string | yes | Producer application version; recorded, not semantically compared | `1.0.1` |
 | `createdAt` | string | yes | Producer timestamp; exports emit RFC 3339 UTC | `2026-09-04T18:30:00.000Z` |
 | `payload` | object | yes | Strict package-specific object | `{"roadmap": {...}}` |

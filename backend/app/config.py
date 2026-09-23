@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     session_idle_timeout_ms: int = 7 * 24 * 60 * 60 * 1000
     session_absolute_timeout_ms: int = 30 * 24 * 60 * 60 * 1000
     max_import_bytes: int = 10 * 1024 * 1024
+    max_master_import_bytes: int = 32 * 1024 * 1024
     login_rate_limit_attempts: int = 5
     login_rate_limit_window_ms: int = 5 * 60 * 1000
     import_rate_limit_attempts: int = 10

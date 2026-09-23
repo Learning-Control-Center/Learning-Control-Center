@@ -265,13 +265,11 @@ async def get_curriculum_version(
     return _serialize_version(db, _version(db, curriculum_id, version_id))
 
 
-@router.post("/{curriculum_id}/versions/{version_id}/activate")
-async def activate_curriculum_version(
+def write_curriculum_activation(
     curriculum_id: str,
     version_id: str,
     payload: CurriculumActivationInput,
-    _auth: AuthContext = Depends(require_csrf),
-    db: Session = Depends(get_db),
+    db: Session,
 ) -> dict[str, Any]:
     version = _version(db, curriculum_id, version_id)
     prior = db.scalar(
@@ -333,8 +331,21 @@ async def activate_curriculum_version(
     _queue_curriculum_invalidations(
         db, subject_id=version_id, source_fact_id=event.id, requested_at=now
     )
-    db.commit()
+    db.flush()
     return {"curriculumId": curriculum_id, "activeVersionId": version_id}
+
+
+@router.post("/{curriculum_id}/versions/{version_id}/activate")
+async def activate_curriculum_version(
+    curriculum_id: str,
+    version_id: str,
+    payload: CurriculumActivationInput,
+    _auth: AuthContext = Depends(require_csrf),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    result = write_curriculum_activation(curriculum_id, version_id, payload, db)
+    db.commit()
+    return result
 
 
 @router.get("/{curriculum_id}/activation-history")

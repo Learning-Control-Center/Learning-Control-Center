@@ -30,7 +30,7 @@ from app.models import (
     ReviewEvent,
     SemanticCompetencyDefinition,
 )
-from app.portability.registry import PORTABLE_V9_MANIFEST
+from app.portability.registry import PORTABLE_V10_MANIFEST
 from app.roadmap_projection import service as projection_service
 from app.roadmap_projection.models import (
     LegacyRoadmapActiveState,
@@ -1144,17 +1144,19 @@ async def test_graph_projection_portable_v6_and_legacy_compatibility_are_separat
     client, csrf, roadmap = configured_client
     graph, _version, _first, _second = await _setup_native_graph(client, csrf)
     package = _portable_payload(db)
-    assert package["manifest"] == PORTABLE_V9_MANIFEST
+    assert package["manifest"] == PORTABLE_V10_MANIFEST
     assert package["roadmapProjectionCheckpoint"]["configured"] is True
-    _validate_portable_payload(package, "graph-projection-v8", schema_version=9)
+    _validate_portable_payload(package, "graph-projection-v8", schema_version=10)
     tampered = copy.deepcopy(package)
     tampered["tables"]["learning_graph_versions"][0]["content_hash"] = "0" * 64
     with pytest.raises(AppError, match="Graph policy lineage or content hash"):
-        _validate_portable_payload(tampered, "graph-projection-tampered", schema_version=9)
+        _validate_portable_payload(tampered, "graph-projection-tampered", schema_version=10)
     activation_tamper = copy.deepcopy(package)
     activation_tamper["tables"]["learning_graph_activation_events"][0]["event_sequence"] = 2
     with pytest.raises(AppError, match="Graph activation history"):
-        _validate_portable_payload(activation_tamper, "graph-activation-tampered", schema_version=9)
+        _validate_portable_payload(
+            activation_tamper, "graph-activation-tampered", schema_version=10
+        )
 
     compatibility = await client.get(
         f"/api/v2/roadmap-projection/legacy-roadmap-graph/{roadmap['activeVersion']['id']}"
@@ -1260,14 +1262,14 @@ async def test_current_portable_v9_round_trip_preserves_manual_presentation(
         "roadmap-projection/v3.0"
     )
     assert package["roadmapProjectionCheckpoint"]["layoutPolicyVersion"] == ("roadmap-layout/v3.0")
-    _validate_portable_payload(package, "current-v3-round-trip", schema_version=9)
+    _validate_portable_payload(package, "current-v3-round-trip", schema_version=10)
 
     _apply_portable_restore(
         db,
         package,
         True,
         package_id="current-v3-round-trip",
-        schema_version=9,
+        schema_version=10,
     )
 
     restored_override = db.get(RoadmapNodePositionOverride, override.id)

@@ -233,7 +233,7 @@ async def test_verification_application_service_creates_result_and_context_evide
     db.delete(attachment)
     db.commit()
     assert db.get(Evidence, context.id) is not None
-    _validate_portable_payload(_portable_payload(db), "deleted-source-retained", schema_version=9)
+    _validate_portable_payload(_portable_payload(db), "deleted-source-retained", schema_version=10)
 
 
 async def test_verification_import_uses_same_evidence_path_and_records_package_provenance(
@@ -635,7 +635,9 @@ async def test_portable_evidence_history_round_trips_and_rejects_lineage_tamperi
     )
     assert updated.status_code == 200
     portable = _portable_payload(db)
-    tables, _summary = _validate_portable_payload(portable, "evidence-round-trip", schema_version=9)
+    tables, _summary = _validate_portable_payload(
+        portable, "evidence-round-trip", schema_version=10
+    )
     assert len(tables["evidence"]) == 2
     assert len(tables["evidence_retractions"]) == 1
     assert json.loads(tables["evidence"][0]["provenance_json"])["origin_kind"] == "local"
@@ -648,35 +650,35 @@ async def test_portable_evidence_history_round_trips_and_rejects_lineage_tamperi
     )
     run["result_hash"] = "0" * 64
     with pytest.raises(AppError, match="Evidence backfill lineage"):
-        _validate_portable_payload(tampered, "evidence-tampered", schema_version=9)
+        _validate_portable_payload(tampered, "evidence-tampered", schema_version=10)
     invalid_policy = copy.deepcopy(portable)
     invalid_policy["tables"]["evidence"][0]["policy_version"] = "future-policy/v99"
     with pytest.raises(AppError, match="Evidence provenance is inconsistent"):
-        _validate_portable_payload(invalid_policy, "evidence-policy-tampered", schema_version=9)
+        _validate_portable_payload(invalid_policy, "evidence-policy-tampered", schema_version=10)
     invalid_source = copy.deepcopy(portable)
     provenance = json.loads(invalid_source["tables"]["evidence"][0]["provenance_json"])
     provenance["source_record_id"] = "different-source"
     invalid_source["tables"]["evidence"][0]["provenance_json"] = json.dumps(provenance)
     with pytest.raises(AppError, match="Evidence provenance is inconsistent"):
-        _validate_portable_payload(invalid_source, "evidence-source-tampered", schema_version=9)
+        _validate_portable_payload(invalid_source, "evidence-source-tampered", schema_version=10)
     invalid_origin = copy.deepcopy(portable)
     provenance = json.loads(invalid_origin["tables"]["evidence"][0]["provenance_json"])
     provenance["origin_kind"] = "import"
     provenance.pop("import_package_id", None)
     invalid_origin["tables"]["evidence"][0]["provenance_json"] = json.dumps(provenance)
     with pytest.raises(AppError, match="Evidence provenance is inconsistent"):
-        _validate_portable_payload(invalid_origin, "evidence-origin-tampered", schema_version=9)
+        _validate_portable_payload(invalid_origin, "evidence-origin-tampered", schema_version=10)
     unsafe_reference = copy.deepcopy(portable)
     unsafe_reference["tables"]["evidence"][0]["external_reference"] = (
         "https://example.test/result?access_token=secret"
     )
     with pytest.raises(AppError, match="credential-bearing external reference"):
-        _validate_portable_payload(unsafe_reference, "unsafe-evidence-reference", schema_version=9)
+        _validate_portable_payload(unsafe_reference, "unsafe-evidence-reference", schema_version=10)
     invalid_link_provenance = copy.deepcopy(portable)
     invalid_link_provenance["tables"]["evidence_links"][0]["provenance_json"] = "{}"
     with pytest.raises(AppError, match="EvidenceLink is inconsistent"):
         _validate_portable_payload(
-            invalid_link_provenance, "evidence-link-provenance-tampered", schema_version=9
+            invalid_link_provenance, "evidence-link-provenance-tampered", schema_version=10
         )
 
 

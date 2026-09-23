@@ -141,4 +141,60 @@ describe('frontend polish regressions', () => {
     expect(guideLink).toHaveAttribute('href', '/IMPORT_EXPORT_FORMAT.md')
     expect(guideLink).toHaveAttribute('download', 'IMPORT_EXPORT_FORMAT.md')
   })
+
+  it('shows a Master Import semantic diff in the existing import flow', async () => {
+    const transport = '{ "schemaVersion": 1, "packageType": "master_import" }'
+    let inspectedRawText = ''
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/history')) return json({ items: [] })
+      if (url.includes('/roadmap/current')) return json({ configured: false })
+      if (url.includes('/import/inspect')) {
+        inspectedRawText = JSON.parse(String(init?.body)).rawText as string
+        return json({
+          valid: true,
+          dryRun: true,
+          summary: {},
+          diff: {
+            lineageKey: 'test.learning',
+            contentRevision: 1,
+            detailLimit: 32,
+            summaryCounts: {
+              stableIdentitiesCreated: 1,
+              stableIdentitiesReused: 0,
+              immutableVersionsCreated: 1,
+              unchangedImmutableVersions: 0,
+              activationsChanged: 1,
+              removedFromActiveVersion: 0,
+            },
+            stableIdentitiesCreated: {
+              total: 1,
+              shown: 1,
+              omitted: 0,
+              truncated: false,
+              items: [['competency', 'global', 'test.comp']],
+            },
+          },
+          confirmationToken: 'test-token',
+        })
+      }
+      return json({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const view = render(
+      <MemoryRouter>
+        <TransferPage />
+      </MemoryRouter>,
+    )
+    const file = new File([transport], 'master.json', { type: 'application/json' })
+    Object.defineProperty(file, 'arrayBuffer', {
+      value: async () => new TextEncoder().encode(transport).buffer,
+    })
+    await userEvent.upload(view.container.querySelector('input[type="file"]') as HTMLInputElement, file)
+    await userEvent.click(await screen.findByRole('button', { name: 'Validate and preview' }))
+    expect(await screen.findByText('Master Import revision 1 · test.learning')).toBeInTheDocument()
+    expect(screen.getByText('Identities created').parentElement?.querySelector('strong')).toHaveTextContent('1')
+    expect(screen.getByText(/Counts cover the full package/)).toBeInTheDocument()
+    expect(inspectedRawText).toBe(transport)
+  })
 })

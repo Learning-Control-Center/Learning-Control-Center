@@ -603,6 +603,7 @@ class ImportEnvelope(StrictModel):
         "verification_update",
         "state_update",
         "restore",
+        "master_import",
     ]
     packageId: str = Field(min_length=1, max_length=255)
     appVersion: str
@@ -659,6 +660,7 @@ class PortablePackagePayload(StrictModel):
 class ImportInspectRequest(StrictModel):
     filename: str = Field(min_length=1, max_length=512)
     package: ImportEnvelope
+    rawText: str | None = None
 
 
 class ImportApplyRequest(ImportInspectRequest):

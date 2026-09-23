@@ -113,6 +113,8 @@ from app.models import (
     ImportRecord,
     LearningSession,
     LegacyCriterionAssertion,
+    MasterImportOwnedKey,
+    MasterImportRevision,
     MigrationBackfillRun,
     MilestoneIdentity,
     Phase,
@@ -238,6 +240,9 @@ def _validate_json_columns(connection: Any) -> None:
         (GeneratedReport, "structured_payload_json"),
         (RecommendationSnapshot, "structured_payload_json"),
         (ImportRecord, "dry_run_summary_json"),
+        (MasterImportRevision, "provenance_json"),
+        (MasterImportRevision, "selected_versions_json"),
+        (MasterImportRevision, "activation_json"),
         (ExportRecord, "scope_summary_json"),
         (ApplicationSetting, "value_json"),
         (AnalysisRun, "scope_json"),
@@ -3073,6 +3078,7 @@ def validate_domain_integrity(connection: Any) -> None:
             {"violationCount": len(violations)},
         )
     _validate_json_columns(connection)
+    _validate_master_import_ledger(connection)
     _validate_analysis_history(connection)
     _validate_analysis_v3(connection)
     _validate_recommendation_v2(connection)
@@ -3098,6 +3104,397 @@ def validate_domain_integrity(connection: Any) -> None:
                 "PORTABLE_TIMEZONE_INVALID",
                 "The discipline timezone is not a valid IANA timezone.",
             ) from exc
+
+
+def _validate_master_import_ledger(connection: Any) -> None:
+    def ledger_object(value: str) -> dict[str, Any]:
+        try:
+            decoded = json.loads(value)
+        except (TypeError, ValueError) as exc:
+            raise AppError(
+                422, "MASTER_IMPORT_LEDGER_INVALID", "Master Import ledger metadata is invalid."
+            ) from exc
+        if not isinstance(decoded, dict):
+            raise AppError(
+                422, "MASTER_IMPORT_LEDGER_INVALID", "Master Import ledger metadata is invalid."
+            )
+        return decoded
+
+    revisions = connection.execute(select(*MasterImportRevision.__table__.c)).mappings().all()
+    owned_keys = connection.execute(select(*MasterImportOwnedKey.__table__.c)).mappings().all()
+    records = {
+        row["id"]: row
+        for row in connection.execute(select(*ImportRecord.__table__.c)).mappings().all()
+    }
+    by_lineage: dict[str, list[Any]] = defaultdict(list)
+    by_id = {revision["id"]: revision for revision in revisions}
+    for revision in revisions:
+        record = records.get(revision["import_record_id"])
+        if record is None or record["import_type"] != "master_import" or not record["applied"]:
+            raise AppError(
+                422,
+                "MASTER_IMPORT_LEDGER_INVALID",
+                "Master Import revision has no applied import record.",
+            )
+        if not re.fullmatch(
+            r"mi-package-v1:sha256:[0-9a-f]{64}", revision["package_digest"]
+        ) or not re.fullmatch(r"mi-content-v1:sha256:[0-9a-f]{64}", revision["content_digest"]):
+            raise AppError(
+                422, "MASTER_IMPORT_LEDGER_INVALID", "Master Import digest format is invalid."
+            )
+        if revision["canonicalization_version"] != "mi-canon-v1":
+            raise AppError(
+                422,
+                "MASTER_IMPORT_LEDGER_INVALID",
+                "Master Import canonicalization version is invalid.",
+            )
+        for value in (
+            revision["provenance_json"],
+            revision["selected_versions_json"],
+            revision["activation_json"],
+        ):
+            ledger_object(value)
+        by_lineage[revision["lineage_key"]].append(revision)
+    ledger_record_ids = {revision["import_record_id"] for revision in revisions}
+    for record_id, record in records.items():
+        if record["import_type"] != "master_import":
+            continue
+        if record_id not in ledger_record_ids:
+            raise AppError(
+                422,
+                "MASTER_IMPORT_LEDGER_INVALID",
+                "Applied Master Import is missing its authoritative revision.",
+            )
+    for chain in by_lineage.values():
+        chain.sort(key=lambda item: item["content_revision"])
+        owner = chain[0]["owner_key"]
+        for index, revision in enumerate(chain):
+            if (
+                revision["content_revision"] != index + 1
+                or revision["owner_key"] != owner
+                or (
+                    revision["previous_content_digest"]
+                    != (chain[index - 1]["content_digest"] if index else None)
+                )
+            ):
+                raise AppError(
+                    422, "MASTER_IMPORT_LEDGER_INVALID", "Master Import revision chain is invalid."
+                )
+    for key in owned_keys:
+        first = by_id.get(key["first_revision_id"])
+        if (
+            first is None
+            or first["lineage_key"] != key["lineage_key"]
+            or first["owner_key"] != key["owner_key"]
+        ):
+            raise AppError(
+                422, "MASTER_IMPORT_LEDGER_INVALID", "Master Import key ownership is inconsistent."
+            )
+        if not key["canonical_id"] or not key["stable_key"] or not key["meaning_digest"]:
+            raise AppError(
+                422, "MASTER_IMPORT_LEDGER_INVALID", "Master Import key identity is incomplete."
+            )
+        if not re.fullmatch(r"mi-meaning-v1:sha256:[0-9a-f]{64}", key["meaning_digest"]):
+            raise AppError(
+                422, "MASTER_IMPORT_LEDGER_INVALID", "Master Import key meaning digest is invalid."
+            )
+    from app.curriculum.models import (
+        AssessmentRubricIdentity,
+        CurriculumObjectiveIdentity,
+        LearningUnitIdentity,
+    )
+    from app.learning_graph.models import CompetencyEdgeIdentity
+    from app.models import MilestoneIdentity, ProfileTargetIdentity, ReadinessGateIdentity
+
+    identity_tables = {
+        "competency": (CompetencyIdentity, "stable_key", None),
+        "criterion": (CriterionIdentity, "stable_key", "competency_identity_id"),
+        "profile": (TargetProfile, "stable_key", None),
+        "profileTarget": (ProfileTargetIdentity, "stable_key", "target_profile_id"),
+        "profileDomain": (TargetProfile, "stable_key", None),
+        "profileMilestone": (MilestoneIdentity, "stable_key", "target_profile_id"),
+        "readinessGate": (ReadinessGateIdentity, "stable_key", "target_profile_id"),
+        "curriculum": (Curriculum, "stable_key", None),
+        "objective": (CurriculumObjectiveIdentity, "stable_key", "curriculum_id"),
+        "unit": (LearningUnitIdentity, "stable_key", "curriculum_id"),
+        "requirement": (LearningUnitIdentity, "stable_key", None),
+        "opportunity": (LearningUnitIdentity, "stable_key", None),
+        "rubric": (AssessmentRubricIdentity, "stable_key", "curriculum_id"),
+        "graph": (LearningGraph, "stable_key", None),
+        "edge": (CompetencyEdgeIdentity, "stable_key", "learning_graph_id"),
+    }
+    table_rows = {
+        model: {
+            row["id"]: row
+            for row in connection.execute(select(*model.__table__.c)).mappings().all()
+        }
+        for model, _stable_column, _parent_column in identity_tables.values()
+    }
+    for key in owned_keys:
+        spec = identity_tables.get(key["entity_kind"])
+        if spec is None:
+            raise AppError(
+                422, "MASTER_IMPORT_LEDGER_INVALID", "Unknown Master Import owned entity kind."
+            )
+        model, stable_column, parent_column = spec
+        row = table_rows[model].get(key["canonical_id"])
+        if row is None:
+            raise AppError(
+                422, "MASTER_IMPORT_LEDGER_INVALID", "An owned canonical identity is missing."
+            )
+        if key["entity_kind"] in {"profileDomain", "requirement", "opportunity"}:
+            if row[stable_column] != key["scope_key"]:
+                raise AppError(
+                    422,
+                    "MASTER_IMPORT_LEDGER_INVALID",
+                    "An owned child scope does not match its root.",
+                )
+            continue
+        if row[stable_column] != key["stable_key"]:
+            raise AppError(
+                422, "MASTER_IMPORT_LEDGER_INVALID", "An owned canonical stable key has changed."
+            )
+        if parent_column:
+            parent_model = (
+                CompetencyIdentity
+                if key["entity_kind"] == "criterion"
+                else TargetProfile
+                if key["entity_kind"] in {"profileTarget", "profileMilestone", "readinessGate"}
+                else Curriculum
+                if key["entity_kind"] in {"objective", "unit", "rubric"}
+                else LearningGraph
+            )
+            parent = table_rows[parent_model].get(row[parent_column])
+            if parent is None or parent["stable_key"] != key["scope_key"]:
+                raise AppError(
+                    422, "MASTER_IMPORT_LEDGER_INVALID", "An owned canonical scope is invalid."
+                )
+    ownership = {
+        (key["lineage_key"], key["entity_kind"], key["scope_key"], key["stable_key"])
+        for key in owned_keys
+    }
+    for revision in revisions:
+        selected = ledger_object(revision["selected_versions_json"])
+        activation = ledger_object(revision["activation_json"])
+        competencies = selected.get("competencies")
+        competency_activations = activation.get("competencies")
+        if (
+            not isinstance(competencies, dict)
+            or not competencies
+            or not isinstance(competency_activations, dict)
+            or not isinstance(selected.get("roots"), list)
+            or not isinstance(selected.get("activeChildren"), list)
+        ):
+            raise AppError(
+                422, "MASTER_IMPORT_LEDGER_INVALID", "Selected Competency versions are missing."
+            )
+        roots = selected["roots"]
+        children = selected["activeChildren"]
+        if (
+            any(not isinstance(root, str) for root in roots)
+            or len(set(roots)) != len(roots)
+            or any(
+                not isinstance(child, list)
+                or len(child) != 2
+                or any(not isinstance(part, str) for part in child)
+                for child in children
+            )
+            or len({tuple(child) for child in children}) != len(children)
+        ):
+            raise AppError(
+                422, "MASTER_IMPORT_LEDGER_INVALID", "Selected Master Import snapshot is invalid."
+            )
+        root_keys = {f"competency:{stable_key}" for stable_key in competencies}
+        root_stables: dict[str, str] = {}
+        for label, model in (
+            ("profile", TargetProfile),
+            ("curriculum", Curriculum),
+            ("graph", LearningGraph),
+        ):
+            root_info = selected.get(label)
+            root_row = (
+                table_rows[model].get(root_info.get("rootId"))
+                if isinstance(root_info, dict)
+                else None
+            )
+            if not isinstance(root_info, dict) or root_row is None:
+                raise AppError(
+                    422, "MASTER_IMPORT_LEDGER_INVALID", "A selected Master Import root is missing."
+                )
+            stable_key = root_row["stable_key"]
+            root_stables[label] = stable_key
+            root_keys.add(f"{label}:{stable_key}")
+            if (revision["lineage_key"], label, "global", stable_key) not in ownership:
+                raise AppError(422, "MASTER_IMPORT_LEDGER_INVALID", "A selected root is not owned.")
+            if not re.fullmatch(r"[0-9a-f]{64}", str(root_info.get("authoredHash"))):
+                raise AppError(
+                    422, "MASTER_IMPORT_LEDGER_INVALID", "A selected version hash is invalid."
+                )
+        if set(roots) != root_keys:
+            raise AppError(
+                422,
+                "MASTER_IMPORT_LEDGER_INVALID",
+                "Selected root snapshot does not match lineage.",
+            )
+        for stable_key, item in competencies.items():
+            if (
+                (revision["lineage_key"], "competency", "global", stable_key) not in ownership
+                or not isinstance(item, dict)
+                or not re.fullmatch(r"[0-9a-f]{64}", str(item.get("authoredHash")))
+            ):
+                raise AppError(
+                    422, "MASTER_IMPORT_LEDGER_INVALID", "A selected Competency is not owned."
+                )
+        child_scopes = {
+            "profileDomain": root_stables["profile"],
+            "profileTarget": root_stables["profile"],
+            "profileMilestone": root_stables["profile"],
+            "readinessGate": root_stables["profile"],
+            "objective": root_stables["curriculum"],
+            "unit": root_stables["curriculum"],
+            "rubric": root_stables["curriculum"],
+            "edge": root_stables["graph"],
+        }
+        for kind, authored_key in children:
+            if kind in {"criterion", "requirement", "opportunity"}:
+                if authored_key.count("::") != 1:
+                    raise AppError(
+                        422, "MASTER_IMPORT_LEDGER_INVALID", "An active child key is malformed."
+                    )
+                scope, stable_key = authored_key.split("::", 1)
+            else:
+                scope, stable_key = child_scopes.get(kind, ""), authored_key
+            if (revision["lineage_key"], kind, scope, stable_key) not in ownership:
+                raise AppError(422, "MASTER_IMPORT_LEDGER_INVALID", "An active child is not owned.")
+        for stable_key, item in competencies.items():
+            identity = (
+                table_rows[CompetencyIdentity].get(item.get("identityId"))
+                if isinstance(item, dict)
+                else None
+            )
+            definition = (
+                connection.execute(
+                    select(*SemanticCompetencyDefinition.__table__.c).where(
+                        SemanticCompetencyDefinition.id == item.get("versionId")
+                    )
+                )
+                .mappings()
+                .one_or_none()
+                if identity
+                else None
+            )
+            if (
+                identity is None
+                or identity["stable_key"] != stable_key
+                or definition is None
+                or definition["competency_identity_id"] != identity["id"]
+            ):
+                raise AppError(
+                    422,
+                    "MASTER_IMPORT_LEDGER_INVALID",
+                    "A selected semantic version is inconsistent.",
+                )
+            event_info = competency_activations.get(stable_key)
+            if not isinstance(event_info, dict):
+                raise AppError(
+                    422,
+                    "MASTER_IMPORT_LEDGER_INVALID",
+                    "Semantic activation provenance is invalid.",
+                )
+            event = (
+                connection.execute(
+                    select(*CompetencyDefinitionActivationEvent.__table__.c).where(
+                        CompetencyDefinitionActivationEvent.id == event_info.get("eventId")
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if (
+                event is None
+                or event["to_definition_id"] != definition["id"]
+                or event_info.get("versionId") != definition["id"]
+            ):
+                raise AppError(
+                    422,
+                    "MASTER_IMPORT_LEDGER_INVALID",
+                    "Semantic activation provenance is inconsistent.",
+                )
+        for label, root_model, version_model, root_fk, event_model, event_fk in (
+            (
+                "profile",
+                TargetProfile,
+                TargetProfileVersion,
+                "target_profile_id",
+                TargetProfileActivationEvent,
+                "to_profile_version_id",
+            ),
+            (
+                "curriculum",
+                Curriculum,
+                CurriculumVersion,
+                "curriculum_id",
+                CurriculumActivationEvent,
+                "to_curriculum_version_id",
+            ),
+            (
+                "graph",
+                LearningGraph,
+                LearningGraphVersion,
+                "learning_graph_id",
+                LearningGraphActivationEvent,
+                "to_learning_graph_version_id",
+            ),
+        ):
+            item = selected.get(label, {})
+            root = (
+                table_rows[root_model].get(item.get("rootId")) if isinstance(item, dict) else None
+            )
+            version = (
+                connection.execute(
+                    select(*version_model.__table__.c).where(
+                        version_model.id == item.get("versionId")
+                    )
+                )
+                .mappings()
+                .one_or_none()
+                if root
+                else None
+            )
+            activation_label = {
+                "profile": "targetProfile",
+                "curriculum": "curriculum",
+                "graph": "learningGraph",
+            }[label]
+            event_info = activation.get(activation_label)
+            if not isinstance(event_info, dict):
+                raise AppError(
+                    422,
+                    "MASTER_IMPORT_LEDGER_INVALID",
+                    "Aggregate activation provenance is invalid.",
+                )
+            event = (
+                connection.execute(
+                    select(*event_model.__table__.c).where(
+                        event_model.id == event_info.get("eventId")
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if (
+                root is None
+                or version is None
+                or version[root_fk] != root["id"]
+                or event is None
+                or event[event_fk] != version["id"]
+                or event_info.get("versionId") != version["id"]
+            ):
+                raise AppError(
+                    422,
+                    "MASTER_IMPORT_LEDGER_INVALID",
+                    "Aggregate activation provenance is inconsistent.",
+                )
 
 
 def _validate_authority(connection: Any) -> None:

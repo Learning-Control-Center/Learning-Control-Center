@@ -3,8 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 
-PORTABLE_SCHEMA_CURRENT = 9
-PORTABLE_SCHEMA_READABLE = frozenset({1, 2, 3, 4, 5, 6, 7, 8, 9})
+PORTABLE_SCHEMA_CURRENT = 10
+PORTABLE_SCHEMA_READABLE = frozenset({1, 2, 3, 4, 5, 6, 7, 8, 9, 10})
 PORTABLE_V2_FOUNDATION_TABLES = frozenset(
     {
         "analysis_runs",
@@ -436,6 +436,34 @@ PORTABLE_V9_MANIFEST = {
         "verify_monotonic_learning_control_authority_history",
     ],
 }
+
+PORTABLE_V10_MASTER_IMPORT_TABLES = frozenset(
+    {"master_import_revisions", "master_import_owned_keys"}
+)
+PORTABLE_V10_MANIFEST = {
+    "includedCanonicalDomains": [
+        *PORTABLE_V9_MANIFEST["includedCanonicalDomains"],
+        "master_import_owned_keys",
+    ],
+    "includedImmutableHistory": [
+        *PORTABLE_V9_MANIFEST["includedImmutableHistory"],
+        "master_import_revisions",
+    ],
+    "omittedRebuildableState": [*PORTABLE_V9_MANIFEST["omittedRebuildableState"]],
+    "restoreActions": [
+        *PORTABLE_V9_MANIFEST["restoreActions"],
+        "validate_master_import_ledger",
+    ],
+}
+
+
+def upgrade_v9_to_v10_tables(tables: dict[str, list[dict[str, object]]]) -> dict[str, int]:
+    """V9 predates Master Import; preserve that fact as an empty ledger."""
+    if set(tables) & PORTABLE_V10_MASTER_IMPORT_TABLES:
+        raise ValueError("Portable V9 cannot contain Master Import ledger rows.")
+    for table_name in PORTABLE_V10_MASTER_IMPORT_TABLES:
+        tables[table_name] = []
+    return {"initializedMasterImportTables": len(PORTABLE_V10_MASTER_IMPORT_TABLES)}
 
 
 def upgrade_v2_to_v3_tables(tables: dict[str, list[dict[str, object]]]) -> dict[str, int]:

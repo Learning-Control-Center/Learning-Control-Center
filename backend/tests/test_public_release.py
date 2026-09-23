@@ -87,6 +87,7 @@ def _release_repository(tmp_path: Path, *, stub_installer: bool = False) -> Path
         "deploy/learning-control-center.service",
         "deploy/learning-control-center-update.sh",
         "docs/INSTALLATION.md",
+        "docs/IMPORT_EXPORT_FORMAT.md",
         "docs/PRODUCTION_OPERATIONS.md",
         "docs/RELEASING.md",
         "docs/UPDATES.md",

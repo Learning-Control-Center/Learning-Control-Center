@@ -281,7 +281,7 @@ def _identity_signature(db: Session, edge: CompetencyEdgeInput) -> tuple[str, st
 
 
 def create_version(
-    db: Session, graph: LearningGraph, payload: LearningGraphVersionInput
+    db: Session, graph: LearningGraph, payload: LearningGraphVersionInput, *, commit: bool = True
 ) -> LearningGraphVersion:
     validation = validate_version(db, payload, graph_id=graph.id)
     latest = db.scalar(
@@ -353,7 +353,9 @@ def create_version(
                 order_index=edge_input.order_index,
             )
         )
-    db.commit()
+    db.flush()
+    if commit:
+        db.commit()
     return version
 
 
@@ -390,6 +392,7 @@ def activate_version(
     source: str,
     reason: str,
     idempotency_key: str,
+    commit: bool = True,
 ) -> LearningGraphActivationEvent:
     existing = db.scalar(
         select(LearningGraphActivationEvent).where(
@@ -477,7 +480,9 @@ def activate_version(
             requested_at=now,
         )
     )
-    db.commit()
+    db.flush()
+    if commit:
+        db.commit()
     return item
 
 

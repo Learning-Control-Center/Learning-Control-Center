@@ -207,8 +207,8 @@ def readiness_report(db: Session) -> dict[str, Any]:
             "detail": POLICY_REGISTRY_VERSION,
         },
         {
-            "code": "PORTABLE_SCHEMA_V9",
-            "ready": PORTABLE_SCHEMA_CURRENT == 9,
+            "code": "PORTABLE_SCHEMA_V10",
+            "ready": PORTABLE_SCHEMA_CURRENT == 10,
             "detail": PORTABLE_SCHEMA_CURRENT,
         },
         {

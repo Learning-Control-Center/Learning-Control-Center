@@ -32,6 +32,15 @@ const purposes = [
   ],
 ] as const
 
+const masterDiffCounts = [
+  ['stableIdentitiesCreated', 'Identities created'],
+  ['stableIdentitiesReused', 'Identities reused'],
+  ['immutableVersionsCreated', 'Versions created'],
+  ['unchangedImmutableVersions', 'Versions unchanged'],
+  ['activationsChanged', 'Activations changed'],
+  ['removedFromActiveVersion', 'Explicit removals'],
+] as const
+
 export function TransferPage() {
   const [purpose, setPurpose] = useState<Purpose>('analysis_snapshot')
   const [range, setRange] = useState('30d')
@@ -48,6 +57,7 @@ export function TransferPage() {
   const [competencyIdentityIds, setCompetencyIdentityIds] = useState<string[]>([])
   const [roadmap, setRoadmap] = useState<Roadmap | null>(null)
   const [packageValue, setPackageValue] = useState<Record<string, unknown> | null>(null)
+  const [rawText, setRawText] = useState('')
   const [filename, setFilename] = useState('')
   const [preview, setPreview] = useState<Preview | null>(null)
   const [replaceExisting, setReplaceExisting] = useState(false)
@@ -58,6 +68,7 @@ export function TransferPage() {
   const replacementRestore =
     packageValue?.packageType === 'portable_logical_backup' ||
     packageValue?.packageType === 'restore'
+  const masterImport = packageValue?.packageType === 'master_import'
 
   const loadHistory = useCallback(async () => {
     const result = await api<{ items: Operation[] }>('/import-export/history?limit=12')
@@ -123,7 +134,11 @@ export function TransferPage() {
     setPreview(null)
     setMessage('')
     try {
-      setPackageValue(JSON.parse(await file.text()) as Record<string, unknown>)
+      const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(
+        await file.arrayBuffer(),
+      )
+      setRawText(text)
+      setPackageValue(JSON.parse(text) as Record<string, unknown>)
       setFilename(file.name)
     } catch {
       setError('The selected file is not valid JSON.')
@@ -136,7 +151,11 @@ export function TransferPage() {
       setPreview(
         await api<Preview>('/import-export/import/inspect', {
           method: 'POST',
-          body: JSON.stringify({ filename, package: packageValue }),
+          body: JSON.stringify({
+            filename,
+            package: packageValue,
+            ...(masterImport ? { rawText } : {}),
+          }),
         }),
       )
     } catch (caught) {
@@ -147,18 +166,28 @@ export function TransferPage() {
   const apply = async () => {
     if (!packageValue || !preview) return
     try {
-      await api('/import-export/import/apply', {
+      const result = await api<{ applied: boolean; alreadyApplied?: boolean; derivedProcessing?: { status: string } }>('/import-export/import/apply', {
         method: 'POST',
         body: JSON.stringify({
           filename,
           package: packageValue,
+          ...(masterImport ? { rawText } : {}),
           confirmation_token: preview.confirmationToken,
           replace_existing: replaceExisting,
         }),
       })
-      setMessage('Import applied transactionally.')
+      setMessage(
+        result.alreadyApplied
+          ? 'This exact Master Import package was already applied.'
+          : result.derivedProcessing?.status === 'failed'
+            ? 'Canonical content was applied. Derived processing failed and needs operator review.'
+          : result.derivedProcessing?.status === 'pending_retry'
+            ? 'Canonical content was applied. Derived processing is pending retry.'
+            : 'Import applied transactionally.',
+      )
       setPreview(null)
       setPackageValue(null)
+      setRawText('')
       await loadHistory()
     } catch (caught) {
       setError(caught instanceof ApiError ? caught.message : 'The import could not be applied.')
@@ -378,9 +407,45 @@ export function TransferPage() {
                   <CheckCircle2 className="size-4" />
                   Package valid · dry run complete
                 </p>
-                <pre className="mt-3 max-h-56 overflow-auto whitespace-pre-wrap break-words font-mono text-xs leading-5 text-ink/70">
-                  {JSON.stringify(preview.diff, null, 2)}
-                </pre>
+                {masterImport ? (
+                  <div className="mt-3">
+                    <p className="text-sm text-ink/70">
+                      {preview.diff.replay
+                        ? 'This exact package was already applied. Applying it again is a no-op.'
+                        : `Master Import revision ${String(preview.diff.contentRevision)} · ${String(preview.diff.lineageKey)}`}
+                    </p>
+                    {!preview.diff.replay ? (
+                      <>
+                        <div className="mt-3 grid grid-cols-2 gap-2 text-sm sm:grid-cols-3">
+                          {masterDiffCounts.map(([key, label]) => {
+                            const counts = preview.diff.summaryCounts as Record<string, unknown> | undefined
+                            return (
+                              <div className="rounded-lg border border-moss/15 bg-white/70 px-3 py-2" key={key}>
+                                <strong className="block text-lg text-ink">
+                                  {typeof counts?.[key] === 'number' ? counts[key] as number : 0}
+                                </strong>
+                                <span className="text-xs text-ink/65">{label}</span>
+                              </div>
+                            )
+                          })}
+                        </div>
+                        <p className="mt-3 text-xs text-ink/60">
+                          Counts cover the full package. Detail lists show up to {String(preview.diff.detailLimit)} stable keys each and report omitted items.
+                        </p>
+                      </>
+                    ) : null}
+                    <details className="mt-3 text-sm">
+                      <summary className="cursor-pointer font-medium text-moss">Review bounded semantic diff details</summary>
+                      <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words font-mono text-xs leading-5 text-ink/70">
+                        {JSON.stringify(preview.diff, null, 2)}
+                      </pre>
+                    </details>
+                  </div>
+                ) : (
+                  <pre className="mt-3 max-h-56 overflow-auto whitespace-pre-wrap break-words font-mono text-xs leading-5 text-ink/70">
+                    {JSON.stringify(preview.diff, null, 2)}
+                  </pre>
+                )}
               </div>
               {replacementRestore ? (
                 <label className="mt-4 flex items-start gap-3 rounded-xl bg-amber-50 p-4 text-sm text-amber-900">
@@ -398,6 +463,12 @@ export function TransferPage() {
                     </span>
                   </span>
                 </label>
+              ) : null}
+              {masterImport ? (
+                <p className="mt-4 rounded-xl bg-copper/10 p-4 text-sm leading-6 text-copper">
+                  Master Import adds and activates authored technical learning content. Its preview is
+                  bound to the uploaded text and current content state. Existing learner history stays intact.
+                </p>
               ) : null}
               <button className="button-primary mt-4 w-full" onClick={() => void apply()}>
                 <AlertTriangle className="size-4" />

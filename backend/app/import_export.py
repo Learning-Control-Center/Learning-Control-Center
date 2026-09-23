@@ -16,8 +16,8 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import ValidationError
-from sqlalchemy import Engine, Table, insert, select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import Engine, Table, func, insert, select
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.analysis.v3.models import (
@@ -136,6 +136,8 @@ from app.models import (
     ImportRecord,
     LearningSession,
     LegacyCriterionAssertion,
+    MasterImportOwnedKey,
+    MasterImportRevision,
     MigrationBackfillRun,
     MilestoneIdentity,
     OperationalBackup,
@@ -192,6 +194,8 @@ from app.portability.registry import (
     PORTABLE_V8_TODAY_TABLES,
     PORTABLE_V9_AUTHORITY_TABLES,
     PORTABLE_V9_MANIFEST,
+    PORTABLE_V10_MANIFEST,
+    PORTABLE_V10_MASTER_IMPORT_TABLES,
     supports_portable_schema,
     upgrade_v2_to_v3_tables,
     upgrade_v3_to_v4_tables,
@@ -200,6 +204,7 @@ from app.portability.registry import (
     upgrade_v6_to_v7_tables,
     upgrade_v7_to_v8_tables,
     upgrade_v8_to_v9_tables,
+    upgrade_v9_to_v10_tables,
 )
 from app.projects.contracts import ProjectCatalogPublicDTO
 from app.projects.models import (
@@ -426,6 +431,8 @@ PORTABLE_MODELS = [
     DisciplineProfile,
     DisciplineConfigurationEvent,
     ImportRecord,
+    MasterImportRevision,
+    MasterImportOwnedKey,
     ExportRecord,
     ApplicationSetting,
 ]
@@ -444,6 +451,10 @@ class Preview:
     token: str
     expires_at: int
     summary: dict[str, Any]
+    transport_digest: str | None = None
+    base_state_digest: str | None = None
+    semantic_diff_digest: str | None = None
+    session_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -455,7 +466,7 @@ class ResolvedExportScope:
     scope_payload: dict[str, Any]
 
 
-_previews: dict[str, Preview] = {}
+_previews: dict[str | tuple[str, str], Preview] = {}
 
 
 def _package_digest(package: dict[str, Any]) -> str:
@@ -510,7 +521,7 @@ def _capability_projection_checkpoints(db: Session) -> list[dict[str, str]]:
 
 def _portable_payload(db: Session, project_ids: set[str] | None = None) -> dict[str, Any]:
     payload: dict[str, Any] = {
-        "manifest": PORTABLE_V9_MANIFEST,
+        "manifest": PORTABLE_V10_MANIFEST,
         "tables": {
             _table(model).name: [_row_dict(item) for item in db.scalars(select(model)).all()]
             for model in PORTABLE_MODELS
@@ -2592,6 +2603,12 @@ def _normalize_portable_tables(
             "PORTABLE_MANIFEST_INVALID",
             "The portable V9 manifest is missing or does not match the recovery contract.",
         )
+    if schema_version == 10 and parsed.manifest != PORTABLE_V10_MANIFEST:
+        raise AppError(
+            422,
+            "PORTABLE_MANIFEST_INVALID",
+            "The portable V10 manifest is missing or does not match the recovery contract.",
+        )
     if schema_version == 1 and parsed.manifest is not None:
         raise AppError(
             422, "PORTABLE_SCHEMA_INVALID", "A V1 portable package cannot contain a V2 manifest."
@@ -2629,6 +2646,12 @@ def _normalize_portable_tables(
         raise AppError(
             422, "PORTABLE_SCHEMA_INVALID", "A V8 portable package cannot contain V9 tables."
         )
+    if schema_version < 10 and set(tables) & PORTABLE_V10_MASTER_IMPORT_TABLES:
+        raise AppError(
+            422,
+            "PORTABLE_SCHEMA_INVALID",
+            "Older portable packages cannot contain Master Import ledger tables.",
+        )
     unknown = set(tables) - set(PORTABLE_BY_TABLE)
     v2_tables = set(PORTABLE_V2_FOUNDATION_TABLES)
     v3_tables = set(PORTABLE_V3_CURRICULUM_TABLES)
@@ -2638,6 +2661,7 @@ def _normalize_portable_tables(
     v7_tables = set(PORTABLE_V7_RECOMMENDATION_TABLES)
     v8_tables = set(PORTABLE_V8_TODAY_TABLES)
     v9_tables = set(PORTABLE_V9_AUTHORITY_TABLES)
+    v10_tables = set(PORTABLE_V10_MASTER_IMPORT_TABLES)
     missing = set(PORTABLE_BY_TABLE) - set(tables)
     allowed_v1_missing = (
         v2_tables
@@ -2648,6 +2672,7 @@ def _normalize_portable_tables(
         | v7_tables
         | v8_tables
         | v9_tables
+        | v10_tables
         | {"roadmap_scope_events"}
     )
     legacy_without_scope_history = schema_version == 1 and "roadmap_scope_events" in missing
@@ -2656,20 +2681,34 @@ def _normalize_portable_tables(
         or (
             schema_version == 2
             and missing
-            <= (v3_tables | v4_tables | v5_tables | v6_tables | v7_tables | v8_tables | v9_tables)
+            <= (
+                v3_tables
+                | v4_tables
+                | v5_tables
+                | v6_tables
+                | v7_tables
+                | v8_tables
+                | v9_tables
+                | v10_tables
+            )
         )
         or (
             schema_version == 3
-            and missing <= (v4_tables | v5_tables | v6_tables | v7_tables | v8_tables | v9_tables)
+            and missing
+            <= (v4_tables | v5_tables | v6_tables | v7_tables | v8_tables | v9_tables | v10_tables)
         )
         or (
             schema_version == 4
-            and missing <= (v5_tables | v6_tables | v7_tables | v8_tables | v9_tables)
+            and missing <= (v5_tables | v6_tables | v7_tables | v8_tables | v9_tables | v10_tables)
         )
-        or (schema_version == 5 and missing <= (v6_tables | v7_tables | v8_tables | v9_tables))
-        or (schema_version == 6 and missing <= (v7_tables | v8_tables | v9_tables))
-        or (schema_version == 7 and missing <= (v8_tables | v9_tables))
-        or (schema_version == 8 and missing <= v9_tables)
+        or (
+            schema_version == 5
+            and missing <= (v6_tables | v7_tables | v8_tables | v9_tables | v10_tables)
+        )
+        or (schema_version == 6 and missing <= (v7_tables | v8_tables | v9_tables | v10_tables))
+        or (schema_version == 7 and missing <= (v8_tables | v9_tables | v10_tables))
+        or (schema_version == 8 and missing <= (v9_tables | v10_tables))
+        or (schema_version == 9 and missing <= v10_tables)
         or not missing
     )
     if unknown or not valid_missing:
@@ -2742,6 +2781,11 @@ def _normalize_portable_tables(
         upgrade_authority_compatibility()
     elif schema_version == 8:
         upgrade_authority_compatibility()
+    if schema_version < 10:
+        try:
+            upgrade_v9_to_v10_tables(tables)
+        except ValueError as exc:
+            raise AppError(422, "PORTABLE_SCHEMA_INVALID", str(exc)) from exc
     _sanitize_portable_host_metadata(tables)
     return tables, legacy_without_scope_history
 
@@ -2903,6 +2947,13 @@ def _validate_portable_payload(
                 "nativeAuthorityHistoryInferred": 0,
             }
         )
+    if schema_version < 10:
+        compatibility_conversions.update(
+            {
+                "initializedMasterImportTables": len(PORTABLE_V10_MASTER_IMPORT_TABLES),
+                "nativeMasterImportLedgerInferred": 0,
+            }
+        )
     return tables, {
         "tableCounts": {name: len(rows) for name, rows in sorted(tables.items())},
         "portableCompatibility": (
@@ -2949,9 +3000,92 @@ def _preflight_application(
 
 
 def _inspect_package(
-    payload: ImportInspectRequest, settings: Settings, db: Session
+    payload: ImportInspectRequest,
+    settings: Settings,
+    db: Session,
+    *,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     package = payload.package.model_dump(mode="json")
+    if payload.package.packageType == "master_import":
+        if session_id is None:
+            raise AppError(401, "AUTH_REQUIRED", "Authentication is required.")
+        from app.master_import.canonical import (
+            canonical_bytes,
+            parse_transport_text,
+            transport_text_digest,
+        )
+        from app.master_import.service import apply as apply_master_import
+        from app.master_import.service import base_state_digest, prepare, semantic_diff
+
+        if payload.rawText is None:
+            raise AppError(
+                422,
+                "MASTER_IMPORT_RAW_TEXT_REQUIRED",
+                "Master Import requires the uploaded JSON text.",
+            )
+        parsed = parse_transport_text(payload.rawText, settings.max_master_import_bytes)
+        if canonical_bytes(parsed) != canonical_bytes(package):
+            raise AppError(
+                422,
+                "MASTER_IMPORT_TRANSPORT_MISMATCH",
+                "The uploaded text differs from the submitted package.",
+            )
+        authored, prepared = prepare(db, package)
+        base_digest = base_state_digest(db)
+        simulated: dict[str, Any] = {}
+        if not prepared["replay"]:
+
+            def simulate(validation_db: Session) -> None:
+                record = ImportRecord(
+                    package_id=package["packageId"],
+                    import_type="master_import",
+                    schema_version=1,
+                    source_filename=payload.filename,
+                    dry_run_summary_json="{}",
+                    applied=True,
+                    applied_at=utc_now_ms(),
+                )
+                validation_db.add(record)
+                validation_db.flush()
+                try:
+                    simulated.update(apply_master_import(validation_db, package, record, prepared))
+                except ValidationError as exc:
+                    raise AppError(
+                        422,
+                        "MASTER_IMPORT_SEMANTIC_INVALID",
+                        "The Master Import fails V2 domain validation.",
+                    ) from exc
+
+            _preflight_application(
+                db,
+                simulate,
+                "MASTER_IMPORT_INVALID",
+                "The Master Import cannot be applied to current state.",
+            )
+        diff = semantic_diff(db, package, prepared, simulated.get("selectedVersions"))
+        digest = hashlib.sha256(
+            json.dumps(diff, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        token = new_secret()
+        _previews[(session_id, package["packageId"])] = Preview(
+            digest=prepared["packageDigest"],
+            token=token,
+            expires_at=utc_now_ms() + 15 * 60 * 1000,
+            summary=diff,
+            transport_digest=transport_text_digest(payload.rawText),
+            base_state_digest=base_digest,
+            semantic_diff_digest=digest,
+            session_id=session_id,
+        )
+        return {
+            "valid": True,
+            "dryRun": True,
+            "summary": diff,
+            "diff": diff,
+            "confirmationToken": token,
+            "expiresInMs": 15 * 60 * 1000,
+        }
     size = len(json.dumps(package, separators=(",", ":")).encode("utf-8"))
     if size > settings.max_import_bytes:
         raise AppError(413, "IMPORT_TOO_LARGE", "The import package is too large.")
@@ -3424,7 +3558,7 @@ async def inspect_import(
         raise AppError(429, "IMPORT_RATE_LIMITED", "Too many import requests. Try again later.")
     rate_limiter.add("import", auth.session.id)
     try:
-        result = _inspect_package(payload, settings, db)
+        result = _inspect_package(payload, settings, db, session_id=auth.session.id)
     except AppError:
         logger.warning("Import inspection rejected")
         raise
@@ -3447,6 +3581,177 @@ async def apply_import(
     if not rate_limiter.check("import", auth.session.id, import_rule):
         raise AppError(429, "IMPORT_RATE_LIMITED", "Too many import requests. Try again later.")
     rate_limiter.add("import", auth.session.id)
+    if payload.package.packageType == "master_import":
+        from app.analysis.v3.service import drain_analysis_invalidations
+        from app.master_import.canonical import (
+            canonical_bytes,
+            parse_transport_text,
+            transport_text_digest,
+        )
+        from app.master_import.service import apply as apply_master_import
+        from app.master_import.service import base_state_digest, prepare
+        from app.roadmap_projection.service import drain_projection_invalidations as drain_roadmap
+
+        package = payload.package.model_dump(mode="json")
+        preview_key = (auth.session.id, payload.package.packageId)
+        preview = _previews.get(preview_key)
+        if payload.rawText is None:
+            raise AppError(
+                422,
+                "MASTER_IMPORT_RAW_TEXT_REQUIRED",
+                "Master Import requires the uploaded JSON text.",
+            )
+        parsed = parse_transport_text(payload.rawText, settings.max_master_import_bytes)
+        if canonical_bytes(parsed) != canonical_bytes(package):
+            raise AppError(
+                422,
+                "MASTER_IMPORT_TRANSPORT_MISMATCH",
+                "The uploaded text differs from the submitted package.",
+            )
+        if (
+            preview is None
+            or preview.session_id != auth.session.id
+            or preview.expires_at <= utc_now_ms()
+            or preview.token != payload.confirmation_token
+            or preview.transport_digest != transport_text_digest(payload.rawText)
+        ):
+            raise AppError(
+                409,
+                "IMPORT_CONFIRMATION_INVALID",
+                "The Master Import preview is missing, expired, or differs from the uploaded text.",
+            )
+        _, prepared = prepare(db, package)
+        if preview.digest != prepared[
+            "packageDigest"
+        ] or preview.base_state_digest != base_state_digest(db):
+            raise AppError(
+                409,
+                "MASTER_IMPORT_PREVIEW_STALE",
+                "The previewed Master Import base state has changed.",
+            )
+        if prepared["replay"]:
+            _previews.pop(preview_key, None)
+            return {
+                "applied": False,
+                "alreadyApplied": True,
+                "packageId": package["packageId"],
+                "packageType": "master_import",
+            }
+        db.rollback()
+        try:
+            with db.begin():
+                # Reserve SQLite's single writer before the physical backup snapshot.
+                # Readers can still back up committed state; competing V2 writes wait.
+                db.connection().exec_driver_sql("BEGIN IMMEDIATE")
+                if preview.base_state_digest != base_state_digest(db):
+                    raise AppError(
+                        409,
+                        "MASTER_IMPORT_PREVIEW_STALE",
+                        "The previewed Master Import base state has changed.",
+                    )
+                _, current = prepare(db, package)
+                if current["packageDigest"] != preview.digest:
+                    raise AppError(
+                        409, "MASTER_IMPORT_PREVIEW_STALE", "The package changed since inspection."
+                    )
+                backup = create_operational_backup(db, settings, "pre-import")
+                record = ImportRecord(
+                    package_id=package["packageId"],
+                    import_type="master_import",
+                    schema_version=1,
+                    source_filename=payload.filename,
+                    dry_run_summary_json=json.dumps(
+                        preview.summary, sort_keys=True, separators=(",", ":")
+                    ),
+                    applied=True,
+                    applied_at=utc_now_ms(),
+                    pre_import_backup_reference=backup.path,
+                )
+                db.add(record)
+                db.flush()
+                if (
+                    hashlib.sha256(
+                        json.dumps(preview.summary, sort_keys=True, separators=(",", ":")).encode(
+                            "utf-8"
+                        )
+                    ).hexdigest()
+                    != preview.semantic_diff_digest
+                ):
+                    raise AppError(
+                        409,
+                        "MASTER_IMPORT_PREVIEW_STALE",
+                        "The semantic diff changed since inspection.",
+                    )
+                try:
+                    apply_master_import(db, package, record, current)
+                except ValidationError as exc:
+                    raise AppError(
+                        422,
+                        "MASTER_IMPORT_SEMANTIC_INVALID",
+                        "The Master Import fails V2 domain validation.",
+                    ) from exc
+                validate_domain_integrity(db)
+        except OperationalError as exc:
+            db.rollback()
+            raise AppError(
+                409,
+                "MASTER_IMPORT_CONCURRENT_CONFLICT",
+                "Another canonical write is in progress; inspect the package again.",
+            ) from exc
+        except AppError:
+            db.rollback()
+            raise
+        _previews.pop(preview_key, None)
+        derived: dict[str, Any] = {"status": "complete"}
+        try:
+            drain_projection_invalidations(db)
+            drain_roadmap(db)
+            drain_analysis_invalidations(db)
+            pending = db.scalar(
+                select(func.count(ProjectionInvalidation.id)).where(
+                    ProjectionInvalidation.projection_kind.in_(
+                        [
+                            "criterion_evaluation",
+                            "capability",
+                            "review",
+                            "roadmap_projection_v2",
+                            "analysis",
+                        ]
+                    ),
+                    ProjectionInvalidation.status.in_(["pending", "running"]),
+                )
+            )
+            failed = db.scalar(
+                select(func.count(ProjectionInvalidation.id)).where(
+                    ProjectionInvalidation.projection_kind.in_(
+                        [
+                            "criterion_evaluation",
+                            "capability",
+                            "review",
+                            "roadmap_projection_v2",
+                            "analysis",
+                        ]
+                    ),
+                    ProjectionInvalidation.status == "permanent_failure",
+                )
+            )
+            if failed:
+                derived = {"status": "failed", "failedInvalidations": failed}
+            elif pending:
+                derived = {"status": "pending_retry", "pendingInvalidations": pending}
+        except Exception:
+            db.rollback()
+            logger.exception(
+                "Master Import canonical apply committed; derived processing remains pending"
+            )
+            derived = {"status": "pending_retry"}
+        return {
+            "applied": True,
+            "packageId": package["packageId"],
+            "packageType": "master_import",
+            "authenticationPreserved": True,
+            "derivedProcessing": derived,
+        }
     package = payload.package.model_dump(mode="json")
     preview = _previews.get(payload.package.packageId)
     if (

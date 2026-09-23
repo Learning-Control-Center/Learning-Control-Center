@@ -43,6 +43,7 @@ from app.recommendations import router as recommendation_router
 from app.reflections import router as reflection_router
 from app.reports import backfill_reports, report_scheduler
 from app.reports import router as report_router
+from app.request_limits import ImportBodyLimit
 from app.roadmap import router as roadmap_router
 from app.roadmap_projection import models as roadmap_projection_models  # noqa: F401
 from app.roadmap_projection.api import router as roadmap_projection_router
@@ -162,6 +163,9 @@ async def security_boundary(
     if request.url.path.startswith("/api/v1/auth"):
         response.headers["Cache-Control"] = "no-store"
     return response
+
+
+app.add_middleware(ImportBodyLimit, max_body_bytes=4 * settings.max_master_import_bytes)
 
 
 install_error_handlers(app)

@@ -46,6 +46,7 @@ from app.portability.registry import (
     PORTABLE_V7_RECOMMENDATION_TABLES,
     PORTABLE_V8_TODAY_TABLES,
     PORTABLE_V9_AUTHORITY_TABLES,
+    PORTABLE_V10_MASTER_IMPORT_TABLES,
 )
 from app.profile_views import ActiveProfileProjectionPublicDTO, ProfileTargetProjectionPublicDTO
 from app.projects.contracts import (
@@ -1979,7 +1980,7 @@ def test_failed_run_persists_lineage_only_and_is_portable(db: Session) -> None:
     )
     validate_domain_integrity(db.connection())
     payload = _portable_payload(db)
-    tables, _summary = _validate_portable_payload(payload, "recommendation-failed-v8", 9)
+    tables, _summary = _validate_portable_payload(payload, "recommendation-failed-v8", 10)
     portable = next(row for row in tables["recommendation_v2_runs"] if row["id"] == failed.id)
     assert portable["status"] == "failed"
     assert portable["output_hash"] is None
@@ -2084,7 +2085,7 @@ async def test_recommendation_history_is_portable_tamper_evident_and_not_backfil
     db.commit()
     db.expire_all()
     payload = _portable_payload(db)
-    tables, _summary = _validate_portable_payload(payload, "recommendation-v8", 9)
+    tables, _summary = _validate_portable_payload(payload, "recommendation-v8", 10)
     assert len(tables["recommendation_v2_runs"]) == 4
     assert len(tables["recommendation_v2_candidates"]) == 4
     assert len(tables["today_generations"]) == 2
@@ -2103,7 +2104,7 @@ async def test_recommendation_history_is_portable_tamper_evident_and_not_backfil
     tampered = deepcopy(payload)
     tampered["tables"]["recommendation_v2_score_components"][0]["value"] += 1
     with pytest.raises(AppError, match="Recommendation V2 immutable history"):
-        _validate_portable_payload(tampered, "recommendation-v8-tampered", 9)
+        _validate_portable_payload(tampered, "recommendation-v8-tampered", 10)
 
     coherently_rehashed = deepcopy(tampered)
     history = {
@@ -2116,7 +2117,7 @@ async def test_recommendation_history_is_portable_tamper_evident_and_not_backfil
         {key: value for key, value in checkpoint.items() if key != "checkpointHash"}
     )
     with pytest.raises(AppError, match="persisted audit differs"):
-        _validate_portable_payload(coherently_rehashed, "recommendation-v8-rehashed", 9)
+        _validate_portable_payload(coherently_rehashed, "recommendation-v8-rehashed", 10)
 
     payload["tables"]["recommendation_v2_runs"].reverse()
     _apply_portable_restore(
@@ -2124,7 +2125,7 @@ async def test_recommendation_history_is_portable_tamper_evident_and_not_backfil
         payload,
         True,
         package_id="recommendation-v8-restore",
-        schema_version=9,
+        schema_version=10,
     )
     db.commit()
     restored = db.get(RecommendationV2Run, original.id)
@@ -2150,6 +2151,8 @@ async def test_recommendation_history_is_portable_tamper_evident_and_not_backfil
     for table_name in PORTABLE_V8_TODAY_TABLES:
         v6["tables"].pop(table_name)
     for table_name in PORTABLE_V9_AUTHORITY_TABLES:
+        v6["tables"].pop(table_name)
+    for table_name in PORTABLE_V10_MASTER_IMPORT_TABLES:
         v6["tables"].pop(table_name)
     converted, summary = _validate_portable_payload(v6, "recommendation-v6-adapter", 6)
     assert all(converted[name] == [] for name in PORTABLE_V7_RECOMMENDATION_TABLES)

@@ -30,6 +30,7 @@ from app.models import (
 from app.portability.registry import (
     PORTABLE_V8_MANIFEST,
     PORTABLE_V9_AUTHORITY_TABLES,
+    PORTABLE_V10_MASTER_IMPORT_TABLES,
     upgrade_v8_to_v9_tables,
 )
 from app.time_utils import utc_now_ms
@@ -66,11 +67,11 @@ def test_authority_bootstraps_legacy_and_readiness_is_explicit(db: Session) -> N
         "ROADMAP_PROJECTION",
         "ANALYSIS_V3_CURRENT",
         "RECOMMENDATION_POLICY_APPROVED",
-        "PORTABLE_SCHEMA_V9",
+        "PORTABLE_SCHEMA_V10",
         "DOMAIN_INTEGRITY",
     }
     assert (
-        next(item for item in report["checks"] if item["code"] == "PORTABLE_SCHEMA_V9")["ready"]
+        next(item for item in report["checks"] if item["code"] == "PORTABLE_SCHEMA_V10")["ready"]
         is True
     )
     assert next(
@@ -541,7 +542,7 @@ async def test_legacy_recommendation_history_remains_readable_but_not_mutable(
     assert decision.json()["error"]["code"] == "LEGACY_AUTHORITY_READ_ONLY"
 
 
-def test_authority_history_is_immutable_and_portable_v9_is_exact(db: Session) -> None:
+def test_authority_history_is_immutable_and_portable_v10_is_exact(db: Session) -> None:
     event = db.scalar(select(LearningControlAuthorityEvent))
     assert event is not None
     event.reason = "tampered"
@@ -550,7 +551,7 @@ def test_authority_history_is_immutable_and_portable_v9_is_exact(db: Session) ->
     db.rollback()
 
     payload = _portable_payload(db)
-    tables, summary = _validate_portable_payload(payload, "authority-v9", 9)
+    tables, summary = _validate_portable_payload(payload, "authority-v10", 10)
     assert summary["compatibilityConversions"] == {}
     assert len(tables["learning_control_authority_state"]) == 1
     assert len(tables["learning_control_authority_events"]) == 1
@@ -558,19 +559,21 @@ def test_authority_history_is_immutable_and_portable_v9_is_exact(db: Session) ->
     tampered = deepcopy(payload)
     tampered["tables"]["learning_control_authority_events"][0]["reason"] = "tampered"
     with pytest.raises(AppError, match="Authority event hash is invalid"):
-        _validate_portable_payload(tampered, "authority-v9-tampered", 9)
+        _validate_portable_payload(tampered, "authority-v10-tampered", 10)
 
     malformed = deepcopy(payload)
     malformed["tables"]["learning_control_authority_events"][0]["resulting_state_json"] = (
         "{not-json"
     )
     with pytest.raises(AppError, match="Authority event JSON is invalid"):
-        _validate_portable_payload(malformed, "authority-v9-malformed-json", 9)
+        _validate_portable_payload(malformed, "authority-v10-malformed-json", 10)
 
     v8 = deepcopy(payload)
     v8["manifest"] = PORTABLE_V8_MANIFEST
     v8.pop("authorityCheckpoint")
     for table_name in PORTABLE_V9_AUTHORITY_TABLES:
+        v8["tables"].pop(table_name)
+    for table_name in PORTABLE_V10_MASTER_IMPORT_TABLES:
         v8["tables"].pop(table_name)
     converted, conversion = _validate_portable_payload(v8, "authority-v8-adapter", 8)
     assert (
@@ -580,6 +583,8 @@ def test_authority_history_is_immutable_and_portable_v9_is_exact(db: Session) ->
     assert conversion["compatibilityConversions"] == {
         "initializedAuthorityTables": len(PORTABLE_V9_AUTHORITY_TABLES),
         "nativeAuthorityHistoryInferred": 0,
+        "initializedMasterImportTables": len(PORTABLE_V10_MASTER_IMPORT_TABLES),
+        "nativeMasterImportLedgerInferred": 0,
     }
 
 
@@ -651,7 +656,7 @@ def test_head_schema_contracts_legacy_pointer_cycle(db: Session) -> None:
     assert {"is_current", "active_version_id", "current_phase_id"}.isdisjoint(roadmap_columns)
     assert db.execute(text("PRAGMA foreign_key_check")).all() == []
     assert db.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == (
-        "0019_remove_legacy_roadmap_pointer_cycle"
+        "0020_master_import_ledger"
     )
 
 
@@ -680,19 +685,19 @@ def test_portable_restore_cannot_demote_or_rewrite_v2_authority(db: Session) -> 
             legacy_payload,
             True,
             package_id="legacy-after-v2",
-            schema_version=9,
+            schema_version=10,
         )
 
     earlier_v2_payload = _portable_payload(db)
     _validated_tables, _summary = _validate_portable_payload(
-        earlier_v2_payload, "activated-v2-authority-round-trip", 9
+        earlier_v2_payload, "activated-v2-authority-round-trip", 10
     )
     _apply_portable_restore(
         db,
         earlier_v2_payload,
         True,
         package_id="activated-v2-authority-round-trip",
-        schema_version=9,
+        schema_version=10,
     )
     validate_domain_integrity(db.connection())
     round_trip = _portable_payload(db)
@@ -722,5 +727,5 @@ def test_portable_restore_cannot_demote_or_rewrite_v2_authority(db: Session) -> 
             earlier_v2_payload,
             True,
             package_id="older-v2-history",
-            schema_version=9,
+            schema_version=10,
         )

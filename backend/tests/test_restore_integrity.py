@@ -221,6 +221,8 @@ def test_post_restore_domain_failure_rolls_back_replacement(
 
     with pytest.raises(AppError) as raised:
         with db.begin():
-            _apply_portable_restore(db, package["payload"], replace_existing=True, schema_version=9)
+            _apply_portable_restore(
+                db, package["payload"], replace_existing=True, schema_version=10
+            )
     assert raised.value.code == "PORTABLE_COMPETENCY_STATE_INVALID"
     assert db.scalar(select(func.count()).select_from(Roadmap)) == roadmap_count

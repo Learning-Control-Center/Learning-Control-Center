@@ -27,6 +27,7 @@ PORTABLE_DOMAIN_TABLES: dict[str, frozenset[str]] = {
     # connect domains belong to the domain that owns the relationship. Each
     # portable table is intentionally assigned exactly once so category totals do
     # not double count rows.
+    "masterImport": frozenset({"master_import_revisions", "master_import_owned_keys"}),
     "targetProfiles": frozenset(
         {
             "target_profiles",
