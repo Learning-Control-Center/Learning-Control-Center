@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 
@@ -9,6 +10,7 @@ from app.analysis.v3.contracts import (
     PublicTargetStateFactDTO,
 )
 from app.curriculum.contracts import (
+    AssessmentRubricPublicDTO,
     CurriculumAvailabilityPublicDTO,
     CurriculumCatalogPublicDTO,
 )
@@ -619,8 +621,11 @@ def build_candidates(
     projects: ProjectCatalogPublicDTO,
     graph: ActiveLearningGraphProjectionPublicDTO | None,
     context_costs: tuple[tuple[str, str, str], ...] = (),
+    *,
+    semantic_assessment_target_order: bool = False,
 ) -> tuple[CandidateInputDTO, ...]:
     targets = _target_facts(snapshot)
+    profile_target_keys = {item.target_identity_id: item.stable_key for item in profile.targets}
     candidates: list[CandidateInputDTO] = []
     priority_order = {
         "critical": 0,
@@ -765,7 +770,11 @@ def build_candidates(
                 {"critical": 0, "core": 1, "important": 2, "supporting": 3, "optional": 4}[
                     item.priority
                 ],
-                item.target_identity_id,
+                (
+                    profile_target_keys[item.target_identity_id]
+                    if semantic_assessment_target_order
+                    else item.target_identity_id
+                ),
             ),
             default=None,
         )
@@ -950,6 +959,246 @@ def build_candidates(
                 )
             )
     return canonicalize_candidates(tuple(candidates))
+
+
+STRUCTURAL_FACT_KEYS = (
+    "soleHardUnitCount",
+    "unresolvedHardUnitCount",
+    "hardPrerequisiteTargetCount",
+    "recommendedBeforeTargetCount",
+    "supportsTargetCount",
+)
+
+
+def build_candidates_v3(
+    snapshot: PublicAnalysisSnapshotDTO,
+    profile: ActiveProfileProjectionPublicDTO,
+    curriculum: CurriculumCatalogPublicDTO,
+    curriculum_availability: tuple[CurriculumAvailabilityPublicDTO, ...],
+    projects: ProjectCatalogPublicDTO,
+    graph: ActiveLearningGraphProjectionPublicDTO | None,
+    context_costs: tuple[tuple[str, str, str], ...] = (),
+    *,
+    semantic_assessment_target_order: bool = False,
+) -> tuple[CandidateInputDTO, ...]:
+    """Add cutoff-bound structural rank facts without changing candidate eligibility or score."""
+    candidates = build_candidates(
+        snapshot,
+        profile,
+        curriculum,
+        curriculum_availability,
+        projects,
+        graph,
+        context_costs,
+        semantic_assessment_target_order=semantic_assessment_target_order,
+    )
+    rubrics = {item.definition_id: item for item in curriculum.assessment_rubrics}
+    targets_by_id = {item.target_identity_id: item for item in _target_facts(snapshot)}
+    availability = {item.learning_unit_definition_id: item for item in curriculum_availability}
+    active_target_ids = {item.target_identity_id for item in profile.targets}
+    unknown_targets = {
+        item.competency_identity_id
+        for item in _target_facts(snapshot)
+        if item.assessment_status == "unknown" and item.target_identity_id in active_target_ids
+    }
+    output = []
+    for candidate in candidates:
+        if candidate.candidate_type != "assessment" or not candidate.assessment_unknown:
+            output.append(candidate)
+            continue
+        rubric = rubrics[candidate.source_entity_id]
+        assert candidate.target_identity_id is not None
+        target = targets_by_id[candidate.target_identity_id]
+        sole_units: set[str] = set()
+        unresolved_units: set[str] = set()
+        for unit in curriculum.units:
+            if unit.status != "active":
+                continue
+            states = {
+                item.stable_key: item.state
+                for item in availability[unit.unit_definition_id].requirements
+            }
+            matching = set()
+            unresolved = set()
+            for requirement in unit.requirements:
+                if requirement.effect != "hard" or states[requirement.stable_key] == "met":
+                    continue
+                unresolved.add(requirement.stable_key)
+                if states[requirement.stable_key] != "unknown":
+                    continue
+                subject = json.loads(requirement.subject_json)
+                if (
+                    requirement.requirement_type == "capability_at_least"
+                    and subject["semanticDefinitionId"] == rubric.semantic_definition_id
+                    and subject["scaleVersionId"] == target.scale_version_id
+                    and subject["dimensionId"] == target.dimension_id
+                ) or (
+                    requirement.requirement_type == "criterion_demonstrated"
+                    and rubric.criterion_definition_id is not None
+                    and subject["criterionDefinitionId"] == rubric.criterion_definition_id
+                ):
+                    matching.add(requirement.stable_key)
+            if matching:
+                unresolved_units.add(unit.unit_definition_id)
+                if len(unresolved) == len(matching) == 1:
+                    sole_units.add(unit.unit_definition_id)
+        downstream: dict[str, set[str]] = {
+            "prerequisite": set(),
+            "recommended_before": set(),
+            "supports": set(),
+        }
+        if graph is not None and candidate.competency_identity_id is not None:
+            for edge in graph.edges:
+                if (
+                    edge.edge_type in downstream
+                    and edge.source_competency_identity_id == candidate.competency_identity_id
+                    and edge.target_competency_identity_id in unknown_targets
+                ):
+                    downstream[edge.edge_type].add(edge.target_competency_identity_id)
+        values = (
+            len(sole_units),
+            len(unresolved_units),
+            len(downstream["prerequisite"]),
+            len(downstream["recommended_before"]),
+            len(downstream["supports"]),
+        )
+        output.append(
+            replace(
+                candidate,
+                explanation_facts=candidate.explanation_facts
+                + tuple(zip(STRUCTURAL_FACT_KEYS, values, strict=True)),
+            )
+        )
+    return tuple(output)
+
+
+def _covered_rubric_criteria(
+    rubric: AssessmentRubricPublicDTO, target: PublicTargetStateFactDTO
+) -> set[str]:
+    """Use only explicit rubric subjects that belong to the selected target."""
+    rubric_json = json.loads(rubric.rubric_json)
+    entries = rubric_json.get("criteria") if isinstance(rubric_json, dict) else None
+    covered = (
+        {
+            item["criterionDefinitionId"]
+            for item in entries
+            if isinstance(item, dict) and isinstance(item.get("criterionDefinitionId"), str)
+        }
+        if isinstance(entries, list)
+        else set()
+    )
+    explicit_subject = rubric.criterion_definition_id
+    if explicit_subject is not None:
+        covered = covered & {explicit_subject} if isinstance(entries, list) else {explicit_subject}
+    return covered & {item.criterion_definition_id for item in target.criterion_evaluations}
+
+
+def build_candidates_v4(
+    snapshot: PublicAnalysisSnapshotDTO,
+    profile: ActiveProfileProjectionPublicDTO,
+    curriculum: CurriculumCatalogPublicDTO,
+    curriculum_availability: tuple[CurriculumAvailabilityPublicDTO, ...],
+    projects: ProjectCatalogPublicDTO,
+    graph: ActiveLearningGraphProjectionPublicDTO | None,
+    context_costs: tuple[tuple[str, str, str], ...] = (),
+) -> tuple[CandidateInputDTO, ...]:
+    """Refine rubric coverage and use portable semantic identities for final ties."""
+    candidates = build_candidates_v3(
+        snapshot,
+        profile,
+        curriculum,
+        curriculum_availability,
+        projects,
+        graph,
+        context_costs,
+        semantic_assessment_target_order=True,
+    )
+    rubrics = {item.definition_id: item for item in curriculum.assessment_rubrics}
+    targets = {item.target_identity_id: item for item in _target_facts(snapshot)}
+    target_keys = {item.target_identity_id: item.stable_key for item in profile.targets}
+    availability = {item.learning_unit_definition_id: item for item in curriculum_availability}
+    curriculum_roots = {
+        item.curriculum_id: item.stable_key for item in curriculum.active_version_references
+    }
+    sources: dict[tuple[str, str], tuple[str, ...]] = {}
+    for unit in curriculum.units:
+        sources[("curriculum_unit", unit.unit_definition_id)] = (
+            unit.curriculum_stable_key,
+            unit.unit_stable_key,
+        )
+    for rubric in curriculum.assessment_rubrics:
+        sources[("assessment_rubric", rubric.definition_id)] = (
+            curriculum_roots.get(rubric.curriculum_id, ""),
+            rubric.stable_key,
+        )
+    for project in projects.candidates:
+        task_key = (project.project_stable_key, project.task_stable_key)
+        sources[("project_task", project.task_definition_id)] = task_key
+        for blocker in project.blocker_facts:
+            sources[("project_blocker", blocker.event_id)] = (*task_key, blocker.blocker_key)
+    output = []
+    for candidate in candidates:
+        source_key: tuple[str, ...]
+        if candidate.source_type == "analysis_target":
+            assert candidate.target_identity_id is not None
+            source_key = (target_keys[candidate.target_identity_id],)
+        else:
+            source_key = sources[(candidate.source_type, candidate.source_entity_id)]
+        semantic_key = "semantic-tie/v1|" + json.dumps(
+            (
+                candidate.candidate_type,
+                candidate.source_type,
+                *source_key,
+                target_keys.get(candidate.target_identity_id or "", ""),
+            ),
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
+        facts = candidate.explanation_facts
+        if candidate.candidate_type == "assessment" and candidate.assessment_unknown:
+            rubric = rubrics[candidate.source_entity_id]
+            assert candidate.target_identity_id is not None
+            target = targets[candidate.target_identity_id]
+            covered = _covered_rubric_criteria(rubric, target)
+            sole_units: set[str] = set()
+            unresolved_units: set[str] = set()
+            for unit in curriculum.units:
+                if unit.status != "active":
+                    continue
+                states = {
+                    item.stable_key: item.state
+                    for item in availability[unit.unit_definition_id].requirements
+                }
+                unresolved = {
+                    item.stable_key
+                    for item in unit.requirements
+                    if item.effect == "hard" and states[item.stable_key] != "met"
+                }
+                matching = {
+                    item.stable_key
+                    for item in unit.requirements
+                    if item.effect == "hard"
+                    and item.scope == "learner"
+                    and states[item.stable_key] == "unknown"
+                    and item.requirement_type == "criterion_demonstrated"
+                    and json.loads(item.subject_json)["criterionDefinitionId"] in covered
+                }
+                if matching:
+                    unresolved_units.add(unit.unit_definition_id)
+                    if len(unresolved) == len(matching) == 1:
+                        sole_units.add(unit.unit_definition_id)
+            updated = dict(facts)
+            updated["soleHardUnitCount"] = len(sole_units)
+            updated["unresolvedHardUnitCount"] = len(unresolved_units)
+            facts = tuple((key, updated[key]) for key, _value in facts)
+        output.append(replace(candidate, stable_tie_key=semantic_key, explanation_facts=facts))
+    if len({item.stable_tie_key for item in output}) != len(output):
+        raise AppError(
+            409,
+            "RECOMMENDATION_SEMANTIC_TIE_KEY_CONFLICT",
+            "Distinct candidates have the same semantic ordering identity.",
+        )
+    return tuple(output)
 
 
 def build_candidates_v1(

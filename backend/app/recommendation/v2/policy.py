@@ -5,7 +5,13 @@ from dataclasses import asdict, replace
 from typing import cast
 
 from app.determinism import content_hash
-from app.recommendation.v2.candidates import build_candidates, build_candidates_v1
+from app.recommendation.v2.candidates import (
+    STRUCTURAL_FACT_KEYS,
+    build_candidates,
+    build_candidates_v1,
+    build_candidates_v3,
+    build_candidates_v4,
+)
 from app.recommendation.v2.contracts import (
     CandidateInputDTO,
     EligibilityRuleResultDTO,
@@ -18,18 +24,20 @@ from app.recommendation.v2.contracts import (
 )
 
 LEGACY_RECOMMENDATION_ALGORITHM_VERSION = "recommendation-algorithm/v2.0"
-RECOMMENDATION_ALGORITHM_VERSION = "recommendation-algorithm/v2.1"
+RECOMMENDATION_ALGORITHM_VERSION = "recommendation-algorithm/v2.3"
 APPLICATION_VERSION = "2.0.0"
 ELV_POLICY_VERSION = "expected-learning-value-policy/v1"
 SCORE_POLICY_VERSION = "recommendation-score-policy/v1"
 DURATION_POLICY_VERSION = "recommendation-duration-policy/v1"
 ELIGIBILITY_POLICY_VERSION = "recommendation-eligibility-policy/v1"
 PORTFOLIO_POLICY_VERSION = "recommendation-portfolio-policy/v2"
-REASON_POLICY_VERSION = "recommendation-reason-policy/v2"
-POLICY_REGISTRY_VERSION = "recommendation-policy-registry/v2"
-CANDIDATE_POLICY_VERSION = "recommendation-candidate-policy/v2"
+REASON_POLICY_VERSION = "recommendation-reason-policy/v4"
+POLICY_REGISTRY_VERSION = "recommendation-policy-registry/v4"
+CANDIDATE_POLICY_VERSION = "recommendation-candidate-policy/v4"
 LEGACY_POLICY_REGISTRY_VERSION = "recommendation-policy-registry/v1"
-OWNER_APPROVED_POLICY_REGISTRY_VERSION = "recommendation-policy-registry/v2"
+PREVIOUS_POLICY_REGISTRY_VERSION = "recommendation-policy-registry/v2"
+V3_POLICY_REGISTRY_VERSION = "recommendation-policy-registry/v3"
+OWNER_APPROVED_POLICY_REGISTRY_VERSION = "recommendation-policy-registry/v4"
 
 QUANTUM_MS = 300_000
 
@@ -95,6 +103,7 @@ _REASON_TITLES = {
     "NEGLECT_OR_STALL": "Neglect or progression stall",
     "EXPECTED_LEARNING_VALUE": "Expected learning value",
     "CONTEXT_COST": "Context cost",
+    "ASSESSMENT_STRUCTURAL_ORDER": "Assessment sequence leverage",
 }
 
 
@@ -591,8 +600,22 @@ def score(candidate: CandidateInputDTO, elv: str) -> tuple[ScoreComponentDTO, ..
     return components
 
 
-def _rank_key(item: EvaluatedCandidateDTO) -> tuple[object, ...]:
+def _structural_rank_facts(candidate: CandidateInputDTO) -> tuple[int, ...]:
+    facts = dict(candidate.explanation_facts)
+    return tuple(int(facts.get(key, 0) or 0) for key in STRUCTURAL_FACT_KEYS)
+
+
+def _rank_key(item: EvaluatedCandidateDTO, *, structural_order: bool = False) -> tuple[object, ...]:
     candidate = item.candidate
+    structural_key = (
+        (
+            tuple(-value for value in _structural_rank_facts(candidate))
+            if candidate.candidate_type == "assessment"
+            else (0,) * len(STRUCTURAL_FACT_KEYS)
+        )
+        if structural_order
+        else ()
+    )
     return (
         -(item.score_total or 0),
         _PRIORITY_RANK[candidate.target_priority],
@@ -602,6 +625,7 @@ def _rank_key(item: EvaluatedCandidateDTO) -> tuple[object, ...]:
         candidate.last_meaningful_activity_at
         if candidate.last_meaningful_activity_at is not None
         else -1,
+        *structural_key,
         candidate.stable_tie_key,
     )
 
@@ -750,6 +774,30 @@ def _reason_records(
             ),
             (decision.reason_code, None, decision.decisive_facts, default_sources),
         ]
+        if (
+            reason_policy_version in {"recommendation-reason-policy/v3", REASON_POLICY_VERSION}
+            and candidate.candidate_type == "assessment"
+            and candidate_result.eligible
+        ):
+            structural_facts = dict(candidate.explanation_facts)
+            reason_items.insert(
+                -1,
+                (
+                    "ASSESSMENT_STRUCTURAL_ORDER",
+                    None,
+                    tuple(
+                        (key, int(structural_facts.get(key, 0) or 0))
+                        for key in STRUCTURAL_FACT_KEYS
+                    )
+                    + (("rankOrdinal", candidate_result.rank_ordinal),)
+                    + (
+                        (("semanticTieKey", candidate.stable_tie_key),)
+                        if reason_policy_version == REASON_POLICY_VERSION
+                        else ()
+                    ),
+                    default_sources,
+                ),
+            )
         if decision.duration_reason_code:
             reason_items.append(
                 (
@@ -772,11 +820,23 @@ def _reason_records(
             title = _REASON_TITLES.get(reason_code)
             if title is None:
                 raise ValueError(f"Recommendation reason has no registered template: {reason_code}")
-            rendered = (
-                f"{title} contributed {contribution:+d} to the deterministic ordering score."
-                if contribution is not None
-                else f"{title}."
-            )
+            if reason_code == "ASSESSMENT_STRUCTURAL_ORDER":
+                rank_facts = dict(facts)
+                rendered = (
+                    "Equal-score assessment sequence signals: "
+                    f"{rank_facts['soleHardUnitCount']} sole hard-unit blockers, "
+                    f"{rank_facts['unresolvedHardUnitCount']} units with unresolved hard needs, "
+                    f"{rank_facts['hardPrerequisiteTargetCount']} hard downstream targets, "
+                    f"{rank_facts['recommendedBeforeTargetCount']} recommended-before targets, "
+                    f"and {rank_facts['supportsTargetCount']} supported targets. "
+                    "These are advisory ranking facts, not satisfied requirements."
+                )
+            else:
+                rendered = (
+                    f"{title} contributed {contribution:+d} to the deterministic ordering score."
+                    if contribution is not None
+                    else f"{title}."
+                )
             rows.append(
                 RecommendationReasonDTO(
                     candidate.stable_id,
@@ -803,6 +863,7 @@ def _evaluate(
     enhanced_elv_audit: bool,
     reason_policy_version: str,
     deduplicate_reason_codes: bool,
+    structural_order: bool = False,
 ) -> RecommendationPolicyOutputDTO:
     evaluated: list[EvaluatedCandidateDTO] = []
     for candidate in sorted(candidates, key=lambda item: item.stable_tie_key):
@@ -836,7 +897,10 @@ def _evaluate(
                 None,
             )
         )
-    ranked = sorted((item for item in evaluated if item.eligible), key=_rank_key)
+    ranked = sorted(
+        (item for item in evaluated if item.eligible),
+        key=lambda item: _rank_key(item, structural_order=structural_order),
+    )
     rank_by_id = {item.candidate.stable_id: index + 1 for index, item in enumerate(ranked)}
     evaluated = [
         replace(item, rank_ordinal=rank_by_id.get(item.candidate.stable_id)) for item in evaluated
@@ -1054,6 +1118,35 @@ def evaluate(
         enhanced_elv_audit=True,
         reason_policy_version=REASON_POLICY_VERSION,
         deduplicate_reason_codes=True,
+        structural_order=True,
+    )
+
+
+def evaluate_v3(
+    candidates: tuple[CandidateInputDTO, ...], available_time_ms: int | None
+) -> RecommendationPolicyOutputDTO:
+    """Replay-only v3 evaluator with its original reason policy and audit shape."""
+    return _evaluate(
+        candidates,
+        available_time_ms,
+        explicit_usefulness_decision=True,
+        enhanced_elv_audit=True,
+        reason_policy_version="recommendation-reason-policy/v3",
+        deduplicate_reason_codes=True,
+        structural_order=True,
+    )
+
+
+def evaluate_v2(
+    candidates: tuple[CandidateInputDTO, ...], available_time_ms: int | None
+) -> RecommendationPolicyOutputDTO:
+    return _evaluate(
+        candidates,
+        available_time_ms,
+        explicit_usefulness_decision=True,
+        enhanced_elv_audit=True,
+        reason_policy_version="recommendation-reason-policy/v2",
+        deduplicate_reason_codes=True,
     )
 
 
@@ -1084,13 +1177,41 @@ _LEGACY_POLICY_BUNDLE = {
     "registry": LEGACY_POLICY_REGISTRY_VERSION,
 }
 
+_PREVIOUS_POLICY_BUNDLE = {
+    "application": APPLICATION_VERSION,
+    "algorithm": "recommendation-algorithm/v2.1",
+    "candidate": "recommendation-candidate-policy/v2",
+    "eligibility": ELIGIBILITY_POLICY_VERSION,
+    "expectedLearningValue": ELV_POLICY_VERSION,
+    "score": SCORE_POLICY_VERSION,
+    "duration": DURATION_POLICY_VERSION,
+    "portfolio": PORTFOLIO_POLICY_VERSION,
+    "reason": "recommendation-reason-policy/v2",
+    "registry": PREVIOUS_POLICY_REGISTRY_VERSION,
+}
+
+_V3_POLICY_BUNDLE = {
+    "application": APPLICATION_VERSION,
+    "algorithm": "recommendation-algorithm/v2.2",
+    "candidate": "recommendation-candidate-policy/v3",
+    "eligibility": ELIGIBILITY_POLICY_VERSION,
+    "expectedLearningValue": ELV_POLICY_VERSION,
+    "score": SCORE_POLICY_VERSION,
+    "duration": DURATION_POLICY_VERSION,
+    "portfolio": PORTFOLIO_POLICY_VERSION,
+    "reason": "recommendation-reason-policy/v3",
+    "registry": V3_POLICY_REGISTRY_VERSION,
+}
+
 _REGISTERED_POLICIES = {
     LEGACY_POLICY_REGISTRY_VERSION: (
         _LEGACY_POLICY_BUNDLE,
         evaluate_v1,
         build_candidates_v1,
     ),
-    POLICY_REGISTRY_VERSION: (policy_bundle(), evaluate, build_candidates),
+    PREVIOUS_POLICY_REGISTRY_VERSION: (_PREVIOUS_POLICY_BUNDLE, evaluate_v2, build_candidates),
+    V3_POLICY_REGISTRY_VERSION: (_V3_POLICY_BUNDLE, evaluate_v3, build_candidates_v3),
+    POLICY_REGISTRY_VERSION: (policy_bundle(), evaluate, build_candidates_v4),
 }
 
 

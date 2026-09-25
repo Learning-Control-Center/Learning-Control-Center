@@ -28,6 +28,7 @@ from app.curriculum.contracts import (
     CurriculumActionPublicDTO,
     CurriculumAvailabilityPublicDTO,
     CurriculumCatalogPublicDTO,
+    CurriculumRequirementPublicDTO,
     CurriculumTargetPublicDTO,
     CurriculumUnitPublicDTO,
     EvidenceOpportunityPublicDTO,
@@ -40,7 +41,7 @@ from app.learning_graph.contracts import (
     ActiveLearningGraphProjectionPublicDTO,
     CompetencyEdgeProjectionPublicDTO,
 )
-from app.models import AnalysisSnapshot
+from app.models import Activity, AnalysisSnapshot, CompetencyCapabilityState, Evidence
 from app.portability.registry import (
     PORTABLE_V6_MANIFEST,
     PORTABLE_V7_RECOMMENDATION_TABLES,
@@ -62,6 +63,8 @@ from app.recommendation.v2.candidates import (
     _supplies_demonstration_mode,
     _three_valued_and,
     build_candidates,
+    build_candidates_v3,
+    build_candidates_v4,
     canonicalize_candidates,
 )
 from app.recommendation.v2.contracts import (
@@ -78,6 +81,8 @@ from app.recommendation.v2.models import (
 from app.recommendation.v2.policy import (
     LEGACY_POLICY_REGISTRY_VERSION,
     POLICY_REGISTRY_VERSION,
+    PREVIOUS_POLICY_REGISTRY_VERSION,
+    V3_POLICY_REGISTRY_VERSION,
     evaluate,
     evaluate_registered,
     expected_learning_value,
@@ -87,13 +92,16 @@ from app.recommendation.v2.policy import (
 )
 from app.recommendation.v2.service import (
     RecommendationGenerationFailure,
+    _generate_recommendations,
     _persist_completed_run,
+    recommendation_detail,
     record_failed_recommendation_run,
     replay_recommendations,
 )
 from app.recommendation.v2.service import (
     generate_recommendations as generate_live_recommendations,
 )
+from app.requirements.contracts import RequirementEvaluationDTO, RequirementState
 from app.time_utils import utc_now_ms
 from app.today.models import TodaySuggestion
 from app.today.service import (
@@ -105,7 +113,7 @@ from app.today.service import (
 )
 from app.v2_activities import create_activity_in_uow
 from httpx import AsyncClient
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 MINUTE = 60_000
@@ -990,6 +998,619 @@ def test_contract_tie_break_order_is_total_and_deterministic() -> None:
         assert first.candidate.stable_id == expected_first
 
 
+_STRUCTURAL_KEYS = (
+    "soleHardUnitCount",
+    "unresolvedHardUnitCount",
+    "hardPrerequisiteTargetCount",
+    "recommendedBeforeTargetCount",
+    "supportsTargetCount",
+)
+
+
+def _unknown_assessment(stable_id: str, counts: tuple[int, ...]) -> CandidateInputDTO:
+    return candidate(
+        stable_id,
+        candidate_type="assessment",
+        source_type="assessment_rubric",
+        target_priority="core",
+        gap_severity="unknown",
+        assessment_unknown=True,
+        primary_need_kind="assessment_unknown",
+        assessment_rubric_present=True,
+        assessment_scope_valid=True,
+        duration_range_ms=None,
+        intended_evidence_modes=("assessment",),
+        explanation_facts=tuple(zip(_STRUCTURAL_KEYS, counts, strict=True)),
+    )
+
+
+@pytest.mark.parametrize(
+    ("leading", "trailing"),
+    [
+        ((1, 1, 0, 0, 0), (0, 8, 8, 8, 8)),
+        ((0, 2, 0, 0, 0), (0, 1, 8, 8, 8)),
+        ((0, 0, 1, 0, 0), (0, 0, 0, 8, 8)),
+        ((0, 0, 0, 1, 0), (0, 0, 0, 0, 8)),
+        ((0, 0, 0, 0, 1), (0, 0, 0, 0, 0)),
+    ],
+)
+def test_unknown_assessment_structural_tuple_precedes_lexical_identity(
+    leading: tuple[int, ...], trailing: tuple[int, ...]
+) -> None:
+    winner = _unknown_assessment("z-winner", leading)
+    loser = _unknown_assessment("a-loser", trailing)
+    result = evaluate((loser, winner), None)
+    assert [item.score_total for item in result.candidates] == [38, 38]
+    assert (
+        next(item.candidate.stable_id for item in result.candidates if item.rank_ordinal == 1)
+        == "z-winner"
+    )
+    assert {item.portfolio_role for item in result.decisions if item.decision == "selected"} == {
+        "primary",
+        "complementary",
+    }
+    reason = next(
+        item
+        for item in result.reasons
+        if item.candidate_stable_id == "z-winner"
+        and item.reason_code == "ASSESSMENT_STRUCTURAL_ORDER"
+    )
+    assert tuple(dict(reason.facts)[key] for key in _STRUCTURAL_KEYS) == leading
+
+
+def test_many_unknown_assessments_keep_assessment_first_and_lexical_only_as_last_fallback() -> None:
+    items = tuple(
+        _unknown_assessment(f"assessment-{index:02}", (0, 0, 0, 0, 0)) for index in range(30)
+    )
+    stronger = _unknown_assessment("zz-structural", (0, 1, 0, 0, 0))
+    result = evaluate((*items, stronger), None)
+    ranked = sorted(result.candidates, key=lambda item: item.rank_ordinal or 999)
+    assert ranked[0].candidate.stable_id == stronger.stable_id
+    assert ranked[1].candidate.stable_id == "assessment-00"
+    assert all(item.score_total == 38 and item.eligible for item in ranked)
+    assert (
+        next(
+            item.portfolio_role
+            for item in result.decisions
+            if item.candidate_stable_id == stronger.stable_id
+        )
+        == "primary"
+    )
+    assert (
+        next(
+            item.portfolio_role
+            for item in result.decisions
+            if item.candidate_stable_id == "assessment-00"
+        )
+        == "complementary"
+    )
+
+
+def test_irrelevant_identity_changes_do_not_reverse_structural_assessment_order() -> None:
+    for first_key, second_key in (("candidate|z", "candidate|a"), ("candidate|a", "candidate|z")):
+        stronger = replace(
+            _unknown_assessment("stronger", (0, 1, 0, 0, 0)),
+            stable_tie_key=first_key,
+            source_entity_id="different-rubric-id-1",
+            target_identity_id="different-target-id-1",
+        )
+        weaker = replace(
+            _unknown_assessment("weaker", (0, 0, 0, 0, 0)),
+            stable_tie_key=second_key,
+            source_entity_id="different-rubric-id-2",
+            target_identity_id="different-target-id-2",
+        )
+        ranked = evaluate((weaker, stronger), None).candidates
+        assert (
+            next(item.candidate.stable_id for item in ranked if item.rank_ordinal == 1)
+            == "stronger"
+        )
+
+
+def test_partial_assessment_and_known_short_time_preserve_existing_eligibility() -> None:
+    unknown = _unknown_assessment("unknown", (2, 2, 2, 2, 2))
+    assessed = replace(_unknown_assessment("assessed", (9, 9, 9, 9, 9)), assessment_unknown=False)
+    short_unit = candidate("short-unit", duration_range_ms=(MINUTE * 5, MINUTE * 5, MINUTE * 5))
+    with_unknown_time = evaluate((unknown, assessed, short_unit), None)
+    assert next(
+        item for item in with_unknown_time.candidates if item.candidate.stable_id == "unknown"
+    ).eligible
+    assert not next(
+        item for item in with_unknown_time.candidates if item.candidate.stable_id == "assessed"
+    ).eligible
+    with_short_time = evaluate((unknown, assessed, short_unit), MINUTE * 5)
+    assert not next(
+        item for item in with_short_time.candidates if item.candidate.stable_id == "unknown"
+    ).eligible
+    assert next(
+        item for item in with_short_time.candidates if item.candidate.stable_id == "short-unit"
+    ).eligible
+
+
+def _structural_candidates_from_canonical_inputs(
+    requirement_sets: tuple[tuple[str, ...], ...],
+    edge_types: tuple[str, ...] = (),
+    *,
+    criterion_requirements: bool = False,
+    rubric_coverage: dict[str, tuple[str, ...]] | None = None,
+    namespace: str = "",
+    active_units: tuple[bool, ...] | None = None,
+    requirement_states: dict[tuple[int, str], RequirementState] | None = None,
+    capability_requirements: dict[tuple[int, str], str] | None = None,
+) -> tuple[CandidateInputDTO, ...]:
+    targets = tuple(
+        public_target(
+            key,
+            current_level_id=None,
+            current_level_ordinal=None,
+            assessment_status="unknown",
+            comparison_status="unknown",
+            confidence="unknown",
+            freshness="unknown",
+            last_meaningful_activity_at=None,
+            days_since_meaningful_activity=0,
+            exposure_days_42=0,
+            target_identity_id=f"{namespace}{key}",
+            competency_identity_id=f"{namespace}competency-{key}",
+            profile_target_id=f"{namespace}profile-target-{key}",
+            semantic_definition_id=f"{namespace}semantic-{key}",
+            criterion_evaluations=(
+                tuple(
+                    PublicCriterionEvaluationFactDTO(
+                        f"{namespace}criterion-{name}",
+                        f"{namespace}criterion-identity-{name}",
+                        "required",
+                        "level-2",
+                        "unknown",
+                        "independent",
+                        (),
+                        (),
+                    )
+                    for name in (key, f"{key}-extra")
+                )
+                if criterion_requirements
+                else ()
+            ),
+        )
+        for key in ("a", "b", "downstream")
+    )
+    units = []
+    availability = []
+    for index, required in enumerate(requirement_sets):
+        requirements_list = []
+        for position, key in enumerate(required):
+            capability_semantic = (capability_requirements or {}).get((index, key))
+            is_capability = not criterion_requirements or capability_semantic is not None
+            subject = (
+                {
+                    "semanticDefinitionId": f"{namespace}semantic-{capability_semantic or key}",
+                    "scaleVersionId": "scale-v1",
+                    "levelId": "level-2",
+                    "dimensionId": None,
+                }
+                if is_capability
+                else {"criterionDefinitionId": f"{namespace}criterion-{key}"}
+            )
+            requirements_list.append(
+                CurriculumRequirementPublicDTO(
+                    f"hard-{index}-{key}",
+                    "capability_at_least" if is_capability else "criterion_demonstrated",
+                    "hard",
+                    "learner",
+                    canonical_json(subject),
+                    position,
+                    "readiness-policy/v1",
+                )
+            )
+        requirements = tuple(requirements_list)
+        unit = CurriculumUnitPublicDTO(
+            "curriculum",
+            "curriculum",
+            "curriculum-v1",
+            1,
+            f"unit-identity-{index}",
+            f"unit-{index}",
+            f"{namespace}unit-definition-{index}",
+            "lesson",
+            "curriculum_unit",
+            f"Unit {index}",
+            "Unit",
+            None,
+            None,
+            "active" if active_units is None or active_units[index] else "retired",
+            "manual",
+            CurriculumActionPublicDTO("exercise", None, "Work", None),
+            index,
+            (5 * MINUTE, 10 * MINUTE, 15 * MINUTE),
+            (
+                CurriculumTargetPublicDTO(
+                    f"unit-target-{index}",
+                    f"{namespace}semantic-downstream",
+                    None,
+                    "scale-v1",
+                    None,
+                    "Learn",
+                    None,
+                    None,
+                    True,
+                    "primary",
+                    0,
+                ),
+            ),
+            requirements,
+            (),
+        )
+        units.append(unit)
+        availability.append(
+            CurriculumAvailabilityPublicDTO(
+                unit.unit_definition_id,
+                2,
+                "exclusive",
+                "met",
+                "unknown",
+                "unknown",
+                tuple(
+                    RequirementEvaluationDTO(
+                        item.stable_key,
+                        item.requirement_type,
+                        item.effect,
+                        (requirement_states or {}).get(
+                            (index, item.stable_key.removeprefix(f"hard-{index}-")),
+                            RequirementState.UNKNOWN,
+                        ),
+                        "CRITERION_UNKNOWN" if criterion_requirements else "CAPABILITY_UNKNOWN",
+                        item.order_index,
+                    )
+                    for item in requirements
+                ),
+                (),
+                "curriculum-availability-policy/v1",
+                f"availability-{index}",
+            )
+        )
+    curriculum = CurriculumCatalogPublicDTO.build(
+        cutoff_at=2,
+        active_version_references=(),
+        objectives=(),
+        units=tuple(units),
+        assessment_rubrics=tuple(
+            AssessmentRubricPublicDTO(
+                "curriculum",
+                "curriculum-v1",
+                f"{namespace}rubric-{key}",
+                f"{namespace}rubric-identity-{key}",
+                f"rubric-{key}",
+                f"Assess {key}",
+                "Assess",
+                canonical_json(
+                    {
+                        "criteria": [
+                            {"criterionDefinitionId": f"{namespace}criterion-{name}"}
+                            for name in (rubric_coverage or {}).get(key, (key,))
+                        ]
+                    }
+                )
+                if criterion_requirements
+                else "{}",
+                f"{namespace}semantic-{key}",
+                None,
+            )
+            for key in ("a", "b")
+        ),
+    )
+    graph = ActiveLearningGraphProjectionPublicDTO(
+        "graph",
+        "graph-v1",
+        "activation",
+        1,
+        "hash",
+        tuple(
+            CompetencyEdgeProjectionPublicDTO(
+                f"edge-{index}",
+                f"edge-identity-{index}",
+                edge_type,
+                f"{namespace}competency-b",
+                f"{namespace}competency-downstream",
+                f"{namespace}semantic-b",
+                f"{namespace}semantic-downstream",
+                index,
+            )
+            for index, edge_type in enumerate(edge_types)
+        ),
+        (),
+    )
+    builder = build_candidates_v4 if criterion_requirements else build_candidates_v3
+    return builder(
+        public_snapshot(*targets),
+        profile_for_targets(*targets),
+        curriculum,
+        tuple(availability),
+        ProjectCatalogPublicDTO.build(cutoff_at=2, active_version_references=(), candidates=()),
+        graph,
+    )
+
+
+def test_canonical_curriculum_counts_sole_and_broader_hard_leverage() -> None:
+    candidates = _structural_candidates_from_canonical_inputs((("a",), ("a", "b")))
+    assessments = {item.title: item for item in candidates if item.candidate_type == "assessment"}
+    assert tuple(
+        dict(assessments["Assess a"].explanation_facts)[key] for key in _STRUCTURAL_KEYS
+    ) == (1, 2, 0, 0, 0)
+    assert tuple(
+        dict(assessments["Assess b"].explanation_facts)[key] for key in _STRUCTURAL_KEYS
+    ) == (0, 1, 0, 0, 0)
+    broader = _structural_candidates_from_canonical_inputs((("a", "b"), ("a", "downstream")))
+    broader_assessments = {
+        item.title: item for item in broader if item.candidate_type == "assessment"
+    }
+    assert tuple(
+        dict(broader_assessments["Assess a"].explanation_facts)[key] for key in _STRUCTURAL_KEYS
+    ) == (0, 2, 0, 0, 0)
+    assert tuple(
+        dict(broader_assessments["Assess b"].explanation_facts)[key] for key in _STRUCTURAL_KEYS
+    ) == (0, 1, 0, 0, 0)
+
+
+def test_explicit_rubric_criteria_control_curriculum_leverage_conservatively() -> None:
+    candidates = _structural_candidates_from_canonical_inputs(
+        (("a",), ("a", "a-extra"), ("a", "b"), ("a-extra",), ("a",)),
+        criterion_requirements=True,
+        rubric_coverage={"a": ("a",), "b": ("b",)},
+        active_units=(True, True, True, True, False),
+    )
+    assessments = {item.title: item for item in candidates if item.candidate_type == "assessment"}
+    a = assessments["Assess a"]
+    b = assessments["Assess b"]
+    assert tuple(dict(a.explanation_facts)[key] for key in _STRUCTURAL_KEYS) == (1, 3, 0, 0, 0)
+    assert tuple(dict(b.explanation_facts)[key] for key in _STRUCTURAL_KEYS) == (0, 1, 0, 0, 0)
+    assert a.assessment_unknown and b.assessment_unknown
+    assert all(item.eligible for item in evaluate((a, b), None).candidates)
+
+    uncovered = _structural_candidates_from_canonical_inputs(
+        (("a-extra",),),
+        criterion_requirements=True,
+        rubric_coverage={"a": ("a",)},
+    )
+    a_uncovered = next(item for item in uncovered if item.title == "Assess a")
+    assert tuple(dict(a_uncovered.explanation_facts)[key] for key in _STRUCTURAL_KEYS) == (
+        0,
+        0,
+        0,
+        0,
+        0,
+    )
+
+    multiple_covered = _structural_candidates_from_canonical_inputs(
+        (("a", "a-extra"), ("a",)),
+        criterion_requirements=True,
+        rubric_coverage={"a": ("a", "a-extra")},
+    )
+    a_multiple = next(item for item in multiple_covered if item.title == "Assess a")
+    assert tuple(dict(a_multiple.explanation_facts)[key] for key in _STRUCTURAL_KEYS) == (
+        1,
+        2,
+        0,
+        0,
+        0,
+    )
+
+    other_known_blocker = _structural_candidates_from_canonical_inputs(
+        (("a", "b"),),
+        criterion_requirements=True,
+        requirement_states={(0, "b"): RequirementState.NOT_MET},
+    )
+    a_blocked = next(item for item in other_known_blocker if item.title == "Assess a")
+    assert tuple(dict(a_blocked.explanation_facts)[key] for key in _STRUCTURAL_KEYS) == (
+        0,
+        1,
+        0,
+        0,
+        0,
+    )
+
+
+def test_capability_requirement_never_creates_criterion_leverage() -> None:
+    empty_rubric = _structural_candidates_from_canonical_inputs(
+        (("a",),),
+        criterion_requirements=True,
+        rubric_coverage={"a": ()},
+        capability_requirements={(0, "a"): "a"},
+    )
+    assessment = next(item for item in empty_rubric if item.title == "Assess a")
+    assert tuple(dict(assessment.explanation_facts)[key] for key in _STRUCTURAL_KEYS[:2]) == (
+        0,
+        0,
+    )
+
+    covered_with_capability = _structural_candidates_from_canonical_inputs(
+        (("a", "capability"), ("capability",), ("a",)),
+        criterion_requirements=True,
+        rubric_coverage={"a": ("a",)},
+        capability_requirements={(0, "capability"): "a", (1, "capability"): "a"},
+    )
+    assessment = next(item for item in covered_with_capability if item.title == "Assess a")
+    assert tuple(dict(assessment.explanation_facts)[key] for key in _STRUCTURAL_KEYS[:2]) == (
+        1,
+        2,
+    )
+
+
+def test_equal_priority_assessment_target_selection_ignores_internal_uuid_allocation() -> None:
+    results = []
+    for swap in (False, True):
+        first_id = "00000000-0000-0000-0000-000000000001"
+        second_id = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+        if swap:
+            first_id, second_id = second_id, first_id
+        unknown = {
+            "assessment_status": "unknown",
+            "current_level_id": None,
+            "current_level_ordinal": None,
+            "comparison_status": "unknown",
+            "confidence": "unknown",
+            "freshness": "unknown",
+            "last_meaningful_activity_at": None,
+            "days_since_meaningful_activity": 0,
+            "exposure_days_42": 0,
+        }
+        shared = {
+            "semantic_definition_id": "semantic-shared",
+            "competency_identity_id": "competency-shared",
+            **unknown,
+        }
+        first = public_target(
+            "a",
+            **shared,
+            stable_key="target.a",
+            target_identity_id=first_id,
+            profile_target_id="profile-a",
+            deadline_status="overdue",
+            deadline_date="2020-01-01",
+        )
+        second = public_target(
+            "b",
+            **shared,
+            stable_key="target.b",
+            target_identity_id=second_id,
+            profile_target_id="profile-b",
+            dimension_key="dimension-b",
+            dimension_id="dimension-id-b",
+        )
+        other = public_target("c", stable_key="target.c", **unknown)
+        curriculum = CurriculumCatalogPublicDTO.build(
+            cutoff_at=2,
+            active_version_references=(),
+            objectives=(),
+            units=(),
+            assessment_rubrics=(
+                AssessmentRubricPublicDTO(
+                    "curriculum",
+                    "version",
+                    "definition-shared",
+                    "identity-shared",
+                    "rubric-z",
+                    "Assess shared",
+                    "Assess",
+                    "{}",
+                    "semantic-shared",
+                    None,
+                ),
+                AssessmentRubricPublicDTO(
+                    "curriculum",
+                    "version",
+                    "definition-other",
+                    "identity-other",
+                    "rubric-a",
+                    "Assess other",
+                    "Assess",
+                    "{}",
+                    "semantic-c",
+                    None,
+                ),
+            ),
+        )
+        candidates = build_candidates_v4(
+            public_snapshot(first, second, other),
+            profile_for_targets(first, second, other),
+            curriculum,
+            (),
+            ProjectCatalogPublicDTO.build(cutoff_at=2, active_version_references=(), candidates=()),
+            None,
+        )
+        assessments = tuple(item for item in candidates if item.candidate_type == "assessment")
+        output = evaluate(assessments, None)
+        ranked = sorted(output.candidates, key=lambda item: item.rank_ordinal or 999)
+        results.append(
+            (
+                tuple(
+                    (item.candidate.title, item.candidate.stable_tie_key, item.score_total)
+                    for item in ranked
+                ),
+                tuple(
+                    (
+                        next(
+                            candidate.title
+                            for candidate in assessments
+                            if candidate.stable_id == item.candidate_stable_id
+                        ),
+                        item.portfolio_role,
+                    )
+                    for item in output.decisions
+                    if item.decision == "selected"
+                ),
+            )
+        )
+        selected = next(item for item in assessments if item.title == "Assess shared")
+        assert selected.target_identity_id == first_id
+        assert selected.stable_tie_key.endswith('"target.a"]')
+        assert first_id not in selected.stable_tie_key
+        assert second_id not in selected.stable_tie_key
+    assert results[0] == results[1]
+    assert [(title, score) for title, _tie_key, score in results[0][0]] == [
+        ("Assess shared", 50),
+        ("Assess other", 38),
+    ]
+    assert dict(results[0][1]) == {
+        "Assess shared": "primary",
+        "Assess other": "complementary",
+    }
+
+
+def test_portable_semantic_fallback_ignores_fresh_internal_id_allocations() -> None:
+    rankings = []
+    for namespace in ("first-", "second-"):
+        candidates = _structural_candidates_from_canonical_inputs(
+            (), criterion_requirements=True, namespace=namespace
+        )
+        assessments = tuple(item for item in candidates if item.candidate_type == "assessment")
+        result = evaluate(assessments, None)
+        ranked = sorted(result.candidates, key=lambda item: item.rank_ordinal or 999)
+        rankings.append(
+            tuple((item.candidate.title, item.candidate.stable_tie_key) for item in ranked)
+        )
+        assert all(item.eligible and item.score_total == 38 for item in ranked)
+        assert [
+            decision.portfolio_role
+            for decision in result.decisions
+            if decision.decision == "selected"
+        ] == ["primary", "complementary"]
+    assert rankings[0] == rankings[1]
+    assert [title for title, _tie_key in rankings[0]] == ["Assess a", "Assess b"]
+    assert all("first-" not in key and "second-" not in key for _title, key in rankings[0])
+
+
+def test_v4_graph_advice_remains_ranking_only() -> None:
+    candidates = _structural_candidates_from_canonical_inputs(
+        (), ("recommended_before", "supports"), criterion_requirements=True
+    )
+    assessments = tuple(item for item in candidates if item.candidate_type == "assessment")
+    assert all(item.eligible for item in evaluate(assessments, None).candidates)
+    assert tuple(dict(assessments[1].explanation_facts)[key] for key in _STRUCTURAL_KEYS) == (
+        0,
+        0,
+        0,
+        1,
+        1,
+    )
+
+
+@pytest.mark.parametrize(
+    "edge_type,index", [("prerequisite", 2), ("recommended_before", 3), ("supports", 4)]
+)
+def test_canonical_graph_edges_change_only_advisory_rank_facts(edge_type: str, index: int) -> None:
+    candidates = _structural_candidates_from_canonical_inputs((), (edge_type, edge_type))
+    assessments = {item.title: item for item in candidates if item.candidate_type == "assessment"}
+    counts = tuple(dict(assessments["Assess b"].explanation_facts)[key] for key in _STRUCTURAL_KEYS)
+    assert counts[index] == 1  # Parallel edges count one downstream target.
+    assert sum(counts) == 1
+    result = evaluate(tuple(assessments.values()), None)
+    assert all(item.eligible and item.score_total == 38 for item in result.candidates)
+    assert (
+        next(item.candidate.title for item in result.candidates if item.rank_ordinal == 1)
+        == "Assess b"
+    )
+
+
 def test_candidate_key_collision_fails_closed() -> None:
     original = candidate("collision")
     conflict = replace(original, title="Different meaning")
@@ -1339,9 +1960,18 @@ def test_policy_registry_dispatch_is_explicit_copy_safe_and_version_pinned(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     bundle = registered_policy_bundle(POLICY_REGISTRY_VERSION)
-    assert bundle["candidate"] == "recommendation-candidate-policy/v2"
+    assert bundle["algorithm"] == "recommendation-algorithm/v2.3"
+    assert bundle["candidate"] == "recommendation-candidate-policy/v4"
     assert bundle["portfolio"] == "recommendation-portfolio-policy/v2"
-    assert bundle["reason"] == "recommendation-reason-policy/v2"
+    assert bundle["reason"] == "recommendation-reason-policy/v4"
+    v3_bundle = registered_policy_bundle(V3_POLICY_REGISTRY_VERSION)
+    assert v3_bundle["algorithm"] == "recommendation-algorithm/v2.2"
+    assert v3_bundle["candidate"] == "recommendation-candidate-policy/v3"
+    assert v3_bundle["reason"] == "recommendation-reason-policy/v3"
+    previous_bundle = registered_policy_bundle(PREVIOUS_POLICY_REGISTRY_VERSION)
+    assert previous_bundle["algorithm"] == "recommendation-algorithm/v2.1"
+    assert previous_bundle["candidate"] == "recommendation-candidate-policy/v2"
+    assert previous_bundle["reason"] == "recommendation-reason-policy/v2"
     legacy_bundle = registered_policy_bundle(LEGACY_POLICY_REGISTRY_VERSION)
     assert legacy_bundle["algorithm"] == "recommendation-algorithm/v2.0"
     assert legacy_bundle["candidate"] == "recommendation-candidate-policy/v1"
@@ -1354,7 +1984,7 @@ def test_policy_registry_dispatch_is_explicit_copy_safe_and_version_pinned(
         LEGACY_POLICY_REGISTRY_VERSION, (candidate("registered-legacy"),), None
     )
     assert {item.policy_version for item in current_output.reasons} == {
-        "recommendation-reason-policy/v2"
+        "recommendation-reason-policy/v4"
     }
     assert {item.policy_version for item in legacy_output.reasons} == {
         "recommendation-reason-policy/v1"
@@ -1527,7 +2157,9 @@ def _analysis_snapshot(db: Session) -> str:
     return snapshot.id
 
 
-async def _seed_live_recommendation_source(client: AsyncClient, csrf: str) -> None:
+async def _seed_live_recommendation_source(
+    client: AsyncClient, csrf: str, *, with_assessment: bool = False
+) -> None:
     headers = {"X-CSRF-Token": csrf}
     technical = next(
         item
@@ -1680,7 +2312,23 @@ async def _seed_live_recommendation_source(client: AsyncClient, csrf: str) -> No
                     ],
                 }
             ],
-            "assessment_rubrics": [],
+            "assessment_rubrics": (
+                [
+                    {
+                        "stable_key": "live-assessment",
+                        "title": "Live assessment",
+                        "instructions": "Assess the required criterion.",
+                        "rubric": {
+                            "criteria": [
+                                {"criterionDefinitionId": definition_body["criteria"][0]["id"]}
+                            ]
+                        },
+                        "semantic_definition_id": definition_body["id"],
+                    }
+                ]
+                if with_assessment
+                else []
+            ),
         },
         headers=headers,
     )
@@ -1783,6 +2431,135 @@ def test_runs_persist_complete_audit_without_mutating_history(db: Session) -> No
             ).all()
             assert len(components) == 7
             assert decision.score_total == sum(item.value for item in components)
+
+
+def test_persisted_public_audit_explains_equal_score_structural_order(db: Session) -> None:
+    snapshot_id = _analysis_snapshot(db)
+    learner_counts_before = tuple(
+        db.scalar(select(func.count()).select_from(model))
+        for model in (Activity, Evidence, CompetencyCapabilityState)
+    )
+    weaker = _unknown_assessment("a-weaker", (0, 0, 0, 0, 0))
+    stronger = _unknown_assessment("z-stronger", (0, 1, 0, 0, 0))
+    frozen = frozen_input(db, snapshot_id, (weaker, stronger))
+    run = persist_fixture_recommendations(
+        db,
+        idempotency_key="structural-audit",
+        analysis_snapshot_id=snapshot_id,
+        available_time_ms=None,
+        frozen_input=frozen,
+    )
+    db.commit()
+    assert (
+        tuple(
+            db.scalar(select(func.count()).select_from(model))
+            for model in (Activity, Evidence, CompetencyCapabilityState)
+        )
+        == learner_counts_before
+    )
+    audit = recommendation_detail(db, run.id)["candidateAudit"]
+    by_stable = {item["stableId"]: item for item in audit}
+    assert by_stable["z-stronger"]["rank"] == 1
+    assert by_stable["a-weaker"]["rank"] == 2
+    assert by_stable["z-stronger"]["score"] == by_stable["a-weaker"]["score"] == 38
+    for item in audit:
+        reason = next(
+            value for value in item["reasons"] if value["code"] == "ASSESSMENT_STRUCTURAL_ORDER"
+        )
+        facts = dict(reason["facts"])
+        assert tuple(facts[key] for key in _STRUCTURAL_KEYS) == (
+            (0, 1, 0, 0, 0) if item["stableId"] == "z-stronger" else (0, 0, 0, 0, 0)
+        )
+        assert facts["semanticTieKey"] == next(
+            candidate.stable_tie_key
+            for candidate in (weaker, stronger)
+            if candidate.stable_id == item["stableId"]
+        )
+
+
+async def test_previous_v2_registry_replay_preserves_exact_output_and_reason_shape(
+    authenticated_client: tuple[AsyncClient, str], db: Session
+) -> None:
+    client, csrf = authenticated_client
+    await _seed_live_recommendation_source(client, csrf)
+    snapshot = run_analysis(
+        db,
+        idempotency_key="previous-policy-analysis",
+        purpose="learning_control",
+        update_current=True,
+    )
+    db.commit()
+    original = _generate_recommendations(
+        db,
+        idempotency_key="previous-policy-run",
+        analysis_snapshot_id=snapshot.id,
+        available_time_ms=None,
+        policy_registry_version=PREVIOUS_POLICY_REGISTRY_VERSION,
+    )
+    db.commit()
+    replayed = replay_recommendations(
+        db, run_id=original.id, idempotency_key="previous-policy-replay"
+    )
+    db.commit()
+    assert (
+        original.algorithm_version == replayed.algorithm_version == "recommendation-algorithm/v2.1"
+    )
+    assert (
+        original.policy_registry_version
+        == replayed.policy_registry_version
+        == PREVIOUS_POLICY_REGISTRY_VERSION
+    )
+    assert original.input_hash == replayed.input_hash
+    assert original.output_hash == replayed.output_hash
+    original_audit = recommendation_detail(db, original.id)["candidateAudit"]
+    assert all(
+        reason["code"] != "ASSESSMENT_STRUCTURAL_ORDER"
+        for item in original_audit
+        for reason in item["reasons"]
+    )
+
+
+async def test_v3_registry_replay_preserves_v22_output_and_structural_audit_shape(
+    authenticated_client: tuple[AsyncClient, str], db: Session
+) -> None:
+    client, csrf = authenticated_client
+    await _seed_live_recommendation_source(client, csrf, with_assessment=True)
+    snapshot = run_analysis(
+        db,
+        idempotency_key="v3-replay-analysis",
+        purpose="learning_control",
+        update_current=True,
+    )
+    db.commit()
+    original = _generate_recommendations(
+        db,
+        idempotency_key="v3-replay-original",
+        analysis_snapshot_id=snapshot.id,
+        available_time_ms=None,
+        policy_registry_version=V3_POLICY_REGISTRY_VERSION,
+    )
+    db.commit()
+    replayed = replay_recommendations(db, run_id=original.id, idempotency_key="v3-replay-copy")
+    db.commit()
+    assert (
+        original.algorithm_version == replayed.algorithm_version == "recommendation-algorithm/v2.2"
+    )
+    assert (
+        original.policy_registry_version
+        == replayed.policy_registry_version
+        == V3_POLICY_REGISTRY_VERSION
+    )
+    assert original.input_hash == replayed.input_hash
+    assert original.output_hash == replayed.output_hash
+    assert original.policy_bundle_json == replayed.policy_bundle_json
+    for run in (original, replayed):
+        audit = recommendation_detail(db, run.id)["candidateAudit"]
+        assessment = next(item for item in audit if item["candidateType"] == "assessment")
+        reason = next(
+            item for item in assessment["reasons"] if item["code"] == "ASSESSMENT_STRUCTURAL_ORDER"
+        )
+        assert reason["policyVersion"] == "recommendation-reason-policy/v3"
+        assert "semanticTieKey" not in dict(reason["facts"])
 
 
 def test_live_generation_requires_the_current_exact_analysis_envelope(db: Session) -> None:

@@ -79,7 +79,7 @@ def test_authority_bootstraps_legacy_and_readiness_is_explicit(db: Session) -> N
     ) == {
         "code": "RECOMMENDATION_POLICY_APPROVED",
         "ready": True,
-        "detail": "recommendation-policy-registry/v2",
+        "detail": "recommendation-policy-registry/v4",
     }
 
 

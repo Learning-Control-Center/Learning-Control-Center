@@ -37,6 +37,19 @@ been exercised remain explicitly `Not executed`; see the [product QA record](doc
   restore, and password recovery.
 - Keeps the deterministic core fully functional without an LLM or cloud service.
 
+For an unassessed learner, Recommendation V2 permits assessment-first work. When eligible
+assessments have equal scores and existing urgency/activity rank facts, policy registry v4 orders
+them by five direct structural signals: active Curriculum units with exactly one unresolved hard
+criterion requirement that the assessment explicitly covers, active units with any matching
+unresolved hard criterion requirement, Unknown active targets downstream through hard Graph
+prerequisites, through `recommended_before`, then through `supports`. Criterion coverage comes
+only from explicit rubric criterion references compatible with the target; capability requirements
+do not contribute to these Curriculum counts. Equal-priority assessment targets use their Profile
+target stable keys for selection. Each unit or target counts once per signal. These facts and the
+portable semantic final tie key appear in the run's `ASSESSMENT_STRUCTURAL_ORDER` rationale. They
+advise ordering; they do not satisfy requirements or establish capability. Earlier runs retain
+their recorded policy registry and replay semantics.
+
 ## Quick install or update
 
 On **Ubuntu Server 24.04 LTS (amd64)** with systemd, root access, and internet access, run:
