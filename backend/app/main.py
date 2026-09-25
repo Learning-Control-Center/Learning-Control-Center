@@ -17,6 +17,8 @@ from app.analysis.v3 import models as analysis_v3_models  # noqa: F401
 from app.analysis.v3.api import router as analysis_v3_router
 from app.analysis.v3.service import drain_analysis_invalidations, initialize_analysis_v3
 from app.analytics import router as analytics_router
+from app.assessment import models as assessment_models  # noqa: F401
+from app.assessment.api import router as assessment_router
 from app.auth import router as auth_router
 from app.authority import models as authority_models  # noqa: F401
 from app.authority.api import router as authority_router
@@ -202,6 +204,7 @@ app.include_router(legacy_roadmap_graph_router, prefix="/api/v2")
 app.include_router(analysis_v3_router, prefix="/api/v2")
 app.include_router(recommendation_v2_router, prefix="/api/v2")
 app.include_router(today_router, prefix="/api/v2")
+app.include_router(assessment_router, prefix="/api/v2")
 app.include_router(authority_router, prefix="/api/v2")
 
 install_frontend_routes(app, Path(__file__).resolve().parents[2])

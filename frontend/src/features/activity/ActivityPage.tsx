@@ -12,6 +12,9 @@ import type { Activity } from './model'
 import { referenceOptions } from './model'
 import { sessionElapsedDuration, useActiveSession } from '../../shared/session/ActiveSessionProvider'
 import { DailyReflectionEditor } from '../reflection'
+import { paths } from '../../shared/navigation/paths'
+
+type AssessmentActivityItem = { id: string; activityId: string; sessionId: string; sessionState: string; reviewRequired: boolean; task: { unitTitle: string } }
 
 const categories = ['learning', 'reading', 'practice', 'coding', 'debugging', 'project', 'review', 'verification', 'research']
 const assistance = ['none', 'docs_only', 'ai_hint', 'ai_assisted', 'agent_led']
@@ -34,6 +37,8 @@ export function SessionsPage() {
   const [projectTasks, setProjectTasks] = useState<ProjectCatalogCandidateApi[]>([])
   const [referenceError, setReferenceError] = useState('')
   const [sessions, setSessions] = useState<Session[]>([])
+  const [assessments, setAssessments] = useState<AssessmentActivityItem[]>([])
+  const [assessmentError, setAssessmentError] = useState('')
   const [selectedActivityId, setSelectedActivityId] = useState('')
   const [selectedReferenceKey, setSelectedReferenceKey] = useState('unlinked')
   const [linkedHandoff, setLinkedHandoff] = useState(false)
@@ -53,6 +58,10 @@ export function SessionsPage() {
         api<{ items: Session[] }>('/sessions?limit=30', { signal }),
       ])
       setActivities(activityItems); setSessions(listResponse.items)
+      void apiV2<{ items: AssessmentActivityItem[] }>('/assessment-executions', { signal }).then(
+        (response) => { if (!signal?.aborted) { setAssessments(response.items ?? []); setAssessmentError('') } },
+        (caught) => { if (!signal?.aborted) setAssessmentError(caught instanceof Error ? caught.message : 'Assessment history could not be loaded.') },
+      )
       setSelectedActivityId((current) => activityItems.some((item) => item.id === current) ? current : (activityItems[0]?.id ?? ''))
       void Promise.allSettled([
         apiV2<RoadmapProjection>('/roadmap-projection/current', { signal }),
@@ -119,7 +128,7 @@ export function SessionsPage() {
   return <div className="mx-auto w-full max-w-[90rem] space-y-6">
     <LiveNotice>{notice}</LiveNotice>
     <PageHeader eyebrow="Actual work record" title="Activity" description="Create or select a human-named Activity, then time or log a Session against explicit canonical references. The server remains timer authority." />
-    {mutationError ? <MutationError>{mutationError}</MutationError> : null}{loadError ? <SectionError message={loadError} retry={() => void load()} /> : null}{referenceError ? <SectionError message={referenceError} /> : null}
+    {mutationError ? <MutationError>{mutationError}</MutationError> : null}{loadError ? <SectionError message={loadError} retry={() => void load()} /> : null}{referenceError ? <SectionError message={referenceError} /> : null}{assessmentError ? <SectionError message={assessmentError} retry={() => void load()} /> : null}
     {handoff ? <Surface className="border-moss/25 bg-moss/5 p-5"><SectionHeader title={`Continue: ${handoff.reference.title}`} description={handoff.reference.kind === 'unlinked' ? 'Choose or create the actual Activity. It remains unlinked until the originating Today suggestion explicitly confirms a replacement.' : `This ${handoff.reference.kind.replaceAll('_', ' ')} reference came from ${handoff.origin}. Nothing changes until you confirm below.`} /><div className="mt-4 grid gap-4 md:grid-cols-[minmax(0,1fr)_auto]"><SelectField id="handoff-activity" label="Use an existing Activity" value={selectedActivityId} onChange={(event) => { setSelectedActivityId(event.target.value); setLinkedHandoff(false) }}><option value="">Select an Activity</option>{activities.map((item) => <option value={item.id} key={item.id}>{item.title} · {item.categoryStableKey}</option>)}</SelectField><div className="flex items-end gap-2"><Button aria-busy={relationshipBusy} disabled={!selectedActivityId || linkedHandoff || relationshipBusy} onClick={() => void confirmHandoff()}><Link2 className="size-4" />{relationshipBusy ? 'Confirming…' : linkedHandoff ? 'Confirmed' : ['competency', 'unlinked'].includes(handoff.reference.kind) ? 'Use Activity' : 'Confirm relationship'}</Button><Link className="button-secondary" to={handoff.returnTo}>Cancel</Link></div></div>{linkedHandoff ? <p className="mt-4 flex flex-wrap items-center gap-2 text-sm font-medium text-status-success" role="status"><Check className="size-4" />{handoff.reference.kind === 'competency' ? 'Activity selected. The competency contribution is recorded only with a Session.' : handoff.reference.kind === 'unlinked' ? 'Activity selected. No suggestion or canonical reference has been changed yet.' : 'Relationship recorded. You may log a Session below.'}<Link className="button-quiet" to={activityResultPath(handoff, selectedActivityId)}>Return selected Activity</Link></p> : null}</Surface> : null}
     <CreateActivityForm key={handoffIdentity || 'unlinked'} handoff={handoff} onCreated={async (activity) => { setActivities((current) => [activity, ...current]); setSelectedActivityId(activity.id); setNotice(`${activity.title} created.`); if (handoff) await confirmHandoff(activity.id) }} onError={setMutationError} />
     <div className="grid gap-5 xl:grid-cols-[minmax(20rem,0.75fr)_minmax(0,1.25fr)]">
@@ -128,6 +137,7 @@ export function SessionsPage() {
     </div>
     {!handoff ? <Surface className="p-5"><SelectField label="Relate new Sessions to" description="Canonical Profile, Curriculum, and Project references replace the legacy Roadmap picker. Unlinked work remains valid." value={selectedReferenceKey} onChange={(event) => setSelectedReferenceKey(event.target.value)}>{options.map((option) => <option value={option.key} key={option.key}>{option.label}</option>)}</SelectField></Surface> : null}
     <DailyReflectionEditor />
+    {assessments.length ? <Surface className="p-5"><SectionHeader title="Assessment executions" description="Every bound assessment remains reachable here, including Sessions older than recent history and assessments from earlier Today generations." /><div className="mt-4 space-y-3">{assessments.map((item) => <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-ink/10 p-3" key={item.id}><div><p className="font-semibold">{item.task.unitTitle}</p><p className="text-sm text-ink/65">Session {item.sessionId} · {item.sessionState} · {item.reviewRequired ? 'awaiting review' : 'reviewed'}</p></div><Link className="button-secondary" to={paths.assessmentExecution(item.id)}>{item.reviewRequired ? 'Review assessment' : 'Open assessment'}</Link></div>)}</div></Surface> : null}
     <Surface className="overflow-hidden"><div className="border-b border-ink/10 p-5 sm:p-6"><SectionHeader title="Recent Session history" description="Older and unlinked Sessions remain readable. Their source is labeled; no Profile domain is inferred from legacy Track data." /></div><div className="divide-y divide-ink/10">{sessions.length ? sessions.map((session) => <article className="flex flex-col gap-3 p-5 sm:flex-row sm:items-center sm:justify-between sm:p-6" key={session.id}><div><p className="font-semibold">{session.competencyIdentityId ? titleByCompetency.get(session.competencyIdentityId) ?? 'Legacy competency reference' : 'Unlinked or legacy Session'}</p><p className="mt-1 text-sm capitalize text-ink/65">{session.activityType} · {session.assistanceMode.replaceAll('_', ' ')} · {session.outcome ?? session.timedState ?? 'recorded'}</p></div><div className="text-left sm:text-right"><p className="font-mono font-semibold">{formatDuration(session.durationMs, true)}</p><p className="mt-1 text-xs text-ink/65">{new Date(session.startedAt).toLocaleString()} · Session history</p></div></article>) : <p className="p-6 text-sm text-ink/65">No Session history yet.</p>}</div></Surface>
   </div>
 }

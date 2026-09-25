@@ -323,6 +323,9 @@ async def cancel_timed_session(
     now = _finalize_timed(item, cancel=True, payload=None)
     replacement = _supersede_activity_from_session(db, item)
     retract_session_evidence(db, item.id, "Timed Session was cancelled.")
+    from app.assessment.service import retract_execution_evidence
+
+    retract_execution_evidence(db, item.id, "Assessment Session was cancelled.")
     _invalidate_session(db, item, replacement.id)
     commit_source_and_drain(db)
     return serialize_session(item, now)
@@ -470,6 +473,11 @@ async def update_session(
         source_role=f"correction:{correction.id}",
         reason="Session evidence was replaced after correction.",
     )
+    from app.assessment.service import retract_execution_evidence
+
+    retract_execution_evidence(
+        db, item.id, "Assessment Session was corrected; re-review is required."
+    )
     _invalidate_session(db, item, correction.id)
     apply_session_promotion(db, item)
     commit_source_and_drain(db)
@@ -514,6 +522,9 @@ async def delete_session(
     db.add(correction)
     db.flush()
     retract_session_evidence(db, item.id, item.tombstone_reason)
+    from app.assessment.service import retract_execution_evidence
+
+    retract_execution_evidence(db, item.id, "Assessment Session was deleted.")
     _invalidate_session(db, item, correction.id)
     commit_source_and_drain(db)
     return {"deleted": True}

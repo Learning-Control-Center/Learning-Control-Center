@@ -241,6 +241,72 @@ describe('Today daily control loop', () => {
     expect(screen.getByRole('link', { name: 'Open source Project: Blocked project task' })).toHaveAttribute('href', '/projects/project-1')
   })
 
+  it('requires an authored assessment task and explicit assistance before starting', async () => {
+    const assessment = { ...suggestion, presentation: { ...suggestion.presentation, title: 'Linux shell assessment', candidateType: 'assessment', source: { type: 'assessment_rubric', entityId: 'rubric-1', versionId: 'curriculum-version-1' } } }
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/api/v2/today/current')) return json({ generation: { ...generation, suggestions: [assessment] }, continuingStartedSuggestions: [] })
+      if (url.endsWith('/api/v2/today/suggestions/suggestion-1/assessment-options')) return json({ items: [{ unitDefinitionId: 'unit-1', opportunityId: 'opportunity-1', unitTitle: 'Trace a shell pipeline', action: { instructions: 'Use a disposable tree and compare pipeline statuses.' }, criteria: [{ criterionDefinitionId: 'criterion-1', criterionStableKey: 'trace-pipeline-status', description: 'Trace pipeline status.', rubricCheck: 'Compare normal and pipefail status.' }], requiresArtifact: true, intendedStrengths: ['moderate'] }] })
+      if (url.endsWith('/api/v2/today/suggestions/suggestion-1/start') && init?.method === 'POST') return json({ ...assessment, status: 'started', interactions: [{ id: 'started-1', type: 'started', sessionId: 'session-1', correction: null }] }, 201)
+      if (url.endsWith('/api/v2/assessment-executions/by-suggestion/suggestion-1')) return json({ id: 'execution-1', sessionId: 'session-1', sessionState: 'running', sessionOutcome: null, assistanceMode: 'docs_only', reviewRequired: true, task: { unitTitle: 'Trace a shell pipeline', action: { instructions: 'Use a disposable tree and compare pipeline statuses.' }, criteria: [{ criterionDefinitionId: 'criterion-1', criterionStableKey: 'trace-pipeline-status', description: 'Trace pipeline status.', rubricCheck: 'Compare normal and pipefail status.' }], requiresArtifact: true }, reviews: [], latestResult: null })
+      const reflection = reflectionResponse(url); if (reflection) return reflection
+      throw new Error(`Unexpected URL: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<TodayV2Page />, { wrapper: MemoryRouter })
+    expect(await screen.findByRole('heading', { name: 'Linux shell assessment' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Start actual work' })).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Choose assessment task and start' }))
+    expect(await screen.findByText('Use a disposable tree and compare pipeline statuses.')).toBeInTheDocument()
+    const start = screen.getByRole('button', { name: 'Start actual assessment work' })
+    expect(start).toBeDisabled()
+    expect(fetchMock.mock.calls.some(([input, init]) => String(input).endsWith('/start') && init?.method === 'POST')).toBe(false)
+    await userEvent.selectOptions(screen.getByLabelText('Actual assistance'), 'docs_only')
+    expect(start).toBeEnabled()
+    await userEvent.click(start)
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input, init]) => String(input).endsWith('/start') && init?.method === 'POST')).toBe(true))
+    const call = fetchMock.mock.calls.find(([input, init]) => String(input).endsWith('/start') && init?.method === 'POST')
+    expect(JSON.parse(String(call?.[1]?.body))).toEqual(expect.objectContaining({ assistance_mode: 'docs_only', assessment_unit_definition_id: 'unit-1', assessment_opportunity_id: 'opportunity-1' }))
+  })
+
+  it('keeps a finalized unreviewed assessment reachable without the recent Session list', async () => {
+    const assessment = { ...suggestion, status: 'started', interactions: [{ id: 'started-1', type: 'started', sessionId: 'session-1', correction: null }], presentation: { ...suggestion.presentation, title: 'Linux shell assessment', candidateType: 'assessment' } }
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/api/v2/today/current')) return json({ generation: { ...generation, suggestions: [assessment] }, continuingStartedSuggestions: [] })
+      if (url.endsWith('/api/v1/sessions?limit=100')) return json({ items: [] })
+      if (url.endsWith('/api/v2/assessment-executions/by-suggestion/suggestion-1')) return json({ id: 'execution-1', sessionId: 'session-1', sessionState: 'completed', sessionOutcome: 'completed', assistanceMode: 'docs_only', reviewRequired: true, task: { unitTitle: 'Trace a shell pipeline', action: { instructions: 'Compare pipeline status.' }, criteria: [], requiresArtifact: true }, reviews: [] })
+      const reflection = reflectionResponse(url); if (reflection) return reflection
+      throw new Error(`Unexpected URL: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<TodayV2Page />, { wrapper: MemoryRouter })
+    expect(await screen.findByRole('link', { name: 'Review assessment' })).toHaveAttribute('href', '/assessments/execution-1')
+    expect(screen.queryByRole('button', { name: 'Complete from finalized Session' })).not.toBeInTheDocument()
+    expect(screen.getByText(/Session completion alone does not establish capability/)).toBeInTheDocument()
+  })
+
+  it('explains a pre-0021 started assessment and offers a new bound attempt', async () => {
+    const assessment = { ...suggestion, status: 'started', interactions: [{ id: 'started-1', type: 'started', sessionId: 'old-session', correction: null }], presentation: { ...suggestion.presentation, title: 'Earlier Linux assessment', candidateType: 'assessment' } }
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/api/v2/today/current')) return json({ generation: { ...generation, suggestions: [assessment] }, continuingStartedSuggestions: [] })
+      if (url.endsWith('/api/v1/sessions?limit=100')) return json({ items: [] })
+      if (url.endsWith('/api/v2/assessment-executions/by-suggestion/suggestion-1')) return json({ kind: 'legacy_started', suggestionId: 'suggestion-1', sessionId: 'old-session', message: 'Earlier Session remains actual work history but cannot become reviewed assessment Evidence.' })
+      if (url.endsWith('/api/v2/today/suggestions/suggestion-1/assessment-options')) return json({ items: [{ unitDefinitionId: 'unit-1', opportunityId: 'opportunity-1', unitTitle: 'Trace pipeline', action: { instructions: 'Use a disposable tree.' }, criteria: [{ criterionDefinitionId: 'criterion-1', criterionStableKey: 'trace-pipeline-status' }], requiresArtifact: true }] })
+      if (url.endsWith('/api/v2/today/suggestions/suggestion-1/restart-legacy-assessment') && init?.method === 'POST') return json({ ...assessment, interactions: [...assessment.interactions, { id: 'new-start', type: 'started', sessionId: 'new-session', correction: null }] }, 201)
+      const reflection = reflectionResponse(url); if (reflection) return reflection
+      throw new Error(`Unexpected URL: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<TodayV2Page />, { wrapper: MemoryRouter })
+    expect(await screen.findByText(/cannot become reviewed assessment Evidence/)).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Start new reviewed assessment attempt' }))
+    await userEvent.selectOptions(screen.getByLabelText('Actual assistance'), 'docs_only')
+    await userEvent.click(screen.getByRole('button', { name: 'Start actual assessment work' }))
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input, init]) => String(input).endsWith('/restart-legacy-assessment') && init?.method === 'POST')).toBe(true))
+  })
+
   it('preserves empty-state generation controls and input after a command failure', async () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)

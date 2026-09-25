@@ -497,6 +497,9 @@ async def cancel_timed_session(
     session = _get_timed(db, session_id)
     now = _finalize_timed(session, cancel=True, payload=None)
     retract_session_evidence(db, session.id, "Timed Session was cancelled.")
+    from app.assessment.service import retract_execution_evidence
+
+    retract_execution_evidence(db, session.id, "Assessment Session was cancelled.")
     _queue_session_invalidation(db, session, session.id)
     db.commit()
     return _serialize_session(db, session, now)

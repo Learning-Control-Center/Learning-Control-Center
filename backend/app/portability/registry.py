@@ -3,8 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 
-PORTABLE_SCHEMA_CURRENT = 10
-PORTABLE_SCHEMA_READABLE = frozenset({1, 2, 3, 4, 5, 6, 7, 8, 9, 10})
+PORTABLE_SCHEMA_CURRENT = 11
+PORTABLE_SCHEMA_READABLE = frozenset({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11})
 PORTABLE_V2_FOUNDATION_TABLES = frozenset(
     {
         "analysis_runs",
@@ -455,6 +455,35 @@ PORTABLE_V10_MANIFEST = {
         "validate_master_import_ledger",
     ],
 }
+
+PORTABLE_V11_ASSESSMENT_TABLES = frozenset(
+    {"assessment_executions", "assessment_artifacts", "assessment_reviews"}
+)
+PORTABLE_V11_MANIFEST = {
+    "includedCanonicalDomains": [
+        *PORTABLE_V10_MANIFEST["includedCanonicalDomains"],
+        "assessment_executions",
+    ],
+    "includedImmutableHistory": [
+        *PORTABLE_V10_MANIFEST["includedImmutableHistory"],
+        "assessment_artifacts",
+        "assessment_reviews",
+    ],
+    "omittedRebuildableState": [*PORTABLE_V10_MANIFEST["omittedRebuildableState"]],
+    "restoreActions": [
+        *PORTABLE_V10_MANIFEST["restoreActions"],
+        "validate_assessment_execution_lineage",
+    ],
+}
+
+
+def upgrade_v10_to_v11_tables(tables: dict[str, list[dict[str, object]]]) -> dict[str, int]:
+    """Older packages predate canonical assessment execution history."""
+    if set(tables) & PORTABLE_V11_ASSESSMENT_TABLES:
+        raise ValueError("Portable V10 cannot contain assessment execution history.")
+    for table_name in PORTABLE_V11_ASSESSMENT_TABLES:
+        tables[table_name] = []
+    return {"initializedAssessmentTables": len(PORTABLE_V11_ASSESSMENT_TABLES)}
 
 
 def upgrade_v9_to_v10_tables(tables: dict[str, list[dict[str, object]]]) -> dict[str, int]:

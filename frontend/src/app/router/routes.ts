@@ -24,6 +24,7 @@ export const routeMetadata: readonly RouteMetadata[] = [
   { path: paths.projects, label: 'Projects', title: 'Projects', group: 'primary', authority: 'all', focusTarget: '[data-route-focus], #main-content h1' },
   { path: '/projects/:projectId', label: 'Project', title: 'Project detail', group: 'hidden', parent: paths.projects, authority: 'v2', focusTarget: '[data-route-focus], #main-content h1' },
   { path: paths.activity, label: 'Activity', title: 'Activity', group: 'primary', authority: 'all', focusTarget: '[data-route-focus], #main-content h1' },
+  { path: '/assessments/:executionId', label: 'Assessment execution', title: 'Assessment execution', group: 'hidden', parent: paths.activity, authority: 'v2', focusTarget: '[data-route-focus], #main-content h1' },
   { path: paths.insights, label: 'Insights', title: 'Insights', group: 'primary', authority: 'all', focusTarget: '[data-route-focus], #main-content h1' },
   { path: paths.analysis, label: 'Current analysis', title: 'Current analysis', group: 'insights', parent: paths.insights, authority: 'v2', focusTarget: '[data-route-focus], #main-content h1' },
   { path: paths.recommendations, label: 'Recommendation history', title: 'Recommendation history', group: 'insights', parent: paths.insights, authority: 'all', focusTarget: '[data-route-focus], #main-content h1' },

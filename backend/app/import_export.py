@@ -34,6 +34,7 @@ from app.analysis.v3.service import build_analysis_inputs
 from app.analysis_sources import analysis_source_generation
 from app.analytics import build_analytics
 from app.api_serialization import serialize_api_instants
+from app.assessment.models import AssessmentArtifact, AssessmentExecution, AssessmentReview
 from app.auth import AuthContext, get_auth_context, require_csrf
 from app.authority.models import LearningControlAuthorityEvent, LearningControlAuthorityState
 from app.authority.semantics import is_valid_transition
@@ -196,6 +197,8 @@ from app.portability.registry import (
     PORTABLE_V9_MANIFEST,
     PORTABLE_V10_MANIFEST,
     PORTABLE_V10_MASTER_IMPORT_TABLES,
+    PORTABLE_V11_ASSESSMENT_TABLES,
+    PORTABLE_V11_MANIFEST,
     supports_portable_schema,
     upgrade_v2_to_v3_tables,
     upgrade_v3_to_v4_tables,
@@ -205,6 +208,7 @@ from app.portability.registry import (
     upgrade_v7_to_v8_tables,
     upgrade_v8_to_v9_tables,
     upgrade_v9_to_v10_tables,
+    upgrade_v10_to_v11_tables,
 )
 from app.projects.contracts import ProjectCatalogPublicDTO
 from app.projects.models import (
@@ -423,6 +427,9 @@ PORTABLE_MODELS = [
     RecommendationV2Reason,
     TodayGeneration,
     TodaySuggestion,
+    AssessmentExecution,
+    AssessmentArtifact,
+    AssessmentReview,
     TodayInteraction,
     TodayInteractionCorrection,
     SuggestionActivityRelation,
@@ -521,7 +528,7 @@ def _capability_projection_checkpoints(db: Session) -> list[dict[str, str]]:
 
 def _portable_payload(db: Session, project_ids: set[str] | None = None) -> dict[str, Any]:
     payload: dict[str, Any] = {
-        "manifest": PORTABLE_V10_MANIFEST,
+        "manifest": PORTABLE_V11_MANIFEST,
         "tables": {
             _table(model).name: [_row_dict(item) for item in db.scalars(select(model)).all()]
             for model in PORTABLE_MODELS
@@ -2609,6 +2616,12 @@ def _normalize_portable_tables(
             "PORTABLE_MANIFEST_INVALID",
             "The portable V10 manifest is missing or does not match the recovery contract.",
         )
+    if schema_version == 11 and parsed.manifest != PORTABLE_V11_MANIFEST:
+        raise AppError(
+            422,
+            "PORTABLE_MANIFEST_INVALID",
+            "The portable V11 manifest is missing or does not match the recovery contract.",
+        )
     if schema_version == 1 and parsed.manifest is not None:
         raise AppError(
             422, "PORTABLE_SCHEMA_INVALID", "A V1 portable package cannot contain a V2 manifest."
@@ -2652,6 +2665,12 @@ def _normalize_portable_tables(
             "PORTABLE_SCHEMA_INVALID",
             "Older portable packages cannot contain Master Import ledger tables.",
         )
+    if schema_version < 11 and set(tables) & PORTABLE_V11_ASSESSMENT_TABLES:
+        raise AppError(
+            422,
+            "PORTABLE_SCHEMA_INVALID",
+            "Older portable packages cannot contain assessment execution history.",
+        )
     unknown = set(tables) - set(PORTABLE_BY_TABLE)
     v2_tables = set(PORTABLE_V2_FOUNDATION_TABLES)
     v3_tables = set(PORTABLE_V3_CURRICULUM_TABLES)
@@ -2662,6 +2681,7 @@ def _normalize_portable_tables(
     v8_tables = set(PORTABLE_V8_TODAY_TABLES)
     v9_tables = set(PORTABLE_V9_AUTHORITY_TABLES)
     v10_tables = set(PORTABLE_V10_MASTER_IMPORT_TABLES)
+    v11_tables = set(PORTABLE_V11_ASSESSMENT_TABLES)
     missing = set(PORTABLE_BY_TABLE) - set(tables)
     allowed_v1_missing = (
         v2_tables
@@ -2673,6 +2693,7 @@ def _normalize_portable_tables(
         | v8_tables
         | v9_tables
         | v10_tables
+        | v11_tables
         | {"roadmap_scope_events"}
     )
     legacy_without_scope_history = schema_version == 1 and "roadmap_scope_events" in missing
@@ -2690,25 +2711,40 @@ def _normalize_portable_tables(
                 | v8_tables
                 | v9_tables
                 | v10_tables
+                | v11_tables
             )
         )
         or (
             schema_version == 3
             and missing
-            <= (v4_tables | v5_tables | v6_tables | v7_tables | v8_tables | v9_tables | v10_tables)
+            <= (
+                v4_tables
+                | v5_tables
+                | v6_tables
+                | v7_tables
+                | v8_tables
+                | v9_tables
+                | v10_tables
+                | v11_tables
+            )
         )
         or (
             schema_version == 4
-            and missing <= (v5_tables | v6_tables | v7_tables | v8_tables | v9_tables | v10_tables)
+            and missing
+            <= (v5_tables | v6_tables | v7_tables | v8_tables | v9_tables | v10_tables | v11_tables)
         )
         or (
             schema_version == 5
-            and missing <= (v6_tables | v7_tables | v8_tables | v9_tables | v10_tables)
+            and missing <= (v6_tables | v7_tables | v8_tables | v9_tables | v10_tables | v11_tables)
         )
-        or (schema_version == 6 and missing <= (v7_tables | v8_tables | v9_tables | v10_tables))
-        or (schema_version == 7 and missing <= (v8_tables | v9_tables | v10_tables))
-        or (schema_version == 8 and missing <= (v9_tables | v10_tables))
-        or (schema_version == 9 and missing <= v10_tables)
+        or (
+            schema_version == 6
+            and missing <= (v7_tables | v8_tables | v9_tables | v10_tables | v11_tables)
+        )
+        or (schema_version == 7 and missing <= (v8_tables | v9_tables | v10_tables | v11_tables))
+        or (schema_version == 8 and missing <= (v9_tables | v10_tables | v11_tables))
+        or (schema_version == 9 and missing <= (v10_tables | v11_tables))
+        or (schema_version == 10 and missing <= v11_tables)
         or not missing
     )
     if unknown or not valid_missing:
@@ -2784,6 +2820,11 @@ def _normalize_portable_tables(
     if schema_version < 10:
         try:
             upgrade_v9_to_v10_tables(tables)
+        except ValueError as exc:
+            raise AppError(422, "PORTABLE_SCHEMA_INVALID", str(exc)) from exc
+    if schema_version < 11:
+        try:
+            upgrade_v10_to_v11_tables(tables)
         except ValueError as exc:
             raise AppError(422, "PORTABLE_SCHEMA_INVALID", str(exc)) from exc
     _sanitize_portable_host_metadata(tables)
@@ -2952,6 +2993,13 @@ def _validate_portable_payload(
             {
                 "initializedMasterImportTables": len(PORTABLE_V10_MASTER_IMPORT_TABLES),
                 "nativeMasterImportLedgerInferred": 0,
+            }
+        )
+    if schema_version < 11:
+        compatibility_conversions.update(
+            {
+                "initializedAssessmentTables": len(PORTABLE_V11_ASSESSMENT_TABLES),
+                "nativeAssessmentHistoryInferred": 0,
             }
         )
     return tables, {

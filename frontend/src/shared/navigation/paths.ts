@@ -8,6 +8,7 @@ export const paths = {
   projects: '/projects',
   project: (projectId: string) => `/projects/${encodeURIComponent(projectId)}`,
   activity: '/activity',
+  assessmentExecution: (executionId: string) => `/assessments/${encodeURIComponent(executionId)}`,
   insights: '/insights',
   analysis: '/insights/analysis',
   recommendations: '/insights/recommendations',

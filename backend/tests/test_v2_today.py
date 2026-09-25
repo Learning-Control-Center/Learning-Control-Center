@@ -35,6 +35,7 @@ from app.portability.registry import (
     PORTABLE_V8_TODAY_TABLES,
     PORTABLE_V9_AUTHORITY_TABLES,
     PORTABLE_V10_MASTER_IMPORT_TABLES,
+    PORTABLE_V11_ASSESSMENT_TABLES,
 )
 from app.recommendation.v2.contracts import CandidateInputDTO
 from app.recommendation.v2.models import RecommendationV2Run
@@ -1760,7 +1761,7 @@ def test_replace_expire_race_keeps_exactly_one_terminal_advisory_state(
 
 def test_portable_v8_adds_no_fake_today_history_and_rebuilds_current_state(db: Session) -> None:
     package = _portable_payload(db)
-    tables, summary = _validate_portable_payload(package, "today-empty-v8", 10)
+    tables, summary = _validate_portable_payload(package, "today-empty-v8", 11)
     assert all(tables[name] == [] for name in PORTABLE_V8_TODAY_TABLES)
     assert summary["compatibilityConversions"] == {}
     assert package["todayV2CurrentCheckpoint"] == {
@@ -1796,6 +1797,8 @@ def test_v7_to_v8_adapter_initializes_empty_today_without_inference(db: Session)
         payload["tables"].pop(table_name)
     for table_name in PORTABLE_V10_MASTER_IMPORT_TABLES:
         payload["tables"].pop(table_name)
+    for table_name in PORTABLE_V11_ASSESSMENT_TABLES:
+        payload["tables"].pop(table_name)
     converted, summary = _validate_portable_payload(payload, "today-v7-adapter", 7)
     assert all(converted[name] == [] for name in PORTABLE_V8_TODAY_TABLES)
     assert summary["compatibilityConversions"] == {
@@ -1805,6 +1808,8 @@ def test_v7_to_v8_adapter_initializes_empty_today_without_inference(db: Session)
         "nativeAuthorityHistoryInferred": 0,
         "initializedMasterImportTables": len(PORTABLE_V10_MASTER_IMPORT_TABLES),
         "nativeMasterImportLedgerInferred": 0,
+        "initializedAssessmentTables": len(PORTABLE_V11_ASSESSMENT_TABLES),
+        "nativeAssessmentHistoryInferred": 0,
     }
 
 

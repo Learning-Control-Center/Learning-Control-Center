@@ -70,7 +70,7 @@ def test_scheduled_backup_manifest_permissions_and_retention(tmp_path: Path) -> 
         values = dict(line.split("=", 1) for line in manifest.read_text().splitlines())
         assert values == {
             "checksum_sha256": hashlib.sha256(backup.read_bytes()).hexdigest(),
-            "schema_revision": "0020_master_import_ledger",
+            "schema_revision": "0021_assessment_execution",
             "channel": "stable",
             "release_id": "test-release",
             "source_repository": "https://example.invalid/repository.git",

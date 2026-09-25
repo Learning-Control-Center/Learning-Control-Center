@@ -11,6 +11,22 @@ const json = (value: unknown, status = 200) => new Response(JSON.stringify(value
 afterEach(() => vi.unstubAllGlobals())
 
 describe('V2 Activity handoff', () => {
+  it('links an older assessment execution from Activity without recent Sessions', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/api/v2/activities')) return json([])
+      if (url.endsWith('/api/v2/assessment-executions')) return json({ items: [{ id: 'execution-old', activityId: 'activity-old', sessionId: 'session-old', sessionState: 'completed', reviewRequired: true, task: { unitTitle: 'Trace a pipeline' } }] })
+      if (url.includes('/api/v1/sessions?')) return json({ items: [] })
+      if (url.endsWith('/api/v2/roadmap-projection/current')) return json({ configured: true, nodes: [], edges: [] })
+      if (url.endsWith('/api/v2/curricula/catalog/active')) return json({ units: [] })
+      if (url.endsWith('/api/v2/projects/catalog/current')) return json({ candidates: [] })
+      if (url.endsWith('/api/v1/sessions/active')) return json({ active: false, session: null })
+      return json({})
+    }))
+    render(<MemoryRouter><SessionsPage /></MemoryRouter>)
+    expect(await screen.findByRole('link', { name: 'Review assessment' })).toHaveAttribute('href', '/assessments/execution-old')
+  })
+
   it('does not mutate on refresh and creates then relates only after confirmation', async () => {
     vi.stubGlobal('crypto', { randomUUID: () => 'handoff-key' })
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {

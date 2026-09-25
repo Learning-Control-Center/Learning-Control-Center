@@ -31,6 +31,7 @@ from app.portability.registry import (
     PORTABLE_V8_MANIFEST,
     PORTABLE_V9_AUTHORITY_TABLES,
     PORTABLE_V10_MASTER_IMPORT_TABLES,
+    PORTABLE_V11_ASSESSMENT_TABLES,
     upgrade_v8_to_v9_tables,
 )
 from app.time_utils import utc_now_ms
@@ -551,7 +552,7 @@ def test_authority_history_is_immutable_and_portable_v10_is_exact(db: Session) -
     db.rollback()
 
     payload = _portable_payload(db)
-    tables, summary = _validate_portable_payload(payload, "authority-v10", 10)
+    tables, summary = _validate_portable_payload(payload, "authority-v10", 11)
     assert summary["compatibilityConversions"] == {}
     assert len(tables["learning_control_authority_state"]) == 1
     assert len(tables["learning_control_authority_events"]) == 1
@@ -559,14 +560,14 @@ def test_authority_history_is_immutable_and_portable_v10_is_exact(db: Session) -
     tampered = deepcopy(payload)
     tampered["tables"]["learning_control_authority_events"][0]["reason"] = "tampered"
     with pytest.raises(AppError, match="Authority event hash is invalid"):
-        _validate_portable_payload(tampered, "authority-v10-tampered", 10)
+        _validate_portable_payload(tampered, "authority-v10-tampered", 11)
 
     malformed = deepcopy(payload)
     malformed["tables"]["learning_control_authority_events"][0]["resulting_state_json"] = (
         "{not-json"
     )
     with pytest.raises(AppError, match="Authority event JSON is invalid"):
-        _validate_portable_payload(malformed, "authority-v10-malformed-json", 10)
+        _validate_portable_payload(malformed, "authority-v10-malformed-json", 11)
 
     v8 = deepcopy(payload)
     v8["manifest"] = PORTABLE_V8_MANIFEST
@@ -574,6 +575,8 @@ def test_authority_history_is_immutable_and_portable_v10_is_exact(db: Session) -
     for table_name in PORTABLE_V9_AUTHORITY_TABLES:
         v8["tables"].pop(table_name)
     for table_name in PORTABLE_V10_MASTER_IMPORT_TABLES:
+        v8["tables"].pop(table_name)
+    for table_name in PORTABLE_V11_ASSESSMENT_TABLES:
         v8["tables"].pop(table_name)
     converted, conversion = _validate_portable_payload(v8, "authority-v8-adapter", 8)
     assert (
@@ -585,6 +588,8 @@ def test_authority_history_is_immutable_and_portable_v10_is_exact(db: Session) -
         "nativeAuthorityHistoryInferred": 0,
         "initializedMasterImportTables": len(PORTABLE_V10_MASTER_IMPORT_TABLES),
         "nativeMasterImportLedgerInferred": 0,
+        "initializedAssessmentTables": len(PORTABLE_V11_ASSESSMENT_TABLES),
+        "nativeAssessmentHistoryInferred": 0,
     }
 
 
@@ -656,7 +661,7 @@ def test_head_schema_contracts_legacy_pointer_cycle(db: Session) -> None:
     assert {"is_current", "active_version_id", "current_phase_id"}.isdisjoint(roadmap_columns)
     assert db.execute(text("PRAGMA foreign_key_check")).all() == []
     assert db.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == (
-        "0020_master_import_ledger"
+        "0021_assessment_execution"
     )
 
 
@@ -685,19 +690,19 @@ def test_portable_restore_cannot_demote_or_rewrite_v2_authority(db: Session) -> 
             legacy_payload,
             True,
             package_id="legacy-after-v2",
-            schema_version=10,
+            schema_version=11,
         )
 
     earlier_v2_payload = _portable_payload(db)
     _validated_tables, _summary = _validate_portable_payload(
-        earlier_v2_payload, "activated-v2-authority-round-trip", 10
+        earlier_v2_payload, "activated-v2-authority-round-trip", 11
     )
     _apply_portable_restore(
         db,
         earlier_v2_payload,
         True,
         package_id="activated-v2-authority-round-trip",
-        schema_version=10,
+        schema_version=11,
     )
     validate_domain_integrity(db.connection())
     round_trip = _portable_payload(db)
@@ -727,5 +732,5 @@ def test_portable_restore_cannot_demote_or_rewrite_v2_authority(db: Session) -> 
             earlier_v2_payload,
             True,
             package_id="older-v2-history",
-            schema_version=10,
+            schema_version=11,
         )

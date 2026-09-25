@@ -5,14 +5,29 @@ from collections.abc import Callable
 from functools import wraps
 from typing import Any, Concatenate, cast
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
+from app.assessment.models import AssessmentExecution, AssessmentReview
+from app.assessment.service import (
+    ASSESSMENT_EXECUTION_POLICY,
+    _rubric_for_suggestion,
+    assessment_session_facts,
+    assessment_session_reviewable,
+    selected_task_option,
+)
 from app.curriculum.service import link_actual_activity_to_unit
 from app.determinism import canonical_json, content_hash
 from app.errors import AppError
-from app.models import Activity, DisciplineProfile, LearningSession, ProjectionInvalidation, new_id
+from app.models import (
+    Activity,
+    DisciplineProfile,
+    LearningSession,
+    ProjectionInvalidation,
+    SessionCorrection,
+    new_id,
+)
 from app.projects.service import link_actual_activity_to_project_task
 from app.recommendation.v2.public import (
     PublicRecommendationItemDTO,
@@ -607,15 +622,19 @@ def _derived_start_contributions(
 
 def _start_command_facts(
     *,
-    assistance_mode: str,
+    assistance_mode: str | None,
     notes: str | None,
     contributions: list[SessionContributionCreate],
+    assessment_unit_definition_id: str | None = None,
+    assessment_opportunity_id: str | None = None,
 ) -> dict[str, Any]:
     rows = [item.model_dump(mode="json") for item in contributions]
     return {
-        "assistanceMode": assistance_mode,
+        "assistanceMode": assistance_mode or "none",
         "notes": notes,
         "contributions": sorted(rows, key=canonical_json),
+        "assessmentUnitDefinitionId": assessment_unit_definition_id,
+        "assessmentOpportunityId": assessment_opportunity_id,
     }
 
 
@@ -625,10 +644,13 @@ def start_suggestion(
     *,
     suggestion_id: str,
     idempotency_key: str,
-    assistance_mode: str,
+    assistance_mode: str | None,
     notes: str | None,
     contributions: list[SessionContributionCreate],
+    assessment_unit_definition_id: str | None = None,
+    assessment_opportunity_id: str | None = None,
     now_ms: int | None = None,
+    allow_expired_legacy: bool = False,
 ) -> TodayInteraction:
     _begin_immediate(db)
     now = now_ms if now_ms is not None else utc_now_ms()
@@ -636,6 +658,8 @@ def start_suggestion(
         assistance_mode=assistance_mode,
         notes=notes,
         contributions=contributions,
+        assessment_unit_definition_id=assessment_unit_definition_id,
+        assessment_opportunity_id=assessment_opportunity_id,
     )
     existing = db.scalar(
         select(TodayInteraction).where(TodayInteraction.idempotency_key == idempotency_key)
@@ -654,13 +678,37 @@ def start_suggestion(
             command_facts=command_facts,
         )
     suggestion = _suggestion_or_404(db, suggestion_id)
-    if now >= suggestion.expires_at:
+    if now >= suggestion.expires_at and not allow_expired_legacy:
         raise AppError(409, "TODAY_SUGGESTION_EXPIRED", "The suggestion is past its expiry.")
     candidate = load_public_recommendation_item(
         db,
         run_id=suggestion.recommendation_run_id,
         candidate_id=suggestion.candidate_id,
     )
+    assessment_option = None
+    if candidate.candidate_type == "assessment":
+        if (
+            assistance_mode is None
+            or not assessment_unit_definition_id
+            or not assessment_opportunity_id
+            or contributions
+        ):
+            raise AppError(
+                422,
+                "ASSESSMENT_START_INCOMPLETE",
+                "Assessment start requires a selected authored task and explicit assistance. "
+                "Caller-supplied contributions are not accepted.",
+            )
+        assessment_option = selected_task_option(
+            db, suggestion.id, assessment_unit_definition_id, assessment_opportunity_id, now_ms=now
+        )
+    elif assessment_unit_definition_id is not None or assessment_opportunity_id is not None:
+        raise AppError(
+            422,
+            "ASSESSMENT_START_INVALID",
+            "Assessment task fields require an assessment suggestion.",
+        )
+    actual_assistance = assistance_mode or "none"
     actual_contributions = contributions or _derived_start_contributions(candidate)
     activity = create_activity_in_uow(
         db,
@@ -674,7 +722,7 @@ def start_suggestion(
     session = start_timed_session_in_uow(
         db,
         activity=activity,
-        assistance_mode=assistance_mode,
+        assistance_mode=actual_assistance,
         notes=notes,
         contributions=actual_contributions,
         started_at=now,
@@ -698,6 +746,35 @@ def start_suggestion(
             idempotency_key=f"today-project-link:{idempotency_key}",
             created_at=link_created_at,
         )
+    elif assessment_option is not None:
+        link_actual_activity_to_unit(
+            db,
+            activity_id=activity.id,
+            learning_unit_definition_id=assessment_option["unitDefinitionId"],
+            provenance="user_confirmed",
+            idempotency_key=f"today-assessment-unit:{idempotency_key}",
+            created_at=link_created_at,
+        )
+        db.add(
+            AssessmentExecution(
+                idempotency_key=idempotency_key,
+                today_suggestion_id=suggestion.id,
+                recommendation_run_id=suggestion.recommendation_run_id,
+                recommendation_candidate_id=suggestion.candidate_id,
+                rubric_identity_id=assessment_option["rubricIdentityId"],
+                rubric_definition_id=assessment_option["rubricDefinitionId"],
+                curriculum_version_id=assessment_option["curriculumVersionId"],
+                unit_definition_id=assessment_option["unitDefinitionId"],
+                opportunity_id=assessment_option["opportunityId"],
+                competency_identity_id=candidate.competency_identity_id,
+                target_identity_id=candidate.target_identity_id,
+                activity_id=activity.id,
+                session_id=session.id,
+                assistance_mode_at_start=actual_assistance,
+                started_at=now,
+                policy_version=ASSESSMENT_EXECUTION_POLICY,
+            )
+        )
     _create_relation(
         db,
         suggestion_id=suggestion.id,
@@ -720,6 +797,96 @@ def start_suggestion(
         activity_id=activity.id,
         session_id=session.id,
         command_facts=command_facts,
+    )
+
+
+@_translate_concurrent_conflict
+def restart_legacy_assessment(
+    db: Session,
+    *,
+    suggestion_id: str,
+    idempotency_key: str,
+    assistance_mode: str | None,
+    notes: str | None,
+    assessment_unit_definition_id: str | None,
+    assessment_opportunity_id: str | None,
+    now_ms: int | None = None,
+) -> TodayInteraction:
+    """Correct an unbound pre-0021 start and create a distinct bound attempt atomically."""
+    _begin_immediate(db)
+    now = now_ms if now_ms is not None else utc_now_ms()
+    replay = db.scalar(
+        select(TodayInteraction).where(TodayInteraction.idempotency_key == idempotency_key)
+    )
+    if replay is not None:
+        return start_suggestion(
+            db,
+            suggestion_id=suggestion_id,
+            idempotency_key=idempotency_key,
+            assistance_mode=assistance_mode,
+            notes=notes,
+            contributions=[],
+            assessment_unit_definition_id=assessment_unit_definition_id,
+            assessment_opportunity_id=assessment_opportunity_id,
+            now_ms=now,
+            allow_expired_legacy=True,
+        )
+    suggestion = _suggestion_or_404(db, suggestion_id)
+    _rubric_for_suggestion(db, suggestion)
+    state = _state_for(db, suggestion_id)
+    latest = (
+        db.get(TodayInteraction, state.latest_interaction_id)
+        if state.latest_interaction_id
+        else None
+    )
+    if (
+        state.status != "started"
+        or latest is None
+        or latest.interaction_type != "started"
+        or db.scalar(
+            select(AssessmentExecution.id).where(
+                AssessmentExecution.today_suggestion_id == suggestion_id
+            )
+        )
+        is not None
+    ):
+        raise AppError(
+            409,
+            "ASSESSMENT_LEGACY_START_REQUIRED",
+            "Only an unbound earlier assessment start can begin a new reviewed attempt.",
+        )
+    facts = json.loads(latest.structured_reason_json).get("command") or {}
+    if facts.get("assessmentUnitDefinitionId") or facts.get("assessmentOpportunityId"):
+        raise AppError(
+            409,
+            "ASSESSMENT_LEGACY_START_REQUIRED",
+            "This start already has authored assessment task lineage.",
+        )
+    old_session = db.get(LearningSession, latest.session_id)
+    if old_session is None or old_session.timed_state in {"running", "paused"}:
+        raise AppError(
+            409,
+            "ASSESSMENT_LEGACY_SESSION_ACTIVE",
+            "Finish or cancel the earlier actual Session before starting a new reviewed attempt.",
+        )
+    correct_interaction(
+        db,
+        interaction_id=latest.id,
+        idempotency_key=f"legacy-assessment-correction:{idempotency_key}",
+        reason="Earlier assessment start had no authored task binding; work history is preserved.",
+        now_ms=now,
+    )
+    return start_suggestion(
+        db,
+        suggestion_id=suggestion_id,
+        idempotency_key=idempotency_key,
+        assistance_mode=assistance_mode,
+        notes=notes,
+        contributions=[],
+        assessment_unit_definition_id=assessment_unit_definition_id,
+        assessment_opportunity_id=assessment_opportunity_id,
+        now_ms=now,
+        allow_expired_legacy=True,
     )
 
 
@@ -755,6 +922,51 @@ def complete_suggestion(
             feedback=feedback,
         )
     suggestion = _suggestion_or_404(db, suggestion_id)
+    candidate = load_public_recommendation_item(
+        db, run_id=suggestion.recommendation_run_id, candidate_id=suggestion.candidate_id
+    )
+    if candidate.candidate_type == "assessment":
+        execution = db.scalar(
+            select(AssessmentExecution).where(
+                AssessmentExecution.today_suggestion_id == suggestion_id
+            )
+        )
+        latest_review = (
+            db.scalar(
+                select(AssessmentReview)
+                .where(AssessmentReview.execution_id == execution.id)
+                .order_by(AssessmentReview.review_sequence.desc())
+                .limit(1)
+            )
+            if execution is not None
+            else None
+        )
+        assessment_session = db.get(LearningSession, session_id)
+        latest_correction_at = db.scalar(
+            select(func.max(SessionCorrection.corrected_at)).where(
+                SessionCorrection.session_id == session_id
+            )
+        )
+        if (
+            execution is None
+            or execution.session_id != session_id
+            or latest_review is None
+            or not assessment_session_reviewable(
+                assessment_session_facts(assessment_session)
+                if assessment_session is not None
+                else None,
+                activity_id=execution.activity_id,
+            )
+            or (
+                latest_correction_at is not None
+                and latest_correction_at >= latest_review.reviewed_at
+            )
+        ):
+            raise AppError(
+                409,
+                "ASSESSMENT_REVIEW_REQUIRED",
+                "Review the bound assessment before closing its Today suggestion.",
+            )
     session = db.get(LearningSession, session_id)
     if (
         session is None

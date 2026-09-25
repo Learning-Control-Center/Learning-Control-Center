@@ -5,9 +5,10 @@ import re
 from collections import defaultdict
 from dataclasses import asdict
 from datetime import date, datetime
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from pydantic import ValidationError
 from sqlalchemy import Boolean, Integer, String, Table, Text, func, select, text
 from sqlalchemy.orm import Session
 
@@ -19,6 +20,16 @@ from app.analysis.v3.models import (
     AnalysisV3Signal,
     AnalysisV3SnapshotDetail,
     AnalysisV3UnknownMarker,
+)
+from app.assessment.contracts import AssessmentObservationInput
+from app.assessment.models import AssessmentArtifact, AssessmentExecution, AssessmentReview
+from app.assessment.service import (
+    ASSESSMENT_REVIEW_POLICY,
+    ASSISTANCE_RANK,
+    assessment_artifact_valid,
+    assessment_lineage_valid,
+    assessment_session_reviewable,
+    derive_review_evidence_policy,
 )
 from app.authority.models import LearningControlAuthorityEvent, LearningControlAuthorityState
 from app.authority.semantics import is_valid_transition
@@ -3091,6 +3102,7 @@ def validate_domain_integrity(connection: Any) -> None:
     _validate_v2_profile_competency(connection)
     _validate_activity_sessions(connection)
     _validate_evidence(connection)
+    _validate_assessment_executions(connection)
     _validate_capability_history(connection)
     _validate_curriculum(connection)
     _validate_projects(connection)
@@ -3104,6 +3116,341 @@ def validate_domain_integrity(connection: Any) -> None:
                 "PORTABLE_TIMEZONE_INVALID",
                 "The discipline timezone is not a valid IANA timezone.",
             ) from exc
+
+
+def _validate_assessment_executions(connection: Any) -> None:
+    def rows(model: Any) -> dict[str, Any]:
+        return {row["id"]: row for row in connection.execute(select(*model.__table__.c)).mappings()}
+
+    executions = rows(AssessmentExecution)
+    artifacts = rows(AssessmentArtifact)
+    reviews = rows(AssessmentReview)
+    suggestions = rows(TodaySuggestion)
+    candidates = rows(RecommendationV2Candidate)
+    rubrics = rows(AssessmentRubricDefinition)
+    units = rows(LearningUnitDefinition)
+    opportunities = rows(EvidenceOpportunityDefinition)
+    sessions = rows(LearningSession)
+    evidence = rows(Evidence)
+    retracted_evidence_ids = {
+        row["evidence_id"]
+        for row in connection.execute(select(*EvidenceRetraction.__table__.c)).mappings()
+    }
+    corrections_by_session: dict[str, list[Any]] = defaultdict(list)
+    for correction in connection.execute(select(*SessionCorrection.__table__.c)).mappings():
+        corrections_by_session[correction["session_id"]].append(correction)
+    links = list(connection.execute(select(*EvidenceLink.__table__.c)).mappings())
+    interactions = list(connection.execute(select(*TodayInteraction.__table__.c)).mappings())
+    unit_targets = list(connection.execute(select(*LearningUnitTarget.__table__.c)).mappings())
+    by_execution: dict[str, list[Any]] = defaultdict(list)
+    referenced_assessment_evidence: set[str] = set()
+
+    def invalid() -> NoReturn:
+        raise AppError(
+            422,
+            "PORTABLE_ASSESSMENT_INVALID",
+            "Assessment execution or review lineage is inconsistent.",
+        )
+
+    def session_at(session_id: str, cutoff_at: int | None = None) -> dict[str, Any]:
+        session = sessions.get(session_id)
+        if session is None:
+            invalid()
+        values = dict(session)
+        snapshot = dict(values) if cutoff_at is None else None
+        for correction in sorted(
+            corrections_by_session[session_id],
+            key=lambda item: (item["corrected_at"], item["id"]),
+            reverse=True,
+        ):
+            try:
+                before = json.loads(correction["before_json"])
+                after = json.loads(correction["after_json"])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                invalid()
+            if not isinstance(before, dict) or not isinstance(after, dict):
+                invalid()
+            if any(values.get(key) != value for key, value in after.items()):
+                invalid()
+            if (
+                cutoff_at is not None
+                and snapshot is None
+                and correction["corrected_at"] < cutoff_at
+            ):
+                snapshot = dict(values)
+            values.update(before)
+        return snapshot if snapshot is not None else values
+
+    for execution in executions.values():
+        suggestion = suggestions.get(execution["today_suggestion_id"])
+        candidate = candidates.get(execution["recommendation_candidate_id"])
+        rubric = rubrics.get(execution["rubric_definition_id"])
+        unit = units.get(execution["unit_definition_id"])
+        opportunity = opportunities.get(execution["opportunity_id"])
+        session = sessions.get(execution["session_id"])
+        if (
+            suggestion is None
+            or candidate is None
+            or rubric is None
+            or unit is None
+            or opportunity is None
+            or session is None
+        ):
+            invalid()
+        original_session = session_at(execution["session_id"], execution["started_at"])
+        if (
+            not assessment_lineage_valid(
+                execution=execution,
+                suggestion=suggestion,
+                candidate=candidate,
+                rubric=rubric,
+                unit=unit,
+                opportunity=opportunity,
+                session=original_session,
+                finalized=False,
+            )
+            or execution["assistance_mode_at_start"]
+            not in {"none", "docs_only", "ai_hint", "ai_assisted", "agent_led"}
+            or not any(
+                item["suggestion_id"] == suggestion["id"]
+                and item["interaction_type"] == "started"
+                and item["activity_id"] == execution["activity_id"]
+                and item["session_id"] == execution["session_id"]
+                for item in interactions
+            )
+        ):
+            invalid()
+        if (
+            original_session["assistance_mode"] != execution["assistance_mode_at_start"]
+            or session["started_at"] != execution["started_at"]
+        ):
+            invalid()
+    for artifact in artifacts.values():
+        execution = executions.get(artifact["execution_id"])
+        if execution is None or not assessment_artifact_valid(
+            artifact, execution, artifact["criterion_definition_id"]
+        ):
+            invalid()
+        rubric = rubrics[execution["rubric_definition_id"]]
+        try:
+            rubric_ids = {
+                item["criterionDefinitionId"]
+                for item in json.loads(rubric["rubric_json"])["criteria"]
+            }
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            invalid()
+        if not any(
+            target["learning_unit_definition_id"] == execution["unit_definition_id"]
+            and target["semantic_definition_id"] == rubric["semantic_definition_id"]
+            and target["criterion_definition_id"] == artifact["criterion_definition_id"]
+            and target["criterion_definition_id"] in rubric_ids
+            for target in unit_targets
+        ):
+            invalid()
+        captured_session = session_at(execution["session_id"], artifact["created_at"])
+        if (
+            not assessment_session_reviewable(
+                captured_session, activity_id=execution["activity_id"]
+            )
+            or not isinstance(captured_session["ended_at"], int)
+            or captured_session["ended_at"] > artifact["created_at"]
+        ):
+            invalid()
+    for review in reviews.values():
+        execution = executions.get(review["execution_id"])
+        if (
+            execution is None
+            or review["policy_version"] != ASSESSMENT_REVIEW_POLICY
+            or review["reviewer_kind"] != "self"
+        ):
+            invalid()
+        source_session = session_at(execution["session_id"], review["reviewed_at"])
+        if (
+            not assessment_lineage_valid(
+                execution=execution,
+                suggestion=suggestions[execution["today_suggestion_id"]],
+                candidate=candidates[execution["recommendation_candidate_id"]],
+                rubric=rubrics[execution["rubric_definition_id"]],
+                unit=units[execution["unit_definition_id"]],
+                opportunity=opportunities[execution["opportunity_id"]],
+                session=source_session,
+                finalized=True,
+            )
+            or not isinstance(source_session["ended_at"], int)
+            or source_session["ended_at"] > review["reviewed_at"]
+        ):
+            invalid()
+        try:
+            snapshot = json.loads(review["snapshot_json"])
+            rubric = rubrics[execution["rubric_definition_id"]]
+            rubric_ids = {
+                row["criterionDefinitionId"]
+                for row in json.loads(rubric["rubric_json"])["criteria"]
+            }
+            covered = {
+                row["criterion_definition_id"]
+                for row in unit_targets
+                if row["learning_unit_definition_id"] == execution["unit_definition_id"]
+                and row["semantic_definition_id"] == rubric["semantic_definition_id"]
+                and row["criterion_definition_id"] in rubric_ids
+            }
+            review_rows = snapshot["rows"]
+            attestation = snapshot["attestation"]
+            if (
+                not isinstance(review_rows, list)
+                or {row["criterionDefinitionId"] for row in review_rows} != covered
+                or len(review_rows) != len(covered)
+                or not all(
+                    attestation[key] is True
+                    for key in (
+                        "actual_session",
+                        "assistance_complete",
+                        "outputs_authentic",
+                        "review_truthful",
+                    )
+                )
+                or not re.fullmatch(r"[0-9a-f]{64}", snapshot["commandHash"])
+            ):
+                invalid()
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            invalid()
+        if review["supersedes_review_id"] is not None:
+            prior = reviews.get(review["supersedes_review_id"])
+            if (
+                prior is None
+                or prior["execution_id"] != execution["id"]
+                or prior["reviewed_at"] > review["reviewed_at"]
+            ):
+                invalid()
+        for row in review_rows:
+            if row["state"] not in {"demonstrated", "partial", "contradicted", "unobserved"}:
+                invalid()
+            evidence_id = row.get("evidenceId")
+            if row["state"] == "unobserved":
+                if evidence_id is not None:
+                    invalid()
+                continue
+            item = evidence.get(evidence_id)
+            linked = [link for link in links if link["evidence_id"] == evidence_id]
+            if (
+                item is None
+                or evidence_id in referenced_assessment_evidence
+                or item["source_type"] != "assessment_review"
+                or item["evidence_type"] != "assessment"
+                or item["source_id"] != review["id"]
+                or item["occurred_at"] != source_session["ended_at"]
+                or item["source_role"] != f"criterion:{row['criterionDefinitionId']}"
+                or len(linked) != 1
+                or linked[0]["criterion_definition_id"] != row["criterionDefinitionId"]
+                or linked[0]["competency_identity_id"] != execution["competency_identity_id"]
+                or linked[0]["effect"] not in {"supports", "contradicts", "context_only"}
+            ):
+                invalid()
+            referenced_assessment_evidence.add(evidence_id)
+            artifact_id = row.get("corroborationId")
+            artifact = artifacts.get(artifact_id) if artifact_id is not None else None
+            if artifact_id is not None and (
+                artifact is None
+                or artifact["execution_id"] != execution["id"]
+                or artifact["criterion_definition_id"] != row["criterionDefinitionId"]
+                or artifact["created_at"] > review["reviewed_at"]
+            ):
+                invalid()
+            try:
+                provenance = json.loads(item["provenance_json"])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                invalid()
+            if (
+                provenance.get("assessment_occurrence_session_id") != execution["session_id"]
+                or provenance.get("execution_id") != execution["id"]
+                or provenance.get("activity_id") != execution["activity_id"]
+                or provenance.get("rubric_definition_id") != execution["rubric_definition_id"]
+                or provenance.get("unit_definition_id") != execution["unit_definition_id"]
+                or provenance.get("opportunity_id") != execution["opportunity_id"]
+                or provenance.get("source_record_id") != review["id"]
+                or provenance.get("source_record_type") != "assessment_review"
+                or provenance.get("assessment_policy_version") != ASSESSMENT_REVIEW_POLICY
+                or provenance.get("session_assistance_mode") != source_session["assistance_mode"]
+            ):
+                invalid()
+            if evidence_id not in retracted_evidence_ids:
+                effective_session = session_at(execution["session_id"])
+                if (
+                    not assessment_session_reviewable(
+                        effective_session, activity_id=execution["activity_id"]
+                    )
+                    or effective_session["assistance_mode"] != provenance["session_assistance_mode"]
+                ):
+                    invalid()
+            try:
+                opportunity = opportunities[execution["opportunity_id"]]
+                required = json.loads(opportunity["required_characteristics_json"])
+                possible = json.loads(opportunity["possible_characteristics_json"])
+                session_mode = provenance["session_assistance_mode"]
+                if session_mode not in ASSISTANCE_RANK:
+                    invalid()
+                observation = AssessmentObservationInput(
+                    criterion_definition_id=row["criterionDefinitionId"],
+                    state=row["state"],
+                    task_setup=row["taskSetup"],
+                    expected_result=row["expectedResult"],
+                    observed_output=row["observedOutput"],
+                    comparison=row["comparison"],
+                    artifact_content=row["artifactContent"],
+                    artifact_reference=row["artifactReference"],
+                    additional_assistance_mode=row["additionalAssistanceMode"],
+                )
+                derived = derive_review_evidence_policy(
+                    observation,
+                    session_mode=session_mode,
+                    requires_artifact=bool(required.get("artifact")),
+                    intended_modes=set(possible.get("intendedIndependenceModes", [])),
+                    intended_strengths=set(possible.get("intendedStrengths", [])),
+                    corroboration_hash=artifact["sha256"] if artifact is not None else None,
+                )
+            except (KeyError, TypeError, ValueError, ValidationError, json.JSONDecodeError):
+                invalid()
+            if (
+                item["strength"] != derived["strength"]
+                or item["independence"] != derived["independence"]
+                or item["source_confidence"] != derived["confidence"]
+                or linked[0]["effect"] != derived["effect"]
+                or item["artifact_hash"] != derived["artifact_hash"]
+                or item["external_reference"] != observation.artifact_reference
+                or item["description"] != observation.observed_output
+                or row["derivedStrength"] != derived["strength"]
+                or row["derivedIndependence"] != derived["independence"]
+                or row["derivedSourceConfidence"] != derived["confidence"]
+                or row["artifactHash"] != derived["artifact_hash"]
+                or provenance.get("effective_assistance_mode") != derived["effective_mode"]
+                or provenance.get("review_state") != observation.state
+                or provenance.get("reviewer_kind") != "self"
+                or provenance.get("reviewer_user_id") != review["reviewer_user_id"]
+                or provenance.get("corroboration_id") != artifact_id
+                or provenance.get("corroboration_kind")
+                != ("server_received_bytes/v1" if artifact is not None else None)
+            ):
+                invalid()
+        by_execution[execution["id"]].append(review)
+    for history in by_execution.values():
+        ordered = sorted(history, key=lambda item: item["review_sequence"])
+        if ordered[0]["supersedes_review_id"] is not None or any(
+            item["review_sequence"] != prior["review_sequence"] + 1
+            or item["supersedes_review_id"] != prior["id"]
+            for prior, item in zip(ordered, ordered[1:], strict=False)
+        ):
+            invalid()
+        if ordered[0]["review_sequence"] != 1:
+            invalid()
+    review_ids = set(reviews)
+    if any(
+        item["source_type"] == "assessment_review"
+        and (
+            item["source_id"] not in review_ids or item["id"] not in referenced_assessment_evidence
+        )
+        for item in evidence.values()
+    ):
+        invalid()
 
 
 def _validate_master_import_ledger(connection: Any) -> None:

@@ -15,6 +15,10 @@ import type { CurrentToday, TodaySuggestion } from './model'
 
 type CurrentAnalysis = { status: string; snapshot: { id: string } | null }
 type SourceDestination = { href?: string; label: string }
+type AssessmentCriterion = { criterionDefinitionId: string; criterionStableKey: string; description: string; rubricCheck: string }
+type AssessmentTask = { unitDefinitionId: string; opportunityId: string; unitTitle: string; action: { instructions?: string; verificationMethod?: string }; criteria: AssessmentCriterion[]; requiresArtifact: boolean; intendedStrengths: string[] }
+type AssessmentExecution = { id: string; sessionId: string; sessionState: string; sessionOutcome: string | null; assistanceMode: string; reviewRequired: boolean; task: AssessmentTask; reviews: { id: string }[] }
+type LegacyAssessment = { kind: 'legacy_started'; suggestionId: string; sessionId: string; message: string }
 const label = (value: string) => value.replaceAll('_', ' ')
 
 export function TodayV2Page() {
@@ -93,7 +97,7 @@ export function TodayV2Page() {
     try {
       const updated = await apiV2<TodaySuggestion>(`/today/suggestions/${suggestion.id}/${action}`, { method: 'POST', body: JSON.stringify({ idempotency_key: crypto.randomUUID(), ...body }) })
       setToday((current) => updateSuggestion(current, updated))
-      if (['start', 'completed', 'partially-completed'].includes(action)) await refreshActiveSession()
+      if (['start', 'restart-legacy-assessment', 'completed', 'partially-completed'].includes(action)) await refreshActiveSession()
       setNotice(action === 'skipped' ? 'Suggestion skipped. No debt or completion was created.' : `Today status updated: ${label(action)}.`)
       await load()
       return true
@@ -192,16 +196,80 @@ function SuggestionCard({ suggestion, sessions, sourceLink, activeSessionId, wor
     <details className="mt-4 rounded-xl border border-ink/10 p-3"><summary className="min-h-11 cursor-pointer py-2 text-sm font-medium focus-visible:outline focus-visible:outline-2 focus-visible:outline-moss">Why this is suggested</summary><p className="mt-2 text-sm text-ink/70">{suggestion.presentation.reasonSummary}</p><div className="mt-3"><ReasonList reasons={suggestion.presentation.reasons} /></div><div className="mt-3 flex flex-wrap gap-3"><Link className="text-sm font-medium underline" to={rationale}>Open exact Recommendation rationale</Link>{sourceLink.href ? <Link className="text-sm font-medium underline" to={sourceLink.href}>{sourceLink.label}</Link> : <span className="text-sm text-ink/65">{sourceLink.label}</span>}</div></details>
     {!suggestion.terminal ? <div className="mt-4 flex flex-wrap gap-2">
       {['suggested', 'viewed'].includes(suggestion.status) ? <Button variant="secondary" disabled={busy || suggestion.presentationExpired} onClick={() => void command(suggestion, 'accepted')}><Check className="size-4" />Accept</Button> : null}
-      {['suggested', 'viewed', 'accepted'].includes(suggestion.status) ? <Button disabled={busy || suggestion.presentationExpired} onClick={() => void command(suggestion, 'start', { assistance_mode: 'none', contributions: [] })}><Play className="size-4" />Start actual work</Button> : null}
+      {['suggested', 'viewed', 'accepted'].includes(suggestion.status) && suggestion.presentation.candidateType !== 'assessment' ? <Button disabled={busy || suggestion.presentationExpired} onClick={() => void command(suggestion, 'start', { assistance_mode: 'none', contributions: [] })}><Play className="size-4" />Start actual work</Button> : null}
       {suggestion.status === 'started' && sessionId && sessionIsActive ? <Link className="button-primary" to={paths.activity}>Open and continue Session</Link> : null}
-      {suggestion.status === 'started' && sessionId && sessionIsFinal && session?.outcome === 'completed' ? <Button disabled={busy} onClick={() => void command(suggestion, 'completed', { session_id: sessionId })}>Complete from finalized Session</Button> : null}
-      {suggestion.status === 'started' && sessionId && sessionIsFinal && ['completed', 'partial', 'blocked'].includes(session?.outcome ?? '') ? <Button variant="secondary" disabled={busy} onClick={() => void command(suggestion, 'partially-completed', { session_id: sessionId })}>Record partial outcome</Button> : null}
+      {suggestion.presentation.candidateType !== 'assessment' && suggestion.status === 'started' && sessionId && sessionIsFinal && session?.outcome === 'completed' ? <Button disabled={busy} onClick={() => void command(suggestion, 'completed', { session_id: sessionId })}>Complete from finalized Session</Button> : null}
+      {suggestion.presentation.candidateType !== 'assessment' && suggestion.status === 'started' && sessionId && sessionIsFinal && ['completed', 'partial', 'blocked'].includes(session?.outcome ?? '') ? <Button variant="secondary" disabled={busy} onClick={() => void command(suggestion, 'partially-completed', { session_id: sessionId })}>Record partial outcome</Button> : null}
       {suggestion.status === 'started' && sessionId && !sessionIsActive && !sessionIsFinal ? <Link className="button-secondary" to={paths.activity}>Review Session state</Link> : null}
       {['suggested', 'viewed', 'accepted'].includes(suggestion.status) ? <Button variant="secondary" disabled={busy || suggestion.presentationExpired} onClick={() => void command(suggestion, 'skipped', { reason_code: 'user_skipped' })}><SkipForward className="size-4" />Skip without debt</Button> : null}
       <Link className="button-secondary" to={handoff}>Do something else</Link>
       {suggestion.interactions.length && !suggestion.interactions.at(-1)?.correction ? <Button variant="quiet" disabled={busy} onClick={() => void correct(suggestion)}>Correct latest status</Button> : null}
     </div> : null}
+    {suggestion.presentation.candidateType === 'assessment' ? <AssessmentFlow suggestion={suggestion} command={command} /> : null}
     {suggestion.presentationExpired ? <p className="mt-3 text-sm text-ink/65">This presentation expired. Expiry creates no debt, completion, or Evidence.</p> : null}
     {suggestion.activityRelations.length ? <AuditDisclosure label="Active Activity relations"><ul className="space-y-2">{suggestion.activityRelations.map((relation) => <li key={relation.id}>{label(relation.type)} Activity · append-only corrections remain in Today audit history</li>)}</ul></AuditDisclosure> : null}
   </article>
+}
+
+const assessmentAssistance = ['none', 'docs_only', 'ai_hint', 'ai_assisted', 'agent_led']
+function AssessmentFlow({ suggestion, command }: { suggestion: TodaySuggestion; command: (suggestion: TodaySuggestion, action: string, body?: object) => Promise<boolean> }) {
+  const [open, setOpen] = useState(false)
+  const [options, setOptions] = useState<AssessmentTask[]>([])
+  const [selected, setSelected] = useState('')
+  const [assistance, setAssistance] = useState('')
+  const [execution, setExecution] = useState<AssessmentExecution | null>(null)
+  const [legacy, setLegacy] = useState<LegacyAssessment | null>(null)
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  const startable = (['suggested', 'viewed', 'accepted'].includes(suggestion.status) && !suggestion.presentationExpired) || Boolean(legacy)
+  const chosen = options.find((item) => `${item.unitDefinitionId}:${item.opportunityId}` === selected)
+
+  useEffect(() => {
+    if (!suggestion.interactions.some((item) => item.type === 'started')) return
+    let cancelled = false
+    void apiV2<AssessmentExecution | LegacyAssessment>(`/assessment-executions/by-suggestion/${suggestion.id}`).then((item) => {
+      if (cancelled) return
+      if ('kind' in item && item.kind === 'legacy_started') { setLegacy(item); setExecution(null) }
+      else { setExecution(item as AssessmentExecution); setLegacy(null) }
+      setError('')
+    }).catch((caught) => { if (!cancelled) setError(caught instanceof Error ? caught.message : 'Assessment execution could not be loaded.') })
+    return () => { cancelled = true }
+  }, [suggestion.id, suggestion.interactions])
+
+  const loadOptions = async () => {
+    if (open) { setOpen(false); return }
+    setBusy(true); setError('')
+    try {
+      const response = await apiV2<{ items: AssessmentTask[] }>(`/today/suggestions/${suggestion.id}/assessment-options`)
+      setOptions(response.items)
+      setSelected(response.items[0] ? `${response.items[0].unitDefinitionId}:${response.items[0].opportunityId}` : '')
+      setOpen(true)
+    } catch (caught) { setError(caught instanceof Error ? caught.message : 'Assessment tasks could not be loaded.') }
+    finally { setBusy(false) }
+  }
+  const start = async () => {
+    if (!chosen || !assistance) return
+    setBusy(true)
+    const action = legacy ? 'restart-legacy-assessment' : 'start'
+    const succeeded = await command(suggestion, action, { assistance_mode: assistance, contributions: [], assessment_unit_definition_id: chosen.unitDefinitionId, assessment_opportunity_id: chosen.opportunityId })
+    if (succeeded) { setOpen(false); setLegacy(null) }
+    setBusy(false)
+  }
+
+  return <section className="mt-4 rounded-xl border border-moss/25 bg-moss/5 p-4" aria-label="Assessment execution">
+    {error ? <MutationError>{error}</MutationError> : null}
+    {legacy ? <div className="mb-4 rounded-xl bg-white p-4"><p className="font-semibold">Earlier assessment has no task binding</p><p className="mt-2 text-sm">{legacy.message}</p><p className="mt-2 text-sm">Session {legacy.sessionId} remains actual work history. Finish or cancel it before starting another timed Session. The new attempt creates a distinct Activity, Session, and assessment execution.</p></div> : null}
+    {startable ? <><Button disabled={busy} onClick={() => void loadOptions()}>{open ? 'Close assessment task choices' : legacy ? 'Start new reviewed assessment attempt' : 'Choose assessment task and start'}</Button>
+      {open ? <div className="mt-4 space-y-4"><p className="text-sm">Choose an eligible authored task. Each task can assess only its listed criteria.</p>{options.length ? <>
+        <label className="block text-sm font-medium">Authored task<select className="mt-1 block w-full rounded-xl border border-ink/15 bg-white p-2" value={selected} onChange={(event) => setSelected(event.target.value)}>{options.map((item) => <option key={`${item.unitDefinitionId}:${item.opportunityId}`} value={`${item.unitDefinitionId}:${item.opportunityId}`}>{item.unitTitle}</option>)}</select></label>
+        {chosen ? <div className="rounded-xl bg-white p-3"><p className="font-semibold">{chosen.unitTitle}</p><p className="mt-2 whitespace-pre-wrap text-sm">{chosen.action.instructions ?? chosen.action.verificationMethod}</p><p className="mt-2 text-xs">Covered: {chosen.criteria.map((item) => item.criterionStableKey).join(', ')} · {chosen.requiresArtifact ? 'Actual artifact required' : 'Captured task output required for Medium confidence'}</p></div> : null}
+        <label className="block text-sm font-medium">Actual assistance<select className="mt-1 block w-full rounded-xl border border-ink/15 bg-white p-2" value={assistance} onChange={(event) => setAssistance(event.target.value)}><option value="">Select assistance used</option>{assessmentAssistance.map((mode) => <option key={mode} value={mode}>{label(mode)}</option>)}</select></label>
+        <Button disabled={!chosen || !assistance || busy} onClick={() => void start()}><Play className="size-4" />Start actual assessment work</Button>
+      </> : <p className="text-sm">No authored assessment task is eligible now. Starting is unavailable; no Activity or Session was created. {legacy ? 'Refresh Analysis and regenerate Today explicitly for a current assessment suggestion.' : ''}</p>}</div> : null}</> : null}
+    {execution ? <div className="mt-4 space-y-3"><div className="rounded-xl bg-white p-3"><h3 className="font-semibold">Actual task: {execution.task.unitTitle}</h3><p className="mt-2 whitespace-pre-wrap text-sm">{execution.task.action.instructions ?? execution.task.action.verificationMethod}</p><p className="mt-2 text-xs">Session {label(execution.sessionState)} · assistance {label(execution.assistanceMode)} · {execution.task.requiresArtifact ? 'artifact required' : 'artifact optional for review'}</p></div>
+      <p className="text-sm">{execution.reviewRequired ? 'Assessment awaits review. Session completion alone does not establish capability.' : 'Assessment reviewed. Earlier reviews remain in history.'}</p>
+      <Link className="button-primary" to={paths.assessmentExecution(execution.id)}>{execution.reviewRequired ? 'Review assessment' : 'Open assessment result and corrections'}</Link>
+      {suggestion.status === 'started' && !execution.reviewRequired && execution.sessionState === 'completed' && ['completed', 'partial'].includes(execution.sessionOutcome ?? '') ? <Button variant="secondary" disabled={busy} onClick={() => void command(suggestion, execution.sessionOutcome === 'completed' ? 'completed' : 'partially-completed', { session_id: execution.sessionId })}>Complete reviewed Today assessment</Button> : null}
+    </div> : null}
+  </section>
 }

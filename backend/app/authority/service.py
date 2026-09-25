@@ -208,7 +208,7 @@ def readiness_report(db: Session) -> dict[str, Any]:
         },
         {
             "code": "PORTABLE_SCHEMA_V10",
-            "ready": PORTABLE_SCHEMA_CURRENT == 10,
+            "ready": PORTABLE_SCHEMA_CURRENT >= 10,
             "detail": PORTABLE_SCHEMA_CURRENT,
         },
         {

@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
+from app.assessment.service import assessment_task_options
 from app.auth import AuthContext, get_auth_context, require_csrf
 from app.database import get_db
 from app.errors import AppError
@@ -33,6 +34,7 @@ from app.today.service import (
     link_activity,
     record_interaction,
     replace_suggestion,
+    restart_legacy_assessment,
     start_suggestion,
     suggestion_detail,
     today_history,
@@ -57,6 +59,15 @@ def _suggestion_response(db: Session, suggestion_id: str) -> dict[str, Any]:
     suggestion = db.get(TodaySuggestion, suggestion_id)
     assert suggestion is not None
     return suggestion_detail(db, suggestion, now_ms=utc_now_ms())
+
+
+@router.get("/suggestions/{suggestion_id}/assessment-options")
+async def get_assessment_options(
+    suggestion_id: str,
+    _auth: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    return {"items": assessment_task_options(db, suggestion_id)}
 
 
 @router.get("/current")
@@ -191,7 +202,44 @@ async def start_today_suggestion(
         assistance_mode=payload.assistance_mode,
         notes=payload.notes,
         contributions=payload.contributions,
+        assessment_unit_definition_id=payload.assessment_unit_definition_id,
+        assessment_opportunity_id=payload.assessment_opportunity_id,
     )
+    _commit_or_conflict(db)
+    return _suggestion_response(db, suggestion_id)
+
+
+@router.post("/suggestions/{suggestion_id}/restart-legacy-assessment", status_code=201)
+async def restart_earlier_assessment(
+    suggestion_id: str,
+    payload: TodayStartRequest,
+    _auth: AuthContext = Depends(require_csrf),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    if (
+        payload.contributions
+        or payload.assistance_mode is None
+        or not payload.assessment_unit_definition_id
+        or not payload.assessment_opportunity_id
+    ):
+        raise AppError(
+            422,
+            "ASSESSMENT_START_INCOMPLETE",
+            "Select an eligible authored task and explicit assistance for the new attempt.",
+        )
+    try:
+        restart_legacy_assessment(
+            db,
+            suggestion_id=suggestion_id,
+            idempotency_key=payload.idempotency_key,
+            assistance_mode=payload.assistance_mode,
+            notes=payload.notes,
+            assessment_unit_definition_id=payload.assessment_unit_definition_id,
+            assessment_opportunity_id=payload.assessment_opportunity_id,
+        )
+    except Exception:
+        db.rollback()
+        raise
     _commit_or_conflict(db)
     return _suggestion_response(db, suggestion_id)
 

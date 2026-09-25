@@ -43,9 +43,11 @@ class TodayInteractionRequest(StrictModel):
 
 class TodayStartRequest(StrictModel):
     idempotency_key: str = Field(min_length=8, max_length=128)
-    assistance_mode: AssistanceMode = "none"
+    assistance_mode: AssistanceMode | None = None
     notes: str | None = Field(default=None, max_length=4000)
     contributions: list[SessionContributionCreate] = Field(default_factory=list)
+    assessment_unit_definition_id: str | None = Field(default=None, max_length=36)
+    assessment_opportunity_id: str | None = Field(default=None, max_length=36)
 
 
 class TodayCompletionRequest(StrictModel):

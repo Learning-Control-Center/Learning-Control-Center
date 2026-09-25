@@ -7,7 +7,10 @@ from typing import Any
 
 import pytest
 from app.import_export import PORTABLE_BY_TABLE
-from app.portability.registry import PORTABLE_V10_MASTER_IMPORT_TABLES
+from app.portability.registry import (
+    PORTABLE_V10_MASTER_IMPORT_TABLES,
+    PORTABLE_V11_ASSESSMENT_TABLES,
+)
 from app.schemas import (
     CompetencyInput,
     ExitCriterionInput,
@@ -101,7 +104,7 @@ async def test_documented_empty_portable_package_passes_inspect_and_apply(
     client, csrf = authenticated_client
     package = _json_after_heading("Historical V9 representative empty portable package")
     assert set(package["payload"]["tables"]) == set(PORTABLE_BY_TABLE) - set(
-        PORTABLE_V10_MASTER_IMPORT_TABLES
+        PORTABLE_V10_MASTER_IMPORT_TABLES | PORTABLE_V11_ASSESSMENT_TABLES
     )
     inspection = await client.post(
         "/api/v1/import-export/import/inspect",

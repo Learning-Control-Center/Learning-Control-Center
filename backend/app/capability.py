@@ -165,8 +165,15 @@ def _active_evidence_facts(db: Session, competency_id: str, cutoff_at: int) -> l
         ):
             continue
         provenance = json.loads(evidence.provenance_json)
+        assessment_session_id = (
+            provenance.get("assessment_occurrence_session_id")
+            if evidence.source_type == "assessment_review"
+            else None
+        )
         occurrence_key = (
-            f"artifact:{evidence.artifact_hash}"
+            f"assessment-session:{assessment_session_id}"
+            if assessment_session_id
+            else f"artifact:{evidence.artifact_hash}"
             if evidence.artifact_hash
             else f"source:{evidence.source_type}:{evidence.source_id}:{evidence.occurred_at}"
         )

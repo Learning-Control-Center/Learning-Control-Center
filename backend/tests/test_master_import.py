@@ -1355,7 +1355,7 @@ async def test_master_successor_cannot_omit_an_owned_root(
     assert db.scalar(select(func.count()).select_from(MasterImportRevision)) == 1
 
 
-async def test_portable_v10_preserves_master_ledger(
+async def test_portable_v11_preserves_master_ledger(
     authenticated_client: tuple[AsyncClient, str],
     db: Session,
 ) -> None:
@@ -1365,9 +1365,9 @@ async def test_portable_v10_preserves_master_ledger(
     portable = _portable_payload(db)
     assert portable["tables"]["master_import_revisions"]
     assert portable["tables"]["master_import_owned_keys"]
-    tables, _ = _validate_portable_payload(portable, "master-ledger-v10", 10)
+    tables, _ = _validate_portable_payload(portable, "master-ledger-v11", 11)
     assert len(tables["master_import_revisions"]) == 1
-    _apply_portable_restore(db, portable, True, package_id="master-ledger-v10", schema_version=10)
+    _apply_portable_restore(db, portable, True, package_id="master-ledger-v11", schema_version=11)
     db.commit()
     validate_domain_integrity(db)
     assert db.scalar(select(func.count()).select_from(MasterImportRevision)) == 1

@@ -31,6 +31,11 @@ been exercised remain explicitly `Not executed`; see the [product QA record](doc
 - Connects Curriculum and Projects to the competencies they can develop or demonstrate.
 - Records Activities and exact-duration Sessions, including refresh-safe timers.
 - Preserves Evidence, verification, capability history, and correction lineage.
+- Lets an authored Today assessment start an actual task and Session, then records reviewed,
+  criterion-scoped Evidence with explicit assistance and artifact provenance. Completing a Session
+  alone does not establish capability.
+- Describes assessment task eligibility, first-party review, and corrections in the
+  [assessment execution contract](docs/ASSESSMENT_EXECUTION.md).
 - Produces deterministic Analysis, Recommendations, Today suggestions, and historical reports.
 - Explains why recommendations were selected and keeps advisory choices separate from actual work.
 - Supports validated import previews, transactional apply, portable export, operational backup,

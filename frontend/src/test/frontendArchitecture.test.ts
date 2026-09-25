@@ -15,6 +15,7 @@ const v2Pages = [
 
 const appFeatureEntries = new Set([
   'features/activity/index.ts',
+  'features/assessment/index.ts',
   'features/data-transfer/index.ts',
   'features/insights/analysis.ts',
   'features/insights/landing.ts',

@@ -28,6 +28,9 @@ PORTABLE_DOMAIN_TABLES: dict[str, frozenset[str]] = {
     # portable table is intentionally assigned exactly once so category totals do
     # not double count rows.
     "masterImport": frozenset({"master_import_revisions", "master_import_owned_keys"}),
+    "assessment": frozenset(
+        {"assessment_executions", "assessment_artifacts", "assessment_reviews"}
+    ),
     "targetProfiles": frozenset(
         {
             "target_profiles",

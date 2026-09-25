@@ -7,6 +7,7 @@ from typing import Any, cast
 import pytest
 from app.capability import (
     EvidenceFact,
+    _active_evidence_facts,
     _candidate_level,
     _evaluate_criterion,
     _freshness_thresholds,
@@ -262,10 +263,13 @@ def _persist_fact(
     strength: str = "moderate",
     occurred_at: int,
     context: str,
+    source_type: str = "capability_test",
+    occurrence_session_id: str | None = None,
+    artifact_hash: str | None = None,
 ) -> Evidence:
     evidence = Evidence(
         evidence_type="assessment",
-        source_type="capability_test",
+        source_type=source_type,
         source_id=key,
         source_role="fact",
         title=key,
@@ -278,15 +282,21 @@ def _persist_fact(
             {
                 "origin_kind": "local",
                 "creator_kind": "test",
-                "source_record_type": "capability_test",
+                "source_record_type": source_type,
                 "source_record_id": key,
                 "capture_method": "test_fixture",
                 "policy_version": "evidence-policy/v1",
                 "context_id": context,
+                **(
+                    {"assessment_occurrence_session_id": occurrence_session_id}
+                    if occurrence_session_id is not None
+                    else {}
+                ),
             }
         ),
         policy_version="evidence-policy/v1",
         schema_version=1,
+        artifact_hash=artifact_hash,
         authoritative_for_downgrade=False,
     )
     db.add(evidence)
@@ -317,6 +327,43 @@ def _persist_fact(
     )
     db.flush()
     return evidence
+
+
+async def test_assessment_session_is_primary_occurrence_despite_multiple_artifacts(
+    configured_client: tuple[AsyncClient, str, dict[str, object]], db: Session
+) -> None:
+    client, csrf, raw_roadmap = configured_client
+    roadmap = cast(dict[str, Any], raw_roadmap)
+    competency_id = str(roadmap["phases"][0]["tracks"][0]["competencies"][0]["identityId"])
+    _definition_id, criterion_id = await _activate_definition(client, csrf, competency_id)
+    criterion = db.get(CriterionDefinition, criterion_id)
+    assert criterion is not None
+    now = utc_now_ms() - 1_000
+    for index, session_id in enumerate(
+        ("actual-session-one", "actual-session-one", "actual-session-two")
+    ):
+        _persist_fact(
+            db,
+            key=f"assessment-occurrence-{index}",
+            competency_id=competency_id,
+            criterion=criterion,
+            occurred_at=now + index,
+            context=session_id,
+            source_type="assessment_review",
+            occurrence_session_id=session_id,
+            artifact_hash=f"{index + 1:064x}",
+        )
+    db.flush()
+    facts = [
+        item
+        for item in _active_evidence_facts(db, competency_id, utc_now_ms() + 1)
+        if item.link.criterion_definition_id == criterion_id
+    ]
+    assert len(facts) == 3
+    assert facts[0].occurrence_key == facts[1].occurrence_key
+    assert facts[2].occurrence_key != facts[0].occurrence_key
+    assert _support_qualifies("independent_performance", facts[:2], criterion)[0] is False
+    assert _support_qualifies("independent_performance", facts, criterion)[0] is True
 
 
 async def test_capability_promotion_confidence_freshness_and_downgrade_hysteresis(
@@ -567,7 +614,7 @@ async def test_explicit_authoritative_reassessment_downgrades_and_drains(
         "capability-policy/v999"
     )
     with pytest.raises(AppError, match="Capability evaluation hashes or facts"):
-        _validate_portable_payload(invalid_policy, "capability-policy-tampered", schema_version=10)
+        _validate_portable_payload(invalid_policy, "capability-policy-tampered", schema_version=11)
     invalid_event = copy.deepcopy(portable)
     authoritative_event = next(
         row
@@ -576,12 +623,12 @@ async def test_explicit_authoritative_reassessment_downgrades_and_drains(
     )
     authoritative_event["new_confidence"] = "high"
     with pytest.raises(AppError, match="Capability or review event history"):
-        _validate_portable_payload(invalid_event, "capability-event-tampered", schema_version=10)
+        _validate_portable_payload(invalid_event, "capability-event-tampered", schema_version=11)
     invalid_checkpoint = copy.deepcopy(portable)
     invalid_checkpoint["capabilityProjectionCheckpoints"][0]["outputHash"] = "0" * 64
     with pytest.raises(AppError, match="checkpoint is disconnected"):
         _validate_portable_payload(
-            invalid_checkpoint, "capability-checkpoint-tampered", schema_version=10
+            invalid_checkpoint, "capability-checkpoint-tampered", schema_version=11
         )
 
 
